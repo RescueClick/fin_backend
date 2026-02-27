@@ -171,28 +171,35 @@ router.post(
           role: ROLES.PARTNER,
           rmId: req.user.sub,
         }).lean();
-        const perPartnerTarget = rmTargetDoc.targetValue / partners.length;
 
-        for (let p of partners) {
-          let pT = await Target.findOne({
-            assignedTo: p._id,
-            role: ROLES.PARTNER,
-            month,
-            year,
-          });
+        const rawTargetValue = Number(rmTargetDoc.targetValue);
+        const partnerCount = partners.length;
 
-          if (pT) {
-            pT.targetValue = perPartnerTarget; // redistribute equally
-            await pT.save();
-          } else {
-            pT = await Target.create({
-              assignedBy: rmTargetDoc.assignedBy,
+        // Avoid NaN/Infinity: only redistribute when we have a valid, positive target and at least one partner
+        if (partnerCount > 0 && Number.isFinite(rawTargetValue) && rawTargetValue > 0) {
+          const perPartnerTarget = rawTargetValue / partnerCount;
+
+          for (let p of partners) {
+            let pT = await Target.findOne({
               assignedTo: p._id,
               role: ROLES.PARTNER,
               month,
               year,
-              targetValue: perPartnerTarget,
             });
+
+            if (pT) {
+              pT.targetValue = perPartnerTarget; // redistribute equally
+              await pT.save();
+            } else {
+              pT = await Target.create({
+                assignedBy: rmTargetDoc.assignedBy,
+                assignedTo: p._id,
+                role: ROLES.PARTNER,
+                month,
+                year,
+                targetValue: perPartnerTarget,
+              });
+            }
           }
         }
       }
