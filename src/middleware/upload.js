@@ -23,15 +23,24 @@ const storage = multerS3({
 });
 
 const fileFilter = (req, file, cb) => {
-  console.log('File filter check:', {
+  console.log("File filter check:", {
     mimetype: file.mimetype,
     originalname: file.originalname,
     fieldname: file.fieldname,
   });
-  
-  if (allowedMimeTypes.includes(file.mimetype)) {
+
+  const ext = (path.extname(file.originalname) || "").toLowerCase();
+  const allowedExts = [".jpg", ".jpeg", ".png", ".pdf"];
+
+  const isAllowedMime = allowedMimeTypes.includes(file.mimetype);
+  const isOctetStreamWithValidExt =
+    file.mimetype === "application/octet-stream" &&
+    allowedExts.includes(ext);
+
+  if (isAllowedMime || isOctetStreamWithValidExt) {
     return cb(null, true);
   }
+
   return cb(new Error("Only JPG, PNG, and PDF files are allowed"), false);
 };
 
