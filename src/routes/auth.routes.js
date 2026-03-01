@@ -133,38 +133,85 @@ router.post(
   async (req, res) => {
     try {
       const { userId } = req.params;
+      const currentUserRole = req.user.role;
+      const currentUserId = req.user.sub;
 
       // Find the user to impersonate
-      const user = await User.findById(userId);
-      if (!user) return res.status(404).json({ message: "User not found" });
-      if (user.status !== "ACTIVE")
+      const targetUser = await User.findById(userId);
+      if (!targetUser) return res.status(404).json({ message: "User not found" });
+      if (targetUser.status !== "ACTIVE")
         return res
           .status(403)
           .json({ message: "Cannot login as inactive user" });
 
-      // Issue token for the target user
+      // Enforce hierarchy: SUPER_ADMIN > ASM > RM > PARTNER
+      const roleHierarchy = {
+        [ROLES.SUPER_ADMIN]: [ROLES.ASM, ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
+        [ROLES.ASM]: [ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
+        [ROLES.RM]: [ROLES.PARTNER, ROLES.CUSTOMER],
+      };
+
+      const allowedRoles = roleHierarchy[currentUserRole];
+      if (!allowedRoles || !allowedRoles.includes(targetUser.role)) {
+        return res.status(403).json({ 
+          message: `You cannot login as ${targetUser.role}. Only ${allowedRoles?.join(", ") || "none"} roles are allowed.` 
+        });
+      }
+
+      // Additional hierarchy check: Verify parent-child relationship
+      if (currentUserRole === ROLES.ASM) {
+        // ASM can only login as their own RMs or RMs' partners
+        if (targetUser.role === ROLES.RM && targetUser.asmId?.toString() !== currentUserId) {
+          return res.status(403).json({ message: "You can only login as RMs assigned to you" });
+        }
+        if (targetUser.role === ROLES.PARTNER) {
+          const rm = await User.findById(targetUser.rmId);
+          if (!rm || rm.asmId?.toString() !== currentUserId) {
+            return res.status(403).json({ message: "You can only login as partners under your RMs" });
+          }
+        }
+      } else if (currentUserRole === ROLES.RM) {
+        // RM can only login as their own partners
+        if (targetUser.role === ROLES.PARTNER && targetUser.rmId?.toString() !== currentUserId) {
+          return res.status(403).json({ message: "You can only login as partners assigned to you" });
+        }
+      }
+
+      // Get current user info for parent tracking
+      const currentUser = await User.findById(currentUserId).select("firstName lastName email role");
+
+      // Issue token for the target user with parent info
       const token = signAccessToken({
-        sub: String(user._id),
-        role: user.role,
-        rmId: user.rmId ? String(user.rmId) : undefined,
-        asmId: user.asmId ? String(user.asmId) : undefined,
-        partnerId: user.partnerId ? String(user.partnerId) : undefined,
-        impersonatedBy: req.user.sub, // optional: track who did this
+        sub: String(targetUser._id),
+        role: targetUser.role,
+        rmId: targetUser.rmId ? String(targetUser.rmId) : undefined,
+        asmId: targetUser.asmId ? String(targetUser.asmId) : undefined,
+        partnerId: targetUser.partnerId ? String(targetUser.partnerId) : undefined,
+        impersonatedBy: currentUserId, // Parent user ID
+        parentRole: currentUserRole, // Parent role
       });
 
       return res.json({
-        message: `Logged in as ${user.role} successfully`,
+        message: `Logged in as ${targetUser.role} successfully`,
         token,
         user: {
-          id: user._id,
-          firstName: user.firstName,
-          lastName: user.lastName,
-          email: user.email,
-          role: user.role,
-          asmId: user.asmId,
-          rmId: user.rmId,
-          partnerId: user.partnerId,
-          partnerCode: user.partnerCode,
+          id: targetUser._id,
+          firstName: targetUser.firstName,
+          lastName: targetUser.lastName,
+          email: targetUser.email,
+          role: targetUser.role,
+          asmId: targetUser.asmId,
+          rmId: targetUser.rmId,
+          partnerId: targetUser.partnerId,
+          partnerCode: targetUser.partnerCode,
+          employeeId: targetUser.employeeId,
+        },
+        parent: {
+          id: currentUser._id,
+          firstName: currentUser.firstName,
+          lastName: currentUser.lastName,
+          email: currentUser.email,
+          role: currentUser.role,
         },
       });
     } catch (err) {
