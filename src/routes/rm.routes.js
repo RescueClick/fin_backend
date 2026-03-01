@@ -19,6 +19,7 @@ import { upload } from "../middleware/upload.js";
 import { FollowUp } from "../models/followUp.js";
 import dayjs from "dayjs";
 import { sendMail } from "../utils/sendMail.js";
+import { sendApplicationStatusEmail, sendDocumentStatusEmail } from "../utils/emailService.js";
 import axios from "axios";
 import { emitDocumentStatusChanged, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
 
@@ -705,43 +706,32 @@ router.post(
         stageHistory: app.stageHistory,
       });
 
-      // 📧 Send email asynchronously (non-blocking)
+      // 📧 Send email asynchronously (non-blocking) using professional email service
       setImmediate(async () => {
         try {
-          let extraInfo = "";
-
-          switch (to) {
-            case "DISBURSED":
-              extraInfo = `<p><b>Approved Loan Amount:</b> ₹${app.approvedLoanAmount}</p>`;
-              break;
-            case "AGREEMENT":
-              extraInfo = `<p><b>Next Step:</b> Please review and sign your loan agreement.</p>`;
-              break;
-            case "APPROVED":
-              extraInfo = `<p>Your loan application has been approved. 🎉</p>`;
-              break;
-            case "REJECTED":
-              extraInfo = `<p>Unfortunately, your loan application has been rejected. You may reapply after 3 months.</p>`;
-              break;
-            default:
-              extraInfo = `<p>Status updated successfully.</p>`;
+          if (app.customerId && app.customerId.email) {
+            const customerData = {
+              firstName: app.customerId.firstName || app.customer?.firstName || "Customer",
+              email: app.customerId.email,
+            };
+            const applicationData = {
+              appNo: app.appNo,
+              loanType: app.loanType,
+              status: app.status,
+              approvedLoanAmount: app.approvedLoanAmount,
+            };
+            const emailSent = await sendApplicationStatusEmail(
+              customerData,
+              applicationData,
+              from,
+              to
+            );
+            if (emailSent) {
+              console.log(`✅ Application status email sent to: ${customerData.email}`);
+            }
           }
-
-          await sendMail({
-            to: app.customerId.email,
-            subject: `Loan Application Status: ${to}`,
-            html: `
-              <p>Dear ${app.customerId.firstName || "Customer"},</p>
-              <p>Your loan application status has been updated.</p>
-              <p><b>New Status:</b> ${to}</p>
-              ${note ? `<p><b>Remarks:</b> ${note}</p>` : ""}
-              ${extraInfo}
-              <br/>
-              <p>Thank you,<br/>Trustline Fintech</p>
-            `,
-          });
         } catch (mailErr) {
-          console.error("Failed to send status email:", mailErr.message);
+          console.error("❌ Failed to send status email:", mailErr.message);
         }
       });
     } catch (e) {
@@ -1881,34 +1871,59 @@ router.put(
         allDocumentsVerified: app.docs.every(doc => doc.status === "VERIFIED"),
       });
 
-      // Send email notification asynchronously (non-blocking)
+      // Send email notification asynchronously (non-blocking) - notify partner about document status
       setImmediate(async () => {
         try {
           const partner = await User.findById(app.partnerId).lean();
-          if (partner && partner.email) {
-            const statusMessage = status === "REJECTED" 
-              ? "has been REJECTED and needs to be re-uploaded"
-              : status === "VERIFIED"
-              ? "has been VERIFIED"
-              : status === "UPDATED"
-              ? "has been marked as UPDATED and is under review"
-              : "status has been updated to PENDING";
+          const customer = await User.findById(app.customerId).lean();
+          
+          if (partner && partner.email && customer) {
+            // Send to customer using professional email service
+            const emailSent = await sendDocumentStatusEmail(
+              {
+                firstName: customer.firstName || app.customer?.firstName || "Customer",
+                email: customer.email || app.customer?.email,
+              },
+              {
+                appNo: app.appNo,
+                loanType: app.loanType,
+              },
+              decodedDocType,
+              status
+            );
+            if (emailSent) {
+              console.log(`✅ Document status email sent to customer: ${customer.email}`);
+            }
             
-            await sendMail({
-              to: partner.email,
-              subject: `Document Status Update - ${decodedDocType}`,
-              html: `
-                <p>Dear ${partner.firstName || "Partner"},</p>
-                <p>The document <strong>${decodedDocType}</strong> for application <strong>${app.appNo}</strong> ${statusMessage}.</p>
-                ${remarks ? `<p><b>Remarks from RM:</b> ${remarks}</p>` : ""}
-                ${status === "REJECTED" ? `<p>Please re-upload this document through the application form.</p>` : ""}
-                <br/>
-                <p>Thank you,<br/>Trustline Fintech</p>
-              `,
-            });
+            // Also notify partner about document status change
+            try {
+              const statusMessage = status === "REJECTED" 
+                ? "has been REJECTED and needs to be re-uploaded"
+                : status === "VERIFIED"
+                ? "has been VERIFIED"
+                : status === "UPDATED"
+                ? "has been marked as UPDATED and is under review"
+                : "status has been updated to PENDING";
+              
+              await sendMail({
+                to: partner.email,
+                subject: `Document Status Update - ${decodedDocType}`,
+                html: `
+                  <h2>Dear ${partner.firstName || "Partner"},</h2>
+                  <p>The document <strong>${decodedDocType}</strong> for application <strong>${app.appNo}</strong> ${statusMessage}.</p>
+                  ${remarks ? `<p><b>Remarks from RM:</b> ${remarks}</p>` : ""}
+                  ${status === "REJECTED" ? `<p>Please re-upload this document through the application form.</p>` : ""}
+                  <br/>
+                  <p>Thank you,<br/>Trustline Fintech</p>
+                `,
+              });
+              console.log(`✅ Document status notification sent to partner: ${partner.email}`);
+            } catch (partnerMailErr) {
+              console.error("❌ Failed to send partner notification:", partnerMailErr.message);
+            }
           }
         } catch (mailErr) {
-          console.error("Failed to send email notification:", mailErr.message);
+          console.error("❌ Failed to send document status email:", mailErr.message);
           // Don't fail the request if email fails
         }
       });

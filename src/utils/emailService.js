@@ -5,47 +5,226 @@ import { sendMail } from "./sendMail.js";
  * Email templates and service functions for all main workflows
  */
 
-// Base email template wrapper
+// Base email template wrapper with professional header and footer
 const getEmailTemplate = (title, content, footerText = "Trustline Fintech Team") => {
+  // Trustline Logo SVG (Teal T logo)
+  const logoSVG = `
+    <svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
+      <path d="M30 5 L50 5 L50 15 L40 15 L40 50 L35 50 L35 55 L25 55 L25 50 L20 50 L20 15 L10 15 L10 5 Z" 
+            fill="#12B99C" stroke="#12B99C" stroke-width="2"/>
+      <path d="M35 15 L35 20 L25 20 L25 15 Z" fill="#12B99C"/>
+    </svg>
+  `;
+
+  // Base64 encoded logo (simplified T logo in teal)
+  const logoBase64 = "data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjAiIGhlaWdodD0iNjAiIHZpZXdCb3g9IjAgMCA2MCA2MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMzAgNSBMNTAgNSBMNTAgMTUgTDQwIDE1IEw0MCA1MCBMMzUgNTAgTDM1IDU1IEwyNSA1NSBMMjUgNTAgTDIwIDUwIEwyMCAxNSBMMTAgMTUgTDEwIDUgWiIgZmlsbD0iIzEyQjk5QyIgc3Ryb2tlPSIjMTJCOTlDIiBzdHJva2Utd2lkdGg9IjIiLz48L3N2Zz4=";
+
   return `
     <!DOCTYPE html>
     <html>
     <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 0; }
-        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-        .header { background: linear-gradient(135deg, #12B99C 0%, #0d9488 100%); color: white; padding: 30px; text-align: center; border-radius: 10px 10px 0 0; }
-        .content { background: #f9fafb; padding: 30px; border-radius: 0 0 10px 10px; }
-        .info-box { background: white; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #12B99C; }
-        .info-row { margin: 10px 0; }
-        .label { font-weight: bold; color: #374151; }
-        .value { color: #111827; }
-        .button { display: inline-block; background: #12B99C; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; margin: 20px 0; }
-        .footer { text-align: center; margin-top: 30px; color: #6b7280; font-size: 12px; }
-        .status-badge { display: inline-block; padding: 5px 15px; border-radius: 20px; font-weight: bold; margin: 10px 0; }
+        body { 
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; 
+          line-height: 1.6; 
+          color: #333; 
+          margin: 0; 
+          padding: 0; 
+          background-color: #f5f5f5;
+        }
+        .email-wrapper { 
+          max-width: 600px; 
+          margin: 0 auto; 
+          background-color: #ffffff;
+        }
+        .header { 
+          background: linear-gradient(135deg, #12B99C 0%, #0d9488 100%); 
+          color: white; 
+          padding: 24px 20px; 
+          text-align: center; 
+        }
+        .company-name {
+          font-size: 24px;
+          font-weight: bold;
+          margin: 0 0 4px;
+          letter-spacing: 0.5px;
+        }
+        .company-tagline {
+          font-size: 13px;
+          opacity: 0.95;
+          font-weight: 300;
+          margin: 0;
+        }
+        .content { 
+          background: #ffffff; 
+          padding: 24px 20px; 
+        }
+        .content-title {
+          font-size: 22px;
+          font-weight: 600;
+          color: #12B99C;
+          margin: 0 0 16px;
+          text-align: center;
+        }
+        .info-box { 
+          background: #f9fafb; 
+          padding: 16px; 
+          border-radius: 6px; 
+          margin: 16px 0; 
+          border-left: 4px solid #12B99C; 
+        }
+        .info-row { 
+          margin: 8px 0; 
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+        }
+        .label { 
+          font-weight: 600; 
+          color: #374151; 
+          min-width: 120px;
+        }
+        .value { 
+          color: #111827; 
+          flex: 1;
+          text-align: right;
+        }
+        .button { 
+          display: inline-block; 
+          background: #12B99C; 
+          color: white; 
+          padding: 12px 24px; 
+          text-decoration: none; 
+          border-radius: 6px; 
+          margin: 16px 0; 
+          font-weight: 600;
+          font-size: 15px;
+          transition: background 0.3s;
+        }
+        .button:hover {
+          background: #0d9488;
+        }
+        .footer { 
+          background: #f9fafb;
+          border-top: 1px solid #e5e7eb;
+          text-align: center; 
+          padding: 20px; 
+          color: #6b7280; 
+          font-size: 12px; 
+        }
+        .footer-company {
+          font-weight: 600;
+          color: #12B99C;
+          font-size: 15px;
+          margin: 0 0 4px;
+        }
+        .footer-tagline {
+          font-size: 11px;
+          color: #9ca3af;
+          margin: 0 0 12px;
+        }
+        .footer-links {
+          margin: 12px 0;
+          padding: 12px 0;
+          border-top: 1px solid #e5e7eb;
+          border-bottom: 1px solid #e5e7eb;
+        }
+        .footer-links a {
+          color: #12B99C;
+          text-decoration: none;
+          margin: 0 10px;
+          font-size: 12px;
+        }
+        .footer-links a:hover {
+          text-decoration: underline;
+        }
+        .footer-contact {
+          margin: 12px 0;
+          line-height: 1.6;
+        }
+        .footer-contact-item {
+          margin: 3px 0;
+        }
+        .footer-copyright {
+          margin-top: 12px;
+          padding-top: 12px;
+          border-top: 1px solid #e5e7eb;
+          font-size: 11px;
+          color: #9ca3af;
+        }
+        .status-badge { 
+          display: inline-block; 
+          padding: 5px 12px; 
+          border-radius: 20px; 
+          font-weight: 600; 
+          margin: 8px 0; 
+          font-size: 12px;
+        }
         .status-active { background: #d1fae5; color: #065f46; }
         .status-pending { background: #fef3c7; color: #92400e; }
         .status-approved { background: #d1fae5; color: #065f46; }
         .status-rejected { background: #fee2e2; color: #991b1b; }
         .status-disbursed { background: #dbeafe; color: #1e40af; }
-        .alert { padding: 15px; border-radius: 6px; margin: 15px 0; }
-        .alert-success { background: #d1fae5; color: #065f46; border-left: 4px solid #10b981; }
-        .alert-warning { background: #fef3c7; color: #92400e; border-left: 4px solid #f59e0b; }
-        .alert-error { background: #fee2e2; color: #991b1b; border-left: 4px solid #ef4444; }
-        .alert-info { background: #dbeafe; color: #1e40af; border-left: 4px solid #3b82f6; }
+        .alert { 
+          padding: 12px 16px; 
+          border-radius: 6px; 
+          margin: 16px 0; 
+          border-left: 4px solid;
+        }
+        .alert-success { background: #d1fae5; color: #065f46; border-left-color: #10b981; }
+        .alert-warning { background: #fef3c7; color: #92400e; border-left-color: #f59e0b; }
+        .alert-error { background: #fee2e2; color: #991b1b; border-left-color: #ef4444; }
+        .alert-info { background: #dbeafe; color: #1e40af; border-left-color: #3b82f6; }
+        @media only screen and (max-width: 600px) {
+          .content { padding: 20px 16px; }
+          .header { padding: 20px 16px; }
+          .footer { padding: 16px; }
+        }
       </style>
     </head>
     <body>
-      <div class="container">
+      <div class="email-wrapper">
+        <!-- Professional Header -->
         <div class="header">
-          <h1>${title}</h1>
+          <div class="company-name">Trustline Fintech</div>
         </div>
+
+        <!-- Content -->
         <div class="content">
+          <div class="content-title">${title}</div>
           ${content}
-          <div class="footer">
+        </div>
+
+        <!-- Professional Footer -->
+        <div class="footer">
+          <div class="footer-company">Trustline Fintech</div>
+          <div class="footer-tagline">Your Trusted Financial Partner</div>
+          
+          <div class="footer-links">
+            <a href="https://trustlinefintech.com">Website</a>
+            <a href="https://trustlinefintech.com/contact">Contact Us</a>
+            <a href="https://trustlinefintech.com/privacy">Privacy Policy</a>
+            <a href="https://trustlinefintech.com/terms">Terms & Conditions</a>
+          </div>
+
+          <div class="footer-contact">
+            <div class="footer-contact-item">
+              <strong>Email:</strong> support@trustlinefintech.com
+            </div>
+            <div class="footer-contact-item">
+              <strong>Phone:</strong> +91-8766681450
+            </div>
+            <div class="footer-contact-item">
+              <strong>Address:</strong> Trustline Fintech, India
+            </div>
+          </div>
+
+          <div class="footer-copyright">
             <p>This is an automated email. Please do not reply to this message.</p>
             <p>&copy; ${new Date().getFullYear()} Trustline Fintech. All rights reserved.</p>
-            <p>Regards,<br/>${footerText}</p>
+            <p style="margin-top: 12px; margin-bottom: 0;">Regards,<br/><strong>${footerText}</strong></p>
           </div>
         </div>
       </div>

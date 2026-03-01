@@ -21,9 +21,9 @@ export const sendMail = async ({ to, subject, html }) => {
       pass: process.env.EMAIL_PASS,
     },
     requireTLS: true,
-    connectionTimeout: 10000, // 10 seconds
-    greetingTimeout: 10000,
-    socketTimeout: 10000,
+    connectionTimeout: 30000, // 30 seconds (increased for slow connections)
+    greetingTimeout: 30000,
+    socketTimeout: 30000,
   };
 
   // Fallback config: Port 465 (SSL)
@@ -35,9 +35,9 @@ export const sendMail = async ({ to, subject, html }) => {
       user: process.env.EMAIL_USER,
       pass: process.env.EMAIL_PASS,
     },
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 10000,
+    connectionTimeout: 30000, // 30 seconds (increased for slow connections)
+    greetingTimeout: 30000,
+    socketTimeout: 30000,
   };
 
   // Try primary config first (port 587 - known to work)
@@ -56,9 +56,13 @@ export const sendMail = async ({ to, subject, html }) => {
   } catch (primaryError) {
     console.warn(`⚠️ Primary SMTP (port 587) failed:`, primaryError.message);
     
-    // Only try fallback if it's an auth error (might be server issue)
-    // For other errors, don't retry as it's likely a real problem
-    if (primaryError.message.includes("authentication") || primaryError.message.includes("535") || primaryError.message.includes("ECONNREFUSED")) {
+    // Try fallback for timeout, auth errors, or connection issues
+    if (primaryError.message.includes("authentication") || 
+        primaryError.message.includes("535") || 
+        primaryError.message.includes("ECONNREFUSED") ||
+        primaryError.message.includes("Timeout") ||
+        primaryError.code === 'ETIMEDOUT' ||
+        primaryError.code === 'ECONNRESET') {
       try {
         console.log(`🔄 Trying fallback SMTP (port 465)...`);
         const transporter = nodemailer.createTransport(fallbackConfig);

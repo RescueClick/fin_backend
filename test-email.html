@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Test Tool - Trustline Fintech</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #12B99C 0%, #0d9488 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        h1 {
+            color: #12B99C;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+        input, select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        input:focus, select:focus {
+            outline: none;
+            border-color: #12B99C;
+        }
+        button {
+            background: #12B99C;
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.3s;
+            width: 100%;
+        }
+        button:hover {
+            background: #0d9488;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .results {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f9fafb;
+            border-radius: 6px;
+            display: none;
+        }
+        .results.show {
+            display: block;
+        }
+        .result-item {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            border-left: 4px solid #12B99C;
+            background: white;
+        }
+        .result-item.error {
+            border-left-color: #ef4444;
+            background: #fee2e2;
+        }
+        .result-item.success {
+            border-left-color: #10b981;
+            background: #d1fae5;
+        }
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+        .loading.show {
+            display: block;
+        }
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #12B99C;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .info-box {
+            background: #dbeafe;
+            border-left: 4px solid #3b82f6;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        .info-box h3 {
+            color: #1e40af;
+            margin-bottom: 10px;
+        }
+        .info-box p {
+            color: #1e3a8a;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 Email Test Tool</h1>
+        <p class="subtitle">Test all email functionality for Trustline Fintech</p>
+
+        <div class="info-box">
+            <h3>📋 Instructions</h3>
+            <p>
+                <strong>1.</strong> Enter your test email address<br>
+                <strong>2.</strong> Select the user role to test (Customer, Partner, RM, ASM, Admin)<br>
+                <strong>3.</strong> Select the email type to test (or "all" for all types)<br>
+                <strong>4.</strong> Click "Test Email" to send test emails<br>
+                <strong>💡 Note:</strong> This uses a public endpoint - no authentication required!
+            </p>
+        </div>
+
+        <form id="testForm" method="post" action="#">
+            <div class="form-group">
+                <label for="email">Test Email Address *</label>
+                <input 
+                    type="email" 
+                    id="email" 
+                    name="email" 
+                    placeholder="test@example.com" 
+                    required
+                >
+            </div>
+
+            <div class="form-group">
+                <label for="role">User Role *</label>
+                <select id="role" name="role" required>
+                    <option value="CUSTOMER">Customer</option>
+                    <option value="PARTNER">Partner</option>
+                    <option value="RM">Relationship Manager (RM)</option>
+                    <option value="ASM">Area Sales Manager (ASM)</option>
+                    <option value="ADMIN">Admin</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="type">Email Type *</label>
+                <select id="type" name="type" required>
+                    <option value="all">All Types (Recommended)</option>
+                    <option value="basic">Basic Email</option>
+                    <option value="user">User Account Email</option>
+                    <option value="loan">Loan Application Email</option>
+                    <option value="status">Application Status Email</option>
+                    <option value="document">Document Status Email</option>
+                    <option value="partner">Partner Registration Email</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="apiUrl">API URL</label>
+                <input 
+                    type="text" 
+                    id="apiUrl" 
+                    name="apiUrl" 
+                    value="http://localhost:5000/api/test-email"
+                    placeholder="http://localhost:5000/api/test-email"
+                >
+                <small style="color: #666; font-size: 12px; display: block; margin-top: 5px;">
+                    💡 Using public endpoint (no authentication required)
+                </small>
+            </div>
+
+            <button type="submit" id="submitBtn">🚀 Test Email</button>
+        </form>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p style="margin-top: 10px;">Sending test emails...</p>
+        </div>
+
+        <div class="results" id="results">
+            <h2>📊 Test Results</h2>
+            <div id="resultsContent"></div>
+        </div>
+    </div>
+
+    <script>
+        // Email Test Tool JavaScript
+        const form = document.getElementById('testForm');
+        const loading = document.getElementById('loading');
+        const results = document.getElementById('results');
+        const resultsContent = document.getElementById('resultsContent');
+        const submitBtn = document.getElementById('submitBtn');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const email = document.getElementById('email').value;
+            const type = document.getElementById('type').value;
+            const role = document.getElementById('role').value;
+            const apiUrl = document.getElementById('apiUrl').value;
+
+            // Show loading
+            loading.classList.add('show');
+            results.classList.remove('show');
+            submitBtn.disabled = true;
+
+            try {
+                console.log('🚀 Sending test email request:', { email, type, role, apiUrl });
+                
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ email, type, role })
+                });
+
+                console.log('📨 Response status:', response.status);
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+
+                const data = await response.json();
+                console.log('✅ Response data:', data);
+
+                // Hide loading
+                loading.classList.remove('show');
+                submitBtn.disabled = false;
+
+                // Show results
+                results.classList.add('show');
+                
+                if (data.success) {
+                    resultsContent.innerHTML = `
+                        <div class="result-item success">
+                            <strong>✅ Overall Status:</strong> All tests passed!
+                        </div>
+                        <div class="result-item">
+                            <strong>📧 Tested Email:</strong> ${data.testedEmail}
+                        </div>
+                        <div class="result-item">
+                            <strong>🔧 Test Type:</strong> ${data.testType}
+                        </div>
+                        <div class="result-item">
+                            <strong>👤 Tested Role:</strong> ${data.testedRole || 'N/A'}
+                        </div>
+                        <div class="result-item">
+                            <strong>⏰ Timestamp:</strong> ${new Date(data.timestamp).toLocaleString()}
+                        </div>
+                        <h3 style="margin-top: 20px; margin-bottom: 10px;">Detailed Results:</h3>
+                        ${Object.entries(data.results || {}).map(([key, value]) => `
+                            <div class="result-item ${value.success ? 'success' : 'error'}">
+                                <strong>${key.toUpperCase()}:</strong> ${value.message}
+                            </div>
+                        `).join('')}
+                    `;
+                } else {
+                    resultsContent.innerHTML = `
+                        <div class="result-item error">
+                            <strong>❌ Error:</strong> ${data.message || 'Test failed'}
+                        </div>
+                        ${data.error ? `<div class="result-item error"><strong>Details:</strong> ${data.error}</div>` : ''}
+                        ${data.results ? `
+                            <h3 style="margin-top: 20px; margin-bottom: 10px;">Partial Results:</h3>
+                            ${Object.entries(data.results).map(([key, value]) => `
+                                <div class="result-item ${value.success ? 'success' : 'error'}">
+                                    <strong>${key.toUpperCase()}:</strong> ${value.message}
+                                </div>
+                            `).join('')}
+                        ` : ''}
+                    `;
+                }
+            } catch (error) {
+                console.error('❌ Error:', error);
+                loading.classList.remove('show');
+                submitBtn.disabled = false;
+                results.classList.add('show');
+                resultsContent.innerHTML = `
+                    <div class="result-item error">
+                        <strong>❌ Error:</strong> ${error.message}
+                    </div>
+                    <div class="result-item">
+                        <strong>💡 Tips:</strong>
+                        <ul style="margin-top: 10px; padding-left: 20px;">
+                            <li>Make sure your backend server is running</li>
+                            <li>Check the API URL is correct: ${apiUrl}</li>
+                            <li>Check browser console (F12) for detailed error messages</li>
+                            <li>Verify CORS is configured correctly</li>
+                        </ul>
+                    </div>
+                `;
+            }
+        });
+    </script>
+</body>
+</html>
+

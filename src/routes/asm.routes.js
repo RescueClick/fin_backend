@@ -11,6 +11,7 @@ import { Target } from "../models/Target.js";
 import mongoose from "mongoose";
 import { Application } from "../models/Application.js";
 import { sendMail } from "../utils/sendMail.js";
+import { sendUserAccountEmail } from "../utils/emailService.js";
 
 const router = Router();
 
@@ -44,26 +45,18 @@ router.post("/create-rm", auth, requireRole(ROLES.ASM), async (req, res) => {
       asmId, // 🔥 save parent ASM link
     });
 
-    // 📧 Send mail to RM after creation
+    // 📧 Send mail to RM after creation using professional email service
     try {
-      await sendMail({
-        to: rm.email,
-        subject: "Your RM Account Has Been Created",
-        html: `
-          <p>Dear ${rm.firstName} ${rm.lastName},</p>
-          <p>Your RM account has been successfully created by your ASM.</p>
-          <p><b>Employee ID:</b> ${rm.employeeId}<br/>
-             <b>RM Code:</b> ${rm.rmCode}<br/>
-             <b>Email:</b> ${rm.email}<br/>
-             <b>Temporary Password:</b> ${
-               password ? "Set by you" : rawPassword
-             }</p>
-          <p>Please log in and change your password immediately.</p>
-          <br/>
-          <p>Regards,<br/>Trustline Fintech</p>
-        `,
-      });
-      console.log("📧 RM creation mail sent to:", rm.email);
+      const asmUser = await User.findById(asmId);
+      const emailSent = await sendUserAccountEmail(
+        rm, 
+        "RM", 
+        password ? null : rawPassword,
+        asmUser ? { firstName: asmUser.firstName, lastName: asmUser.lastName } : null
+      );
+      if (emailSent) {
+        console.log(`✅ RM creation email sent to: ${rm.email}`);
+      }
     } catch (mailErr) {
       console.error("❌ Failed to send RM creation email:", mailErr.message);
     }

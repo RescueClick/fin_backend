@@ -13,7 +13,7 @@ import { partnerUpload } from "../middleware/profileUpload.js";
 import mongoose from "mongoose";
 import { makePartnerCode } from "../utils/codes.js";
 import { sendMail } from "../utils/sendMail.js";
-import { sendPartnerRegistrationEmail } from "../utils/emailService.js";
+import { sendPartnerRegistrationEmail, sendLoanApplicationEmail } from "../utils/emailService.js";
 import { Target } from "../models/Target.js";
 import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
 
@@ -108,7 +108,7 @@ router.post(
         middleName,
         lastName,
         phone,
-        dob,
+        dob: rawDob,
         email,
         aadharNumber,
         panNumber,
@@ -125,6 +125,90 @@ router.post(
         password,
         rmCode,
       } = partnerData;
+
+      // Validate and format date of birth
+      const formatDate = (dateString) => {
+        if (!dateString) return null;
+        
+        // Remove any whitespace
+        dateString = dateString.trim();
+        
+        // Try to parse the date in different formats
+        let date;
+        
+        // Format: YYYY-MM-DD (ISO format)
+        if (/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
+          const parts = dateString.split('-');
+          const year = parseInt(parts[0]);
+          const month = parseInt(parts[1]);
+          const day = parseInt(parts[2]);
+          
+          // Check if month is valid (1-12)
+          if (month < 1 || month > 12) {
+            // Might be DD-MM-YYYY format, swap day and month
+            if (day >= 1 && day <= 12 && month >= 1 && month <= 31) {
+              date = new Date(year, day - 1, month);
+            } else {
+              throw new Error(`Invalid date format: ${dateString}. Expected YYYY-MM-DD or DD-MM-YYYY`);
+            }
+          } else {
+            date = new Date(year, month - 1, day);
+          }
+        }
+        // Format: DD-MM-YYYY
+        else if (/^\d{2}-\d{2}-\d{4}$/.test(dateString)) {
+          const parts = dateString.split('-');
+          const day = parseInt(parts[0]);
+          const month = parseInt(parts[1]);
+          const year = parseInt(parts[2]);
+          date = new Date(year, month - 1, day);
+        }
+        // Format: DD/MM/YYYY
+        else if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateString)) {
+          const parts = dateString.split('/');
+          const day = parseInt(parts[0]);
+          const month = parseInt(parts[1]);
+          const year = parseInt(parts[2]);
+          date = new Date(year, month - 1, day);
+        }
+        // Try to parse as-is (might be ISO string)
+        else {
+          date = new Date(dateString);
+        }
+        
+        // Validate the date
+        if (isNaN(date.getTime())) {
+          throw new Error(`Invalid date: ${dateString}. Please use format YYYY-MM-DD, DD-MM-YYYY, or DD/MM/YYYY`);
+        }
+        
+        // Check if date is reasonable (not in future, not too old)
+        const today = new Date();
+        const minDate = new Date(1900, 0, 1);
+        
+        if (date > today) {
+          throw new Error(`Date of birth cannot be in the future: ${dateString}`);
+        }
+        
+        if (date < minDate) {
+          throw new Error(`Date of birth seems too old: ${dateString}`);
+        }
+        
+        // Return in ISO format (YYYY-MM-DD)
+        return date.toISOString().split('T')[0];
+      };
+
+      let dob = null;
+      if (rawDob) {
+        try {
+          dob = formatDate(rawDob);
+        } catch (error) {
+          return res.status(400).json({
+            message: error.message,
+            field: 'dob',
+            receivedValue: rawDob
+          });
+        }
+      }
 
       if (!firstName || !lastName || !phone || !email) {
         return res.status(400).json({
@@ -706,38 +790,40 @@ router.post(
         }
       }
 
-      // Send email
+      // Send email using professional email service
+      let emailSent = false;
       try {
-        await sendMail({
-          to: customerUser.email,
-          subject: "Your Loan Application Details",
-          html: `
-            <h2>Dear ${customer.firstName},</h2>
-            <p>Your loan application has been successfully created.</p>
-            <p><b>Loan ID:</b> ${app.appNo}</p>
-            <p><b>Loan Amount:</b> ₹${customer.loanAmount}</p>
-            <p><b>Status:</b> ${app.status}</p>
-            <hr/>
-            <p>You can log in using:</p>
-            <p>login url:</p>
-            <p>${`https://trustlinefintech.com/login`}</p>
-            <p><b>Email:</b> ${customerUser.email}</p>
-            <p><b>Password:</b> ${
-              customer.password ? customer.password : tempPassword
-            }</p>
-            <br/>
-            <p>Thank you,<br/>Trustline Fintech Team</p>
-          `,
-        });
+        const customerData = {
+          firstName: customer.firstName,
+          email: customerUser.email,
+        };
+        emailSent = await sendLoanApplicationEmail(
+          customerData,
+          {
+            appNo: app.appNo,
+            loanType: app.loanType,
+            status: app.status,
+            appliedLoanAmount: customer.loanAmount || 0,
+            loanAmount: customer.loanAmount || 0,
+          },
+          customer.password ? null : tempPassword
+        );
+        if (emailSent) {
+          console.log(`✅ Application creation email sent to: ${customerUser.email}`);
+        }
       } catch (mailErr) {
-        console.error("Email send failed:", mailErr);
+        console.error("❌ Email send failed:", mailErr.message);
+        // Don't fail the request if email fails - application is still created
       }
 
       res.status(201).json({
-        message: "Application + Customer created and Email has been sent",
+        message: emailSent 
+          ? "Application + Customer created and Email has been sent"
+          : "Application + Customer created (Email sending failed, but application was saved)",
         id: app._id,
         appNo: app.appNo,
         status: app.status,
+        emailSent,
         customerLogin: {
           email: customerUser.email,
           password: customer.password ? customer.password : tempPassword,
@@ -1090,38 +1176,40 @@ router.post(
         }
       }
 
-      // Send email
+      // Send email using professional email service
+      let emailSent = false;
       try {
-        await sendMail({
-          to: customerUser.email,
-          subject: "Your Loan Application Details",
-          html: `
-            <h2>Dear ${customer.firstName},</h2>
-            <p>Your loan application has been successfully created.</p>
-            <p><b>Loan ID:</b> ${app.appNo}</p>
-            <p><b>Loan Amount:</b> ₹${customer.loanAmount}</p>
-            <p><b>Status:</b> ${app.status}</p>
-            <hr/>
-            <p>You can log in using:</p>
-            <p>login url:</p>
-            <p>${`https://trustlinefintech.com/login`}</p>
-            <p><b>Email:</b> ${customerUser.email}</p>
-            <p><b>Password:</b> ${
-              customer.password ? customer.password : tempPassword
-            }</p>
-            <br/>
-            <p>Thank you,<br/>Trustline Fintech Team</p>
-          `,
-        });
+        const customerData = {
+          firstName: customer.firstName,
+          email: customerUser.email,
+        };
+        emailSent = await sendLoanApplicationEmail(
+          customerData,
+          {
+            appNo: app.appNo,
+            loanType: app.loanType,
+            status: app.status,
+            appliedLoanAmount: customer.loanAmount || 0,
+            loanAmount: customer.loanAmount || 0,
+          },
+          customer.password ? null : tempPassword
+        );
+        if (emailSent) {
+          console.log(`✅ Application creation email sent to: ${customerUser.email}`);
+        }
       } catch (mailErr) {
-        console.error("Email send failed:", mailErr);
+        console.error("❌ Email send failed:", mailErr.message);
+        // Don't fail the request if email fails - application is still created
       }
 
       res.status(201).json({
-        message: "Application + Customer created and Email has been sent",
+        message: emailSent 
+          ? "Application + Customer created and Email has been sent"
+          : "Application + Customer created (Email sending failed, but application was saved)",
         id: app._id,
         appNo: app.appNo,
         status: app.status,
+        emailSent,
         customerLogin: {
           email: customerUser.email,
           password: customer.password ? customer.password : tempPassword,
@@ -1144,12 +1232,39 @@ router.post(
     const app = await Application.findOne({
       _id: req.params.id,
       partnerId: req.user.sub,
-    });
+    }).populate("customerId");
     if (!app) return res.status(404).json({ message: "Application not found" });
 
     try {
+      const oldStatus = app.status;
       app.transition("SUBMITTED", req.user.sub, "Partner submitted");
       await app.save();
+
+      // Send email notification to customer about submission
+      setImmediate(async () => {
+        try {
+          if (app.customerId && app.customerId.email) {
+            const { sendApplicationStatusEmail } = await import("../utils/emailService.js");
+            await sendApplicationStatusEmail(
+              {
+                firstName: app.customer?.firstName || app.customerId.firstName || "Customer",
+                email: app.customerId.email,
+              },
+              {
+                appNo: app.appNo,
+                loanType: app.loanType,
+                status: app.status,
+              },
+              oldStatus,
+              "SUBMITTED"
+            );
+          }
+        } catch (mailErr) {
+          console.error("❌ Failed to send submission email:", mailErr.message);
+          // Don't fail the request if email fails
+        }
+      });
+
       res.json({ message: "Submitted", status: app.status });
     } catch (e) {
       res.status(400).json({ message: e.message });

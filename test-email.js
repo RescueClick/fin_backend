@@ -1,108 +1,109 @@
-/**
- * Email Configuration Test Script
- * 
- * Run this script to test your SMTP configuration:
- * node test-email.js
- * 
- * Make sure your .env file has EMAIL_USER and EMAIL_PASS set
- */
+// Email Test Tool JavaScript
+const form = document.getElementById('testForm');
+const loading = document.getElementById('loading');
+const results = document.getElementById('results');
+const resultsContent = document.getElementById('resultsContent');
+const submitBtn = document.getElementById('submitBtn');
 
-import "dotenv/config.js";
-import nodemailer from "nodemailer";
-
-const testEmail = async () => {
-  console.log("🧪 Testing Email Configuration...\n");
-
-  // Check credentials
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-    console.error("❌ ERROR: EMAIL_USER and EMAIL_PASS must be set in .env file");
-    process.exit(1);
-  }
-
-  console.log(`📧 Email User: ${process.env.EMAIL_USER}`);
-  console.log(`🔑 Password: ${process.env.EMAIL_PASS ? "***" + process.env.EMAIL_PASS.slice(-4) : "NOT SET"}\n`);
-
-  // Test configurations
-  const configs = [
-    {
-      name: "Port 587 (TLS)",
-      config: {
-        host: "smtp.hostinger.com",
-        port: 587,
-        secure: false,
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASS,
-        },
-        requireTLS: true,
-      },
-    },
-    {
-      name: "Port 465 (SSL)",
-      config: {
-        host: "smtp.hostinger.com",
-        port: 465,
-        secure: true,
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASS,
-        },
-      },
-    },
-  ];
-
-  for (const { name, config } of configs) {
-    console.log(`\n🔍 Testing: ${name}...`);
+form.addEventListener('submit', async (e) => {
+    e.preventDefault();
     
+    const email = document.getElementById('email').value;
+    const type = document.getElementById('type').value;
+    const role = document.getElementById('role').value;
+    const apiUrl = document.getElementById('apiUrl').value;
+
+    // Show loading
+    loading.classList.add('show');
+    results.classList.remove('show');
+    submitBtn.disabled = true;
+
     try {
-      const transporter = nodemailer.createTransport(config);
-      
-      // Test connection
-      console.log("   → Verifying connection...");
-      await transporter.verify();
-      console.log(`   ✅ Connection successful!`);
-      
-      // Test sending
-      console.log("   → Sending test email...");
-      const info = await transporter.sendMail({
-        from: `"Trustline Fintech Test" <${process.env.EMAIL_USER}>`,
-        to: process.env.EMAIL_USER, // Send to yourself for testing
-        subject: "Test Email from Trustline Backend",
-        html: `
-          <h2>✅ Email Test Successful!</h2>
-          <p>This is a test email from your Trustline backend.</p>
-          <p><strong>Configuration:</strong> ${name}</p>
-          <p><strong>Time:</strong> ${new Date().toLocaleString()}</p>
-        `,
-      });
-      
-      console.log(`   ✅ Email sent successfully!`);
-      console.log(`   📬 Message ID: ${info.messageId}`);
-      console.log(`\n✅ SUCCESS: ${name} is working correctly!\n`);
-      
-      // Exit on first success
-      process.exit(0);
-      
+        console.log('🚀 Sending test email request:', { email, type, role, apiUrl });
+        
+        const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ email, type, role })
+        });
+
+        console.log('📨 Response status:', response.status);
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`HTTP ${response.status}: ${errorText}`);
+        }
+
+        const data = await response.json();
+        console.log('✅ Response data:', data);
+
+        // Hide loading
+        loading.classList.remove('show');
+        submitBtn.disabled = false;
+
+        // Show results
+        results.classList.add('show');
+        
+        if (data.success) {
+            resultsContent.innerHTML = `
+                <div class="result-item success">
+                    <strong>✅ Overall Status:</strong> All tests passed!
+                </div>
+                <div class="result-item">
+                    <strong>📧 Tested Email:</strong> ${data.testedEmail}
+                </div>
+                <div class="result-item">
+                    <strong>🔧 Test Type:</strong> ${data.testType}
+                </div>
+                <div class="result-item">
+                    <strong>👤 Tested Role:</strong> ${data.testedRole || 'N/A'}
+                </div>
+                <div class="result-item">
+                    <strong>⏰ Timestamp:</strong> ${new Date(data.timestamp).toLocaleString()}
+                </div>
+                <h3 style="margin-top: 20px; margin-bottom: 10px;">Detailed Results:</h3>
+                ${Object.entries(data.results || {}).map(([key, value]) => `
+                    <div class="result-item ${value.success ? 'success' : 'error'}">
+                        <strong>${key.toUpperCase()}:</strong> ${value.message}
+                    </div>
+                `).join('')}
+            `;
+        } else {
+            resultsContent.innerHTML = `
+                <div class="result-item error">
+                    <strong>❌ Error:</strong> ${data.message || 'Test failed'}
+                </div>
+                ${data.error ? `<div class="result-item error"><strong>Details:</strong> ${data.error}</div>` : ''}
+                ${data.results ? `
+                    <h3 style="margin-top: 20px; margin-bottom: 10px;">Partial Results:</h3>
+                    ${Object.entries(data.results).map(([key, value]) => `
+                        <div class="result-item ${value.success ? 'success' : 'error'}">
+                            <strong>${key.toUpperCase()}:</strong> ${value.message}
+                        </div>
+                    `).join('')}
+                ` : ''}
+            `;
+        }
     } catch (error) {
-      console.error(`   ❌ Failed: ${error.message}`);
-      
-      if (error.message.includes("535") || error.message.includes("authentication")) {
-        console.error(`\n   🔴 Authentication Error Detected!`);
-        console.error(`   Please check:`);
-        console.error(`   1. EMAIL_USER should be full email: ${process.env.EMAIL_USER}`);
-        console.error(`   2. EMAIL_PASS is correct`);
-        console.error(`   3. If 2FA is enabled, use App Password instead of regular password`);
-        console.error(`   4. SMTP access is enabled in Hostinger control panel\n`);
-      }
+        console.error('❌ Error:', error);
+        loading.classList.remove('show');
+        submitBtn.disabled = false;
+        results.classList.add('show');
+        resultsContent.innerHTML = `
+            <div class="result-item error">
+                <strong>❌ Error:</strong> ${error.message}
+            </div>
+            <div class="result-item">
+                <strong>💡 Tips:</strong>
+                <ul style="margin-top: 10px; padding-left: 20px;">
+                    <li>Make sure your backend server is running</li>
+                    <li>Check the API URL is correct: ${apiUrl}</li>
+                    <li>Check browser console (F12) for detailed error messages</li>
+                    <li>Verify CORS is configured correctly</li>
+                </ul>
+            </div>
+        `;
     }
-  }
-
-  console.error("\n❌ All email configurations failed. Please check your credentials and SMTP settings.");
-  process.exit(1);
-};
-
-testEmail().catch((error) => {
-  console.error("❌ Unexpected error:", error);
-  process.exit(1);
 });
-

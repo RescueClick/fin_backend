@@ -15,6 +15,13 @@ import mongoose from "mongoose";
 import fs from "fs";
 import path from "path";
 import { sendMail } from "../utils/sendMail.js";
+import { 
+  sendUserAccountEmail, 
+  sendPartnerRegistrationEmail,
+  sendLoanApplicationEmail,
+  sendApplicationStatusEmail,
+  sendDocumentStatusEmail
+} from "../utils/emailService.js";
 
 const router = Router();
 
@@ -126,25 +133,17 @@ router.post(
         adminId: req.user.sub, // link to the admin creating ASM
       });
 
-      // 📧 Send credentials mail
+      // 📧 Send credentials mail using professional email service
       try {
-        await sendMail({
-          to: email,
-          subject: "Your ASM Account Has Been Created",
-          html: `
-            <p>Dear ${firstName} ${lastName},</p>
-            <p>Your ASM account has been created successfully.</p>
-            <p><b>Employee ID:</b> ${asm.employeeId}</p>
-            <p><b>ASM Code:</b> ${asm.asmCode}</p>
-            <p><b>Email:</b> ${email}</p>
-            <p><b>Temporary Password:</b> ${rawPassword}</p>
-            <p>Please log in and change your password immediately.</p>
-            <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
-          `,
+        const emailSent = await sendUserAccountEmail(asm, "ASM", rawPassword, {
+          firstName: req.user.firstName || "Admin",
+          lastName: req.user.lastName || "",
         });
+        if (emailSent) {
+          console.log(`✅ ASM creation email sent to: ${email}`);
+        }
       } catch (mailErr) {
-        console.error("Failed to send email:", mailErr.message);
+        console.error("❌ Failed to send ASM creation email:", mailErr.message);
       }
 
       // 🔹 STEP 2: Redistribute targets if already assigned
@@ -323,26 +322,17 @@ router.post(
         dob,
       });
 
-      // Send mail with credentials
+      // Send mail with credentials using professional email service
       try {
-        await sendMail({
-          to: email,
-          subject: "Your RM Account Has Been Created",
-          html: `
-            <p>Dear ${firstName} ${lastName},</p>
-            <p>Your RM account has been created successfully and assigned to ASM <b>${asm.firstName} ${asm.lastName}</b>.</p>
-            <p><b>Employee ID:</b> ${rm.employeeId}</p>
-            <p><b>RM Code:</b> ${rm.rmCode}</p>
-            <p><b>Email:</b> ${email}</p>
-            <p><b>Temporary Password:</b> ${rawPassword}</p>
-            <p><b>Assigned ASM:</b> ${asm.firstName} ${asm.lastName} (${asm.region})</p>
-            <p>Please log in and change your password immediately.</p>
-            <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
-          `,
+        const emailSent = await sendUserAccountEmail(rm, "RM", rawPassword, {
+          firstName: req.user.firstName || "Admin",
+          lastName: req.user.lastName || "",
         });
+        if (emailSent) {
+          console.log(`✅ RM creation email sent to: ${email}`);
+        }
       } catch (mailErr) {
-        console.error("Failed to send email:", mailErr.message);
+        console.error("❌ Failed to send RM creation email:", mailErr.message);
       }
 
       // 🔹 STEP 2: Redistribute ASM’s target among all RMs
@@ -610,37 +600,42 @@ router.post(
       partner.status = "ACTIVE";
       await partner.save();
 
-      // Send email to Partner
+      // Send email to Partner using professional email service
+      let partnerEmailSent = false;
+      let rmEmailSent = false;
       try {
-        await sendMail({
-          to: partner.email,
-          subject: "Your Partner Status is Approved",
-          html: `
-            <p>Dear ${partner.firstName},</p>
-            <p>Your status has been approved and you are now ACTIVE.</p>
-            <p>You have been assigned to RM: <b>${rm.firstName} ${rm.lastName}</b>.</p>
-            <p>You can now log in and continue your work.</p>
-            <br/>
-            <p>Thanks,<br/>Trustline Fintech Team</p>
-          `,
-        });
+        // Send to Partner
+        partnerEmailSent = await sendPartnerRegistrationEmail(partner, null);
+        if (partnerEmailSent) {
+          console.log(`✅ Partner approval email sent to: ${partner.email}`);
+        }
 
-        // Send email to RM
-        await sendMail({
-          to: rm.email,
-          subject: "New Partner Assigned",
-          html: `
-            <p>Dear ${rm.firstName},</p>
-            <p>A new partner has been assigned to you:</p>
-            <p><b>Partner Name:</b> ${partner.firstName} ${partner.lastName}</p>
-            <p><b>Email:</b> ${partner.email}</p>
-            <p><b>Phone:</b> ${partner.phone}</p>
-            <br/>
-            <p>Thanks,<br/>Trustline Fintech Team</p>
-          `,
-        });
+        // Send notification to RM
+        try {
+          await sendMail({
+            to: rm.email,
+            subject: "New Partner Assigned",
+            html: `
+              <h2>Dear ${rm.firstName},</h2>
+              <p>A new partner has been assigned to you:</p>
+              <div style="background: #f9fafb; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                <p><b>Partner Name:</b> ${partner.firstName} ${partner.lastName}</p>
+                <p><b>Email:</b> ${partner.email}</p>
+                <p><b>Phone:</b> ${partner.phone}</p>
+                <p><b>Partner Code:</b> ${partner.partnerCode}</p>
+              </div>
+              <p>Please review and manage this partner in your dashboard.</p>
+              <br/>
+              <p>Thanks,<br/>Trustline Fintech Team</p>
+            `,
+          });
+          rmEmailSent = true;
+          console.log(`✅ Partner assignment notification sent to RM: ${rm.email}`);
+        } catch (rmMailErr) {
+          console.error("❌ Failed to send RM notification:", rmMailErr.message);
+        }
       } catch (mailErr) {
-        console.error("Error sending email:", mailErr.message);
+        console.error("❌ Error sending partner approval email:", mailErr.message);
       }
 
       res.json({
@@ -1056,7 +1051,7 @@ router.get(
         rejectedFiles,
         approvedFiles,
         inProcessFiles,
-        totalRevenue, // 👈 Super Admin revenue = all partners’ disbursed sum
+        totalRevenue, // 👈 Super Admin revenue = all partners' disbursed sum
         totalPayout,
         totalASM,
         totalRM,
@@ -1066,6 +1061,155 @@ router.get(
     } catch (err) {
       console.error("Dashboard error:", err);
       res.status(500).json({ message: "Failed to fetch dashboard stats" });
+    }
+  }
+);
+
+// Get recent activities for admin dashboard
+router.get(
+  "/recent-activities",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const limit = parseInt(req.query.limit) || 10;
+      
+      const activities = [];
+
+      // 1. Recent customers registered
+      const recentCustomers = await User.find({ role: ROLES.CUSTOMER })
+        .select("firstName lastName email createdAt")
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .lean();
+
+      recentCustomers.forEach((customer) => {
+        activities.push({
+          type: "customer_registered",
+          title: "New customer registered",
+          description: `${customer.firstName} ${customer.lastName}`,
+          timestamp: customer.createdAt,
+          icon: "users",
+          iconColor: "blue",
+        });
+      });
+
+      // 2. Recent payouts completed
+      const recentPayouts = await Payout.find({ status: "PAID" })
+        .populate("partnerId", "firstName lastName")
+        .select("amount status updatedAt partnerId")
+        .sort({ updatedAt: -1 })
+        .limit(5)
+        .lean();
+
+      recentPayouts.forEach((payout) => {
+        const partnerName = payout.partnerId
+          ? `${payout.partnerId.firstName} ${payout.partnerId.lastName}`
+          : "Unknown Partner";
+        activities.push({
+          type: "payout_completed",
+          title: "Payout completed",
+          description: `₹${payout.amount.toLocaleString()} to ${partnerName}`,
+          timestamp: payout.updatedAt,
+          icon: "banknote",
+          iconColor: "green",
+        });
+      });
+
+      // 3. Recent partners onboarded
+      const recentPartners = await User.find({ role: ROLES.PARTNER })
+        .select("firstName lastName email employeeId partnerCode createdAt")
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .lean();
+
+      recentPartners.forEach((partner) => {
+        activities.push({
+          type: "partner_onboarded",
+          title: "New partner onboarded",
+          description: `${partner.firstName} ${partner.lastName} (${partner.partnerCode || partner.employeeId})`,
+          timestamp: partner.createdAt,
+          icon: "userCheck",
+          iconColor: "purple",
+        });
+      });
+
+      // 4. Recent application status changes (important ones)
+      const recentApplications = await Application.find({
+        status: { $in: ["APPROVED", "DISBURSED", "REJECTED"] },
+      })
+        .populate("customerId", "firstName lastName")
+        .populate("partnerId", "firstName lastName")
+        .select("appNo status loanType approvedLoanAmount updatedAt customerId partnerId")
+        .sort({ updatedAt: -1 })
+        .limit(5)
+        .lean();
+
+      recentApplications.forEach((app) => {
+        const customerName = app.customerId
+          ? `${app.customerId.firstName} ${app.customerId.lastName}`
+          : "Unknown Customer";
+        let title = "";
+        let iconColor = "";
+
+        if (app.status === "APPROVED") {
+          title = "Application approved";
+          iconColor = "green";
+        } else if (app.status === "DISBURSED") {
+          title = "Loan disbursed";
+          iconColor = "blue";
+        } else if (app.status === "REJECTED") {
+          title = "Application rejected";
+          iconColor = "red";
+        }
+
+        if (title) {
+          activities.push({
+            type: "application_status",
+            title,
+            description: `${customerName} - ${app.appNo}`,
+            timestamp: app.updatedAt,
+            icon: "fileText",
+            iconColor,
+          });
+        }
+      });
+
+      // Sort all activities by timestamp (most recent first) and limit
+      activities.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      const limitedActivities = activities.slice(0, limit);
+
+      // Format timestamps to relative time
+      const formatTimeAgo = (date) => {
+        const now = new Date();
+        const diff = now - new Date(date);
+        const minutes = Math.floor(diff / 60000);
+        const hours = Math.floor(diff / 3600000);
+        const days = Math.floor(diff / 86400000);
+
+        if (minutes < 1) return "Just now";
+        if (minutes < 60) return `${minutes} minute${minutes > 1 ? "s" : ""} ago`;
+        if (hours < 24) return `${hours} hour${hours > 1 ? "s" : ""} ago`;
+        return `${days} day${days > 1 ? "s" : ""} ago`;
+      };
+
+      const formattedActivities = limitedActivities.map((activity) => ({
+        ...activity,
+        timeAgo: formatTimeAgo(activity.timestamp),
+      }));
+
+      res.json({
+        success: true,
+        activities: formattedActivities,
+        count: formattedActivities.length,
+      });
+    } catch (err) {
+      console.error("Recent activities error:", err);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch recent activities",
+        error: err.message,
+      });
     }
   }
 );
@@ -2825,6 +2969,290 @@ router.patch(
       res.json({ message: "Banner updated successfully", banner });
     } catch (err) {
       res.status(500).json({ message: err.message });
+    }
+  }
+);
+
+/**
+ * Test Email Endpoint - Get endpoint info
+ * GET /admin/test-email
+ */
+router.get("/test-email", (req, res) => {
+  res.json({
+    message: "Email Test Endpoint",
+    description: "Use POST method to test email functionality",
+    endpoint: "POST /api/admin/test-email",
+    requiredAuth: true,
+    requiredRole: ["SUPER_ADMIN", "ADMIN"],
+    requestBody: {
+      email: "your-test-email@example.com",
+      type: "basic|user|loan|status|document|all (default: all)",
+    },
+    availableTypes: {
+      basic: "Test basic sendMail function",
+      user: "Test user account creation email",
+      loan: "Test loan application email",
+      status: "Test application status update email",
+      document: "Test document status email",
+      all: "Test all email types (default)",
+    },
+    example: {
+      method: "POST",
+      url: "/api/admin/test-email",
+      headers: {
+        Authorization: "Bearer YOUR_ADMIN_TOKEN",
+        "Content-Type": "application/json",
+      },
+      body: {
+        email: "test@example.com",
+        type: "all",
+      },
+    },
+  });
+});
+
+/**
+ * Test Email Endpoint - Test all email types
+ * POST /admin/test-email
+ * Body: { email: "test@example.com", type: "basic|user|loan|status|document" }
+ */
+router.post(
+  "/test-email",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  async (req, res) => {
+    try {
+      const { email, type = "basic" } = req.body;
+
+      if (!email) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Email address is required" 
+        });
+      }
+
+      // Validate email format
+      if (!/^\S+@\S+\.\S+$/.test(email)) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Invalid email format" 
+        });
+      }
+
+      let result = {};
+
+      switch (type) {
+        case "basic":
+          // Test basic sendMail function
+          try {
+            await sendMail({
+              to: email,
+              subject: "🧪 Test Email - Basic SendMail",
+              html: `
+                <h2>Email Test - Basic SendMail</h2>
+                <p>This is a test email to verify basic email sending functionality.</p>
+                <p><b>Test Time:</b> ${new Date().toLocaleString()}</p>
+                <p><b>Status:</b> ✅ Email service is working!</p>
+                <br/>
+                <p>If you received this email, your email configuration is correct.</p>
+              `,
+            });
+            result.basic = { success: true, message: "Basic email sent successfully" };
+          } catch (error) {
+            result.basic = { success: false, message: error.message };
+          }
+          break;
+
+        case "user":
+          // Test user account email
+          try {
+            const testUser = {
+              firstName: "Test",
+              lastName: "User",
+              email: email,
+              employeeId: "TEST001",
+              rmCode: "RM-TEST",
+            };
+            const emailSent = await sendUserAccountEmail(testUser, "RM", "Test@123", {
+              firstName: "Admin",
+              lastName: "User",
+            });
+            result.user = { 
+              success: emailSent, 
+              message: emailSent 
+                ? "User account email sent successfully" 
+                : "Failed to send user account email" 
+            };
+          } catch (error) {
+            result.user = { success: false, message: error.message };
+          }
+          break;
+
+        case "loan":
+          // Test loan application email
+          try {
+            const testCustomer = {
+              firstName: "Test",
+              email: email,
+            };
+            const testApplication = {
+              appNo: "APP-TEST-001",
+              loanType: "HOME_LOAN_SALARIED",
+              status: "DRAFT",
+              appliedLoanAmount: 500000,
+              loanAmount: 500000,
+            };
+            const emailSent = await sendLoanApplicationEmail(
+              testCustomer,
+              testApplication,
+              "Test@123"
+            );
+            result.loan = { 
+              success: emailSent, 
+              message: emailSent 
+                ? "Loan application email sent successfully" 
+                : "Failed to send loan application email" 
+            };
+          } catch (error) {
+            result.loan = { success: false, message: error.message };
+          }
+          break;
+
+        case "status":
+          // Test application status email
+          try {
+            const testCustomer = {
+              firstName: "Test",
+              email: email,
+            };
+            const testApplication = {
+              appNo: "APP-TEST-001",
+              loanType: "HOME_LOAN_SALARIED",
+              status: "APPROVED",
+              approvedLoanAmount: 500000,
+            };
+            const emailSent = await sendApplicationStatusEmail(
+              testCustomer,
+              testApplication,
+              "DRAFT",
+              "APPROVED"
+            );
+            result.status = { 
+              success: emailSent, 
+              message: emailSent 
+                ? "Application status email sent successfully" 
+                : "Failed to send application status email" 
+            };
+          } catch (error) {
+            result.status = { success: false, message: error.message };
+          }
+          break;
+
+        case "document":
+          // Test document status email
+          try {
+            const testCustomer = {
+              firstName: "Test",
+              email: email,
+            };
+            const testApplication = {
+              appNo: "APP-TEST-001",
+              loanType: "HOME_LOAN_SALARIED",
+            };
+            const emailSent = await sendDocumentStatusEmail(
+              testCustomer,
+              testApplication,
+              "AADHAR_FRONT",
+              "VERIFIED"
+            );
+            result.document = { 
+              success: emailSent, 
+              message: emailSent 
+                ? "Document status email sent successfully" 
+                : "Failed to send document status email" 
+            };
+          } catch (error) {
+            result.document = { success: false, message: error.message };
+          }
+          break;
+
+        case "all":
+          // Test all email types
+          const tests = ["basic", "user", "loan", "status", "document"];
+          for (const testType of tests) {
+            req.body.type = testType;
+            // Recursively call for each type (simplified approach)
+            try {
+              if (testType === "basic") {
+                await sendMail({
+                  to: email,
+                  subject: `🧪 Test Email - ${testType}`,
+                  html: `<h2>Test: ${testType}</h2><p>This is a test email.</p>`,
+                });
+                result[testType] = { success: true, message: `${testType} email sent` };
+              } else if (testType === "user") {
+                const emailSent = await sendUserAccountEmail(
+                  { firstName: "Test", lastName: "User", email, employeeId: "TEST001" },
+                  "RM",
+                  "Test@123"
+                );
+                result[testType] = { success: emailSent, message: `${testType} email ${emailSent ? 'sent' : 'failed'}` };
+              } else if (testType === "loan") {
+                const emailSent = await sendLoanApplicationEmail(
+                  { firstName: "Test", email },
+                  { appNo: "TEST-001", loanType: "HOME_LOAN_SALARIED", status: "DRAFT", appliedLoanAmount: 500000 },
+                  "Test@123"
+                );
+                result[testType] = { success: emailSent, message: `${testType} email ${emailSent ? 'sent' : 'failed'}` };
+              } else if (testType === "status") {
+                const emailSent = await sendApplicationStatusEmail(
+                  { firstName: "Test", email },
+                  { appNo: "TEST-001", loanType: "HOME_LOAN_SALARIED", status: "APPROVED" },
+                  "DRAFT",
+                  "APPROVED"
+                );
+                result[testType] = { success: emailSent, message: `${testType} email ${emailSent ? 'sent' : 'failed'}` };
+              } else if (testType === "document") {
+                const emailSent = await sendDocumentStatusEmail(
+                  { firstName: "Test", email },
+                  { appNo: "TEST-001", loanType: "HOME_LOAN_SALARIED" },
+                  "AADHAR_FRONT",
+                  "VERIFIED"
+                );
+                result[testType] = { success: emailSent, message: `${testType} email ${emailSent ? 'sent' : 'failed'}` };
+              }
+            } catch (error) {
+              result[testType] = { success: false, message: error.message };
+            }
+          }
+          break;
+
+        default:
+          return res.status(400).json({
+            success: false,
+            message: `Invalid email type. Use: basic, user, loan, status, document, or all`,
+          });
+      }
+
+      const allSuccess = Object.values(result).every((r) => r.success);
+      
+      res.json({
+        success: allSuccess,
+        message: allSuccess 
+          ? `Email test completed successfully` 
+          : `Some email tests failed`,
+        results: result,
+        testedEmail: email,
+        testType: type,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error("❌ Email test error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Email test failed",
+        error: error.message,
+      });
     }
   }
 );
