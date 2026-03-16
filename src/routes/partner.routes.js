@@ -13,9 +13,10 @@ import { partnerUpload } from "../middleware/profileUpload.js";
 import mongoose from "mongoose";
 import { makePartnerCode } from "../utils/codes.js";
 import { sendMail } from "../utils/sendMail.js";
-import { sendPartnerRegistrationEmail, sendLoanApplicationEmail } from "../utils/emailService.js";
+import { sendPartnerRegistrationEmail, sendLoanApplicationEmail, sendDeleteAccountRequestEmail } from "../utils/emailService.js";
 import { Target } from "../models/Target.js";
 import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
+import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 
 const validateApplicationPayload = ({
   customer = {},
@@ -1750,13 +1751,15 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     ];
 
     // ------------------
-    // 6️⃣ Monthly target & achieved
+    // 6️⃣ Monthly target & achieved (File Count + Disbursement)
     // ------------------
     const monthlyTargets = {};
     for (let i = 0; i < 12; i++) {
       const monthNumber = i + 1;
+      const monthStart = new Date(currentYearForTarget, monthNumber - 1, 1);
+      const monthEnd = new Date(currentYearForTarget, monthNumber, 1);
 
-      // Get target for the month
+      // Get target for the month (hybrid model: File Count + Disbursement)
       const targetDoc = await Target.findOne({
         assignedTo: new mongoose.Types.ObjectId(partnerId),
         role: ROLES.PARTNER,
@@ -1764,26 +1767,69 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
         year: currentYearForTarget,
       }).lean();
 
-      const targetValue = targetDoc ? Number(targetDoc.targetValue) : 0;
+      const fileCountTarget = targetDoc ? (targetDoc.fileCountTarget || 4) : 4;
+      const disbursementTarget = targetDoc ? (targetDoc.disbursementTarget || targetDoc.targetValue || 2000000) : 2000000;
 
-      // Calculate achieved target for the month
-      const achieved = applications
-        .filter((a) => {
-          const appMonth = new Date(a.createdAt).getMonth() + 1;
-          const appYear = new Date(a.createdAt).getFullYear();
-          return (
-            a.status === "DISBURSED" &&
-            appMonth === monthNumber &&
-            appYear === currentYearForTarget
-          );
-        })
-        .reduce((sum, a) => sum + (a.approvedLoanAmount || 0), 0);
+      // Calculate achieved for the month (use updatedAt when status becomes DISBURSED)
+      const monthDisbursedApps = applications.filter((a) => {
+        const appUpdatedAt = a.updatedAt || a.createdAt;
+        return (
+          a.status === "DISBURSED" &&
+          appUpdatedAt >= monthStart &&
+          appUpdatedAt < monthEnd
+        );
+      });
 
-      monthlyTargets[months[i]] = { target: targetValue, achieved };
+      const achievedFileCount = monthDisbursedApps.length;
+      const achievedDisbursement = monthDisbursedApps.reduce(
+        (sum, a) => sum + (parseFloat(a.approvedLoanAmount) || 0),
+        0
+      );
+
+      monthlyTargets[months[i]] = {
+        fileCountTarget,
+        achievedFileCount,
+        disbursementTarget,
+        achievedDisbursement,
+        target: disbursementTarget, // Legacy field for backward compatibility
+        achieved: achievedDisbursement, // Legacy field for backward compatibility
+      };
     }
 
     // ------------------
-    // 7️⃣ Response
+    // 7️⃣ Current Month Target (for dashboard display)
+    // ------------------
+    // Use the already declared currentMonth and currentYear from above
+    // const currentMonth = new Date().getMonth() + 1; // Already declared at line 1563
+    // const currentYear = new Date().getFullYear(); // Already declared at line 1562
+    const currentMonthTarget = await Target.findOne({
+      assignedTo: new mongoose.Types.ObjectId(partnerId),
+      role: ROLES.PARTNER,
+      month: currentMonth,
+      year: currentYear,
+    }).lean();
+
+    const currentMonthStart = new Date(currentYear, currentMonth - 1, 1);
+    const currentMonthEnd = new Date(currentYear, currentMonth, 1);
+    const currentMonthDisbursed = applications.filter((a) => {
+      const appUpdatedAt = a.updatedAt || a.createdAt;
+      return (
+        a.status === "DISBURSED" &&
+        appUpdatedAt >= currentMonthStart &&
+        appUpdatedAt < currentMonthEnd
+      );
+    });
+
+    const currentFileCountTarget = currentMonthTarget?.fileCountTarget || 4;
+    const currentDisbursementTarget = currentMonthTarget?.disbursementTarget || currentMonthTarget?.targetValue || 2000000;
+    const currentAchievedFileCount = currentMonthDisbursed.length;
+    const currentAchievedDisbursement = currentMonthDisbursed.reduce(
+      (sum, a) => sum + (parseFloat(a.approvedLoanAmount) || 0),
+      0
+    );
+
+    // ------------------
+    // 8️⃣ Response
     // ------------------
     res.json({
       totalFiles,
@@ -1794,8 +1840,19 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       totalDisburseAmount,
       totalPayout,
       partnerEarnCount,
-      target: targetValue,
-      achievedTarget: achievedValue,
+      target: targetValue, // Legacy field
+      achievedTarget: achievedValue, // Legacy field
+      // Current month target (hybrid model)
+      currentMonthTarget: {
+        fileCountTarget: currentFileCountTarget,
+        achievedFileCount: currentAchievedFileCount,
+        disbursementTarget: currentDisbursementTarget,
+        achievedDisbursement: currentAchievedDisbursement,
+        fileTargetMet: currentAchievedFileCount >= currentFileCountTarget,
+        disbursementTargetMet: currentAchievedDisbursement >= currentDisbursementTarget,
+        targetAchieved: currentAchievedFileCount >= currentFileCountTarget && 
+                       currentAchievedDisbursement >= currentDisbursementTarget,
+      },
       rm: rm
         ? {
             name: rm.firstName + " " + rm.lastName,
@@ -2543,5 +2600,146 @@ router.get(
     }
   }
 );
+
+// Partner requests account deletion (email + admin visibility)
+router.post(
+  "/delete-account-request",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const { reason } = req.body || {};
+
+      const partner = await User.findById(partnerId).lean();
+      if (!partner) {
+        return res.status(404).json({ message: "Partner not found" });
+      }
+
+      // Prevent duplicate pending requests
+      const existing = await DeleteAccountRequest.findOne({
+        user: partnerId,
+        status: "PENDING",
+      });
+
+      if (existing) {
+        return res.status(400).json({
+          message: "You already have a pending delete account request.",
+        });
+      }
+
+      const requestDoc = await DeleteAccountRequest.create({
+        user: partnerId,
+        role: partner.role,
+        reason: reason || "",
+        status: "PENDING",
+        source: "PORTAL",
+      });
+
+      // Fire-and-forget email to admin/support
+      setImmediate(async () => {
+        try {
+          await sendDeleteAccountRequestEmail(partner, reason || "", "PORTAL");
+        } catch (err) {
+          console.error("Failed to send delete account request email:", err.message);
+        }
+      });
+
+      return res.status(201).json({
+        message:
+          "Delete account request submitted successfully. Our team will review and process it shortly.",
+        requestId: requestDoc._id,
+      });
+    } catch (err) {
+      console.error("Error creating delete account request:", err);
+      return res.status(500).json({
+        message: "Server error while creating delete account request",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// ==================== PARTNER TARGET VIEW (Partner) ====================
+
+// GET /api/partner/my-target
+// Partner gets their own target
+router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
+  try {
+    const partnerId = req.user.sub;
+    const { year, month } = req.query;
+
+    const currentDate = new Date();
+    const targetMonth = month ? Number(month) : currentDate.getMonth() + 1;
+    const targetYear = year ? Number(year) : currentDate.getFullYear();
+
+    // Get target for this partner
+    const target = await Target.findOne({
+      assignedTo: partnerId,
+      role: ROLES.PARTNER,
+      month: targetMonth,
+      year: targetYear,
+    }).lean();
+
+    // Get disbursed applications for achievement calculation
+    const startDate = new Date(targetYear, targetMonth - 1, 1);
+    const endDate = new Date(targetYear, targetMonth, 1);
+
+    const disbursedApps = await Application.find({
+      status: "DISBURSED",
+      partnerId: partnerId,
+      updatedAt: {
+        $gte: startDate,
+        $lt: endDate
+      }
+    }).lean();
+
+    const fileCountTarget = target?.fileCountTarget || 4;
+    const disbursementTarget = target?.disbursementTarget || 2000000;
+    const achievedFileCount = disbursedApps.length;
+    const achievedDisbursement = disbursedApps.reduce(
+      (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
+      0
+    );
+
+    // Check if targets are met and exceeded
+    const fileTargetMet = achievedFileCount >= fileCountTarget;
+    const disbursementTargetMet = achievedDisbursement >= disbursementTarget;
+    const targetAchieved = fileTargetMet && disbursementTargetMet;
+    const fileTargetExceeded = achievedFileCount > fileCountTarget;
+    const disbursementTargetExceeded = achievedDisbursement > disbursementTarget;
+    const targetExceeded = fileTargetExceeded || disbursementTargetExceeded;
+
+    // Calculate percentages
+    const fileAchievementPercentage = fileCountTarget > 0 
+      ? (achievedFileCount / fileCountTarget) * 100 
+      : 0;
+    const disbursementAchievementPercentage = disbursementTarget > 0 
+      ? (achievedDisbursement / disbursementTarget) * 100 
+      : 0;
+
+    res.json({
+      partnerId,
+      month: targetMonth,
+      year: targetYear,
+      fileCountTarget,
+      achievedFileCount,
+      disbursementTarget,
+      achievedDisbursement,
+      fileTargetMet,
+      disbursementTargetMet,
+      targetAchieved,
+      fileTargetExceeded,
+      disbursementTargetExceeded,
+      targetExceeded,
+      fileAchievementPercentage: fileAchievementPercentage.toFixed(2),
+      disbursementAchievementPercentage: disbursementAchievementPercentage.toFixed(2),
+      hasTarget: !!target,
+    });
+  } catch (err) {
+    console.error("Error fetching partner target:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
 
 export default router;

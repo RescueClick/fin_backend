@@ -2,13 +2,15 @@ import { Router } from "express";
 import argon2 from "argon2";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
-import { ROLES } from "../config/roles.js";
+import { ROLES, RSM_TYPES } from "../config/roles.js";
 import { User } from "../models/User.js";
 import { makeRmCode, makeAsmCode } from "../utils/codes.js";
 import { Application } from "../models/Application.js";
 import { Payout } from "../models/Payout.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { Target } from "../models/Target.js";
+import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
+import { sendDeleteAccountConfirmationEmail } from "../utils/emailService.js";
 import { bannerUpload } from "../middleware/bannerUpload.js";
 import { Banner } from "../models/Banner.js";
 import mongoose from "mongoose";
@@ -286,12 +288,19 @@ router.post(
         dob,
         region,
         password,
-        asmId,
+        personalRsmId,
+        businessHomeRsmId,
       } = req.body || {};
 
-      if (!firstName || !lastName || !email || !phone || !asmId) {
+      if (!firstName || !lastName || !email || !phone) {
         return res.status(400).json({
-          message: "First name, last name, email, phone, and asmId required",
+          message: "First name, last name, email, and phone are required",
+        });
+      }
+
+      if (!personalRsmId || !businessHomeRsmId) {
+        return res.status(400).json({
+          message: "Both personalRsmId and businessHomeRsmId are required",
         });
       }
 
@@ -300,12 +309,42 @@ router.post(
       if (exists)
         return res.status(409).json({ message: "Email already in use" });
 
-      // Check if ASM exists
-      const asm = await User.findOne({ _id: asmId, role: ROLES.ASM });
-      if (!asm) return res.status(404).json({ message: "ASM not found" });
+      // Check if Personal RSM exists and is of correct type
+      const personalRsm = await User.findOne({ 
+        _id: personalRsmId, 
+        role: ROLES.RSM,
+        rsmType: RSM_TYPES.PERSONAL 
+      });
+      if (!personalRsm) {
+        return res.status(404).json({ 
+          message: "Personal Loan RSM not found or invalid type" 
+        });
+      }
+
+      // Check if Business/Home RSM exists and is of correct type
+      const businessHomeRsm = await User.findOne({ 
+        _id: businessHomeRsmId, 
+        role: ROLES.RSM,
+        rsmType: RSM_TYPES.BUSINESS_HOME 
+      });
+      if (!businessHomeRsm) {
+        return res.status(404).json({ 
+          message: "Business & Home Loan RSM not found or invalid type" 
+        });
+      }
+
+      // Both RSMs should be under the same ASM
+      if (personalRsm.asmId.toString() !== businessHomeRsm.asmId.toString()) {
+        return res.status(400).json({
+          message: "Both RSMs must be under the same ASM",
+        });
+      }
 
       const rawPassword =
         password || `Rm@${Math.random().toString(36).slice(2, 10)}`;
+
+      // Get ASM for region inheritance
+      const asm = await User.findById(personalRsm.asmId);
 
       // Create RM
       const rm = await User.create({
@@ -313,12 +352,14 @@ router.post(
         firstName,
         lastName,
         phone,
-        region: asm.region, // inherit region from ASM
+        region: region || asm?.region || "N/A", // Use provided region or inherit from ASM
         email: email.toLowerCase(),
         passwordHash: await argon2.hash(rawPassword),
         role: ROLES.RM,
         rmCode: makeRmCode(),
-        asmId: asm._id, // link to ASM
+        asmId: personalRsm.asmId, // link to ASM (inherited from RSM)
+        personalRsmId: personalRsm._id, // link to Personal Loan RSM
+        businessHomeRsmId: businessHomeRsm._id, // link to Business/Home Loan RSM
         dob,
       });
 
@@ -413,11 +454,14 @@ router.post(
         id: rm._id,
         rmCode: rm.rmCode,
         employeeId: rm.employeeId,
-        assignedAsm: {
+        personalRsmId: rm.personalRsmId,
+        businessHomeRsmId: rm.businessHomeRsmId,
+        asmId: rm.asmId,
+        assignedAsm: asm ? {
           id: asm._id,
           name: `${asm.firstName} ${asm.lastName}`,
           region: asm.region,
-        },
+        } : null,
         dob: rm.dob,
         region: rm.region,
         tempPassword: password ? undefined : rawPassword,
@@ -425,6 +469,102 @@ router.post(
     } catch (err) {
       console.error("Error creating RM:", err);
       res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// Create RSM (Admin only) - moved from /api/rsm/create-rsm
+router.post(
+  "/create-rsm",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const {
+        firstName,
+        lastName,
+        phone,
+        email,
+        dob,
+        region,
+        password,
+        asmId,
+        rsmType,
+      } = req.body || {};
+
+      if (!firstName || !lastName || !email || !phone || !rsmType || !asmId) {
+        return res.status(400).json({
+          message:
+            "firstName, lastName, email, phone, asmId and rsmType are required",
+        });
+      }
+
+      if (!Object.values(RSM_TYPES).includes(rsmType)) {
+        return res.status(400).json({
+          message: `Invalid rsmType. Allowed: ${Object.values(RSM_TYPES).join(
+            ", "
+          )}`,
+        });
+      }
+
+      // Check if ASM exists
+      const asm = await User.findOne({ _id: asmId, role: ROLES.ASM });
+      if (!asm) return res.status(404).json({ message: "ASM not found" });
+
+      const exists = await User.findOne({ email: email.toLowerCase() });
+      if (exists) {
+        return res.status(409).json({ message: "Email already in use" });
+      }
+
+      const rawPassword =
+        password || `Rsm@${Math.random().toString(36).slice(2, 10)}`;
+
+      const rsm = await User.create({
+        firstName,
+        lastName,
+        phone,
+        email: email.toLowerCase(),
+        passwordHash: await argon2.hash(rawPassword),
+        role: ROLES.RSM,
+        employeeId: await generateEmployeeId("RSM"),
+        dob,
+        region: asm.region || region,
+        asmId: asm._id,
+        rsmType,
+      });
+
+      // Send credentials email
+      try {
+        const emailSent = await sendUserAccountEmail(
+          rsm,
+          "RSM",
+          password ? null : rawPassword,
+          {
+            firstName: req.user.firstName || "Admin",
+            lastName: req.user.lastName || "",
+          }
+        );
+        if (emailSent) {
+          console.log(`✅ RSM creation email sent to: ${email}`);
+        }
+      } catch (mailErr) {
+        console.error(
+          "❌ Failed to send RSM creation email:",
+          mailErr.message
+        );
+      }
+
+      return res.status(201).json({
+        message: "RSM created successfully",
+        id: rsm._id,
+        employeeId: rsm.employeeId,
+        rsmType: rsm.rsmType,
+        asmId: rsm.asmId,
+        tempPassword: password ? undefined : rawPassword,
+      });
+    } catch (err) {
+      console.error("Create RSM Error:", err);
+      return res.status(500).json({ message: "Internal Server Error" });
     }
   }
 );
@@ -441,17 +581,55 @@ router.get(
           path: "asmId",
           select: "firstName lastName employeeId",
         })
+        .populate({
+          path: "personalRsmId",
+          select: "firstName lastName employeeId phone email",
+        })
+        .populate({
+          path: "businessHomeRsmId",
+          select: "firstName lastName employeeId phone email",
+        })
         .lean();
 
-      // Flatten asm details into same object
+      // Flatten asm and RSM details into same object
       const formatted = list.map((rm) => {
         const asm = rm.asmId;
+        const personalRsm = rm.personalRsmId;
+        const businessHomeRsm = rm.businessHomeRsmId;
+
+        // Store original IDs before destructuring
+        const originalPersonalRsmId = typeof rm.personalRsmId === 'object' && rm.personalRsmId?._id 
+          ? rm.personalRsmId._id 
+          : rm.personalRsmId;
+        const originalBusinessHomeRsmId = typeof rm.businessHomeRsmId === 'object' && rm.businessHomeRsmId?._id 
+          ? rm.businessHomeRsmId._id 
+          : rm.businessHomeRsmId;
+
+        // Extract base RM data without populated objects
+        const {
+          asmId: _asmId,
+          personalRsmId: _personalRsmId,
+          businessHomeRsmId: _businessHomeRsmId,
+          ...rmBase
+        } = rm;
 
         return {
-          ...rm,
+          ...rmBase,
           asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
           asmEmployeeId: asm ? asm.employeeId : null,
           asmId: asm ? asm._id : null, // use _id, not asmId
+          // Personal Loan RSM details
+          personalRsmId: personalRsm ? personalRsm._id : originalPersonalRsmId || null,
+          personalRsmName: personalRsm ? `${personalRsm.firstName} ${personalRsm.lastName}` : null,
+          personalRsmEmployeeId: personalRsm ? personalRsm.employeeId : null,
+          personalRsmPhone: personalRsm ? personalRsm.phone : null,
+          personalRsmEmail: personalRsm ? personalRsm.email : null,
+          // Business & Home Loan RSM details
+          businessHomeRsmId: businessHomeRsm ? businessHomeRsm._id : originalBusinessHomeRsmId || null,
+          businessHomeRsmName: businessHomeRsm ? `${businessHomeRsm.firstName} ${businessHomeRsm.lastName}` : null,
+          businessHomeRsmEmployeeId: businessHomeRsm ? businessHomeRsm.employeeId : null,
+          businessHomeRsmPhone: businessHomeRsm ? businessHomeRsm.phone : null,
+          businessHomeRsmEmail: businessHomeRsm ? businessHomeRsm.email : null,
         };
       });
 
@@ -459,6 +637,50 @@ router.get(
     } catch (err) {
       console.error(err);
       res.status(500).json({ message: "Error fetching RMs" });
+    }
+  }
+);
+
+// List all RSMs (Admin)
+router.get(
+  "/get-rsm",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const list = await User.find({ role: ROLES.RSM })
+        .select("-passwordHash -__v")
+        .populate({
+          path: "asmId",
+          select: "firstName lastName employeeId",
+        })
+        .lean();
+
+      const formatted = list.map((rsm) => {
+        const asm = rsm.asmId;
+        return {
+          _id: rsm._id,
+          firstName: rsm.firstName,
+          lastName: rsm.lastName,
+          email: rsm.email,
+          phone: rsm.phone,
+          employeeId: rsm.employeeId,
+          rsmType: rsm.rsmType || null, // Explicitly include rsmType
+          region: rsm.region,
+          status: rsm.status,
+          createdAt: rsm.createdAt,
+          updatedAt: rsm.updatedAt,
+          asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
+          asmEmployeeId: asm ? asm.employeeId : null,
+          asmId: asm ? asm._id : null,
+        };
+      });
+
+      console.log("RSMs fetched:", formatted.length, "RSMs with types:", formatted.map(r => ({ name: `${r.firstName} ${r.lastName}`, type: r.rsmType })));
+      res.json(formatted);
+    } catch (err) {
+      console.error("Error fetching RSMs:", err);
+      res.status(500).json({ message: "Error fetching RSMs" });
     }
   }
 );
@@ -1327,8 +1549,9 @@ router.post(
   }
 );
 
+// Activate ASM (Admin only)
 router.post(
-  "/activate-asm",
+  "/asm/activate",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
@@ -1339,8 +1562,8 @@ router.post(
         return res.status(400).json({ message: "asmId is required" });
       }
 
-      const asm = await User.findByIdAndUpdate(
-        asmId,
+      const asm = await User.findOneAndUpdate(
+        { _id: asmId, role: ROLES.ASM },
         { status: "ACTIVE" },
         { new: true }
       );
@@ -1356,25 +1579,79 @@ router.post(
           subject: "Your ASM Account Has Been Activated",
           html: `
             <p>Dear ${asm.firstName} ${asm.lastName},</p>
-            <p>We are pleased to inform you that your ASM account has been <b>activated</b>.</p>
-            <p><b>Employee ID:</b> ${asm.employeeId}</p>
-            <p><b>ASM Code:</b> ${asm.asmCode}</p>
-            <p>You can now log in using your registered email and password.</p>
+            <p>We are pleased to inform you that your ASM account has been <b>activated</b> successfully.</p>
+            <p><b>Employee ID:</b> ${asm.employeeId || "-"}<br/>
+            <b>ASM Code:</b> ${asm.asmCode || "-"}</p>
+            <p>You can now log in and start managing your RSMs and their RMs as usual.</p>
             <br/>
             <p>Regards,<br/>Trustline Fintech</p>
           `,
         });
+        console.log("📧 ASM activation mail sent to:", asm.email);
       } catch (mailErr) {
-        console.error("Failed to send activation email:", mailErr.message);
-        // Continue response even if email fails
+        console.error("❌ Failed to send ASM activation email:", mailErr.message);
       }
 
       res.json({
-        message: "ASM activated successfully",
+        message: "ASM activated successfully and notified via email",
         asm,
       });
     } catch (error) {
-      console.error("Error activating ASM:", error);
+      console.error("Error in /asm/activate:", error);
+      res.status(500).json({ message: error.message });
+    }
+  }
+);
+
+// Deactivate ASM (Admin only)
+router.post(
+  "/asm/deactivate",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { asmId } = req.body;
+
+      if (!asmId) {
+        return res.status(400).json({ message: "asmId is required" });
+      }
+
+      const asm = await User.findOneAndUpdate(
+        { _id: asmId, role: ROLES.ASM },
+        { status: "SUSPENDED" },
+        { new: true }
+      );
+
+      if (!asm) {
+        return res.status(404).json({ message: "ASM not found" });
+      }
+
+      // 📧 Send deactivation email
+      try {
+        await sendMail({
+          to: asm.email,
+          subject: "Your ASM Account Has Been Deactivated",
+          html: `
+            <p>Dear ${asm.firstName} ${asm.lastName},</p>
+            <p>Your ASM account has been <b>deactivated</b> by the administrator.</p>
+            <p><b>Employee ID:</b> ${asm.employeeId || "-"}<br/>
+            <b>ASM Code:</b> ${asm.asmCode || "-"}</p>
+            <p>If you believe this action was incorrect, please contact support.</p>
+            <br/>
+            <p>Regards,<br/>Trustline Fintech</p>
+          `,
+        });
+        console.log("📧 ASM deactivation mail sent to:", asm.email);
+      } catch (mailErr) {
+        console.error("❌ Failed to send ASM deactivation email:", mailErr.message);
+      }
+
+      res.json({
+        message: "ASM deactivated successfully and notified via email",
+        asm,
+      });
+    } catch (error) {
+      console.error("Error in /asm/deactivate:", error);
       res.status(500).json({ message: error.message });
     }
   }
@@ -1523,6 +1800,7 @@ router.post(
   }
 );
 
+// Activate RM (Admin only)
 router.post(
   "/rm/activate",
   auth,
@@ -1535,8 +1813,8 @@ router.post(
         return res.status(400).json({ message: "rmId is required" });
       }
 
-      const rm = await User.findByIdAndUpdate(
-        rmId,
+      const rm = await User.findOneAndUpdate(
+        { _id: rmId, role: ROLES.RM },
         { status: "ACTIVE" },
         { new: true }
       );
@@ -1560,9 +1838,9 @@ router.post(
             <p>Regards,<br/>Trustline Fintech</p>
           `,
         });
-        console.log("📧 Activation mail sent to:", rm.email);
+        console.log("📧 RM activation mail sent to:", rm.email);
       } catch (mailErr) {
-        console.error("❌ Failed to send activation email:", mailErr.message);
+        console.error("❌ Failed to send RM activation email:", mailErr.message);
       }
 
       res.json({
@@ -1571,6 +1849,278 @@ router.post(
       });
     } catch (error) {
       console.error("Error in /rm/activate:", error);
+      res.status(500).json({ message: error.message });
+    }
+  }
+);
+
+// Deactivate RM (Admin only) - with automatic reassignment
+router.post(
+  "/rm/deactivate",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { rmId } = req.body;
+
+      if (!rmId) {
+        return res.status(400).json({ message: "rmId is required" });
+      }
+
+      // Get the RM to deactivate
+      const oldRm = await User.findOne({ _id: rmId, role: ROLES.RM });
+      if (!oldRm) {
+        return res.status(404).json({ message: "RM not found" });
+      }
+
+      // Find another active RM under the same RSM(s) or ASM
+      let newRm = null;
+      const rsmIds = [];
+      if (oldRm.personalRsmId) rsmIds.push(oldRm.personalRsmId);
+      if (oldRm.businessHomeRsmId) rsmIds.push(oldRm.businessHomeRsmId);
+
+      if (rsmIds.length > 0) {
+        // Find another active RM under the same RSM(s)
+        newRm = await User.findOne({
+          role: ROLES.RM,
+          status: "ACTIVE",
+          _id: { $ne: rmId },
+          $or: [
+            { personalRsmId: { $in: rsmIds } },
+            { businessHomeRsmId: { $in: rsmIds } }
+          ]
+        });
+      }
+
+      // If no RM found under same RSM, find any active RM under the same ASM
+      if (!newRm && oldRm.asmId) {
+        newRm = await User.findOne({
+          role: ROLES.RM,
+          status: "ACTIVE",
+          _id: { $ne: rmId },
+          asmId: oldRm.asmId
+        });
+      }
+
+      // If still no RM found, find any active RM
+      if (!newRm) {
+        newRm = await User.findOne({
+          role: ROLES.RM,
+          status: "ACTIVE",
+          _id: { $ne: rmId }
+        });
+      }
+
+      if (!newRm) {
+        return res.status(400).json({ 
+          message: "Cannot deactivate RM. No other active RM found to reassign data." 
+        });
+      }
+
+      // 1️⃣ Reassign all Partners from old RM to new RM first
+      const partners = await User.find(
+        { role: ROLES.PARTNER, rmId: rmId },
+        "_id"
+      );
+      const partnerIds = partners.map((p) => p._id);
+      const partnersUpdated = await User.updateMany(
+        { role: ROLES.PARTNER, rmId: rmId },
+        { $set: { rmId: newRm._id } }
+      );
+
+      // 2️⃣ Reassign all Applications from old RM to new RM
+      // This includes both direct rmId assignments and applications via partners
+      const appsUpdated = await Application.updateMany(
+        {
+          $or: [
+            { rmId: rmId }, // Direct RM assignment
+            { partnerId: { $in: partnerIds } } // Applications from partners under old RM
+          ]
+        },
+        { $set: { rmId: newRm._id } }
+      );
+
+      // 3️⃣ Reassign all Customers of those Partners (update their rmId if exists)
+      let customersUpdated = 0;
+      if (partnerIds.length > 0) {
+        const customerUpdate = await User.updateMany(
+          { partnerId: { $in: partnerIds } },
+          { $set: { rmId: newRm._id } }
+        );
+        customersUpdated = customerUpdate.modifiedCount;
+      }
+
+      // 4️⃣ Deactivate the old RM
+      const deactivatedRm = await User.findByIdAndUpdate(
+        rmId,
+        { status: "SUSPENDED" },
+        { new: true }
+      );
+
+      // 📧 Send deactivation email to old RM
+      try {
+        await sendMail({
+          to: deactivatedRm.email,
+          subject: "Your RM Account Has Been Deactivated",
+          html: `
+            <p>Dear ${deactivatedRm.firstName} ${deactivatedRm.lastName},</p>
+            <p>Your RM account has been <b>deactivated</b> by the administrator.</p>
+            <p>All your Applications, Partners, and Customers have been reassigned to another RM.</p>
+            <p><b>Employee ID:</b> ${deactivatedRm.employeeId || "-"}<br/>
+            <b>RM Code:</b> ${deactivatedRm.rmCode || "-"}</p>
+            <p>If you believe this action was incorrect, please contact support.</p>
+            <br/>
+            <p>Regards,<br/>Trustline Fintech</p>
+          `,
+        });
+        console.log("📧 RM deactivation mail sent to:", deactivatedRm.email);
+      } catch (mailErr) {
+        console.error("❌ Failed to send RM deactivation email:", mailErr.message);
+      }
+
+      // 📧 Send notification email to new RM
+      try {
+        await sendMail({
+          to: newRm.email,
+          subject: "You Have Been Assigned New Data",
+          html: `
+            <p>Dear ${newRm.firstName} ${newRm.lastName},</p>
+            <p>You have been assigned new Applications, Partners, and Customers from a deactivated RM.</p>
+            <p><b>Employee ID:</b> ${newRm.employeeId || "-"}<br/>
+            <b>RM Code:</b> ${newRm.rmCode || "-"}</p>
+            <p>Please check your dashboard for details.</p>
+            <br/>
+            <p>Regards,<br/>Trustline Fintech</p>
+          `,
+        });
+        console.log("📧 Assignment mail sent to:", newRm.email);
+      } catch (mailErr) {
+        console.error("❌ Failed to send assignment email:", mailErr.message);
+      }
+
+      res.json({
+        message: "RM deactivated successfully. All data reassigned to another RM.",
+        reassigned: {
+          applications: appsUpdated.modifiedCount,
+          partners: partnersUpdated.modifiedCount,
+          customers: customersUpdated
+        },
+        newRm: {
+          id: newRm._id,
+          name: `${newRm.firstName} ${newRm.lastName}`,
+          employeeId: newRm.employeeId
+        }
+      });
+    } catch (error) {
+      console.error("Error in /rm/deactivate:", error);
+      res.status(500).json({ message: error.message });
+    }
+  }
+);
+
+// Activate RSM (Admin only)
+router.post(
+  "/rsm/activate",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { rsmId } = req.body;
+
+      if (!rsmId) {
+        return res.status(400).json({ message: "rsmId is required" });
+      }
+
+      const rsm = await User.findOneAndUpdate(
+        { _id: rsmId, role: ROLES.RSM },
+        { status: "ACTIVE" },
+        { new: true }
+      );
+
+      if (!rsm) {
+        return res.status(404).json({ message: "RSM not found" });
+      }
+
+      // 📧 Send activation email
+      try {
+        await sendMail({
+          to: rsm.email,
+          subject: "Your RSM Account Has Been Activated",
+          html: `
+            <p>Dear ${rsm.firstName} ${rsm.lastName},</p>
+            <p>We are pleased to inform you that your RSM account has been <b>activated</b> successfully.</p>
+            <p><b>Employee ID:</b> ${rsm.employeeId || "-"}<br/>
+            <b>RSM Type:</b> ${rsm.rsmType || "-"}</p>
+            <p>You can now log in and start managing your RMs and applications as usual.</p>
+            <br/>
+            <p>Regards,<br/>Trustline Fintech</p>
+          `,
+        });
+        console.log("📧 RSM activation mail sent to:", rsm.email);
+      } catch (mailErr) {
+        console.error("❌ Failed to send RSM activation email:", mailErr.message);
+      }
+
+      res.json({
+        message: "RSM activated successfully and notified via email",
+        rsm,
+      });
+    } catch (error) {
+      console.error("Error in /rsm/activate:", error);
+      res.status(500).json({ message: error.message });
+    }
+  }
+);
+
+// Deactivate RSM (Admin only)
+router.post(
+  "/rsm/deactivate",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { rsmId } = req.body;
+
+      if (!rsmId) {
+        return res.status(400).json({ message: "rsmId is required" });
+      }
+
+      const rsm = await User.findOneAndUpdate(
+        { _id: rsmId, role: ROLES.RSM },
+        { status: "SUSPENDED" },
+        { new: true }
+      );
+
+      if (!rsm) {
+        return res.status(404).json({ message: "RSM not found" });
+      }
+
+      // 📧 Send deactivation email
+      try {
+        await sendMail({
+          to: rsm.email,
+          subject: "Your RSM Account Has Been Deactivated",
+          html: `
+            <p>Dear ${rsm.firstName} ${rsm.lastName},</p>
+            <p>Your RSM account has been <b>deactivated</b> by the administrator.</p>
+            <p><b>Employee ID:</b> ${rsm.employeeId || "-"}<br/>
+            <b>RSM Type:</b> ${rsm.rsmType || "-"}</p>
+            <p>If you believe this action was incorrect, please contact support.</p>
+            <br/>
+            <p>Regards,<br/>Trustline Fintech</p>
+          `,
+        });
+        console.log("📧 RSM deactivation mail sent to:", rsm.email);
+      } catch (mailErr) {
+        console.error("❌ Failed to send RSM deactivation email:", mailErr.message);
+      }
+
+      res.json({
+        message: "RSM deactivated successfully and notified via email",
+        rsm,
+      });
+    } catch (error) {
+      console.error("Error in /rsm/deactivate:", error);
       res.status(500).json({ message: error.message });
     }
   }
@@ -2044,167 +2594,8 @@ function buildProfile(asm) {
   };
 }
 
-router.post(
-  "/target/assign-asm-bulk",
-  auth,
-  requireRole(ROLES.SUPER_ADMIN),
-  async (req, res) => {
-    try {
-      let { month, year, totalTarget } = req.body;
-      if (!month || !year || !totalTarget) {
-        return res
-          .status(400)
-          .json({ message: "Month, year, and totalTarget are required" });
-      }
-
-      totalTarget = Number(totalTarget);
-      year = Number(year);
-
-      // Month mapping
-      const monthMap = {
-        January: 1,
-        February: 2,
-        March: 3,
-        April: 4,
-        May: 5,
-        June: 6,
-        July: 7,
-        August: 8,
-        September: 9,
-        October: 10,
-        November: 11,
-        December: 12,
-      };
-      if (typeof month === "string") month = monthMap[month];
-      if (!month || month < 1 || month > 12) {
-        return res.status(400).json({ message: "Invalid month" });
-      }
-
-      const assignerId = req.user.sub;
-
-      // Get all ASMs under this Admin
-      const asms = await User.find({
-        role: ROLES.ASM,
-        adminId: assignerId,
-      }).lean();
-
-      if (!asms.length) {
-        return res.status(404).json({ message: "No ASMs found" });
-      }
-
-      const assignments = [];
-      const asmTarget = Number((totalTarget / asms.length).toFixed(2));
-
-      for (let asm of asms) {
-        // 🔹 Assign target to ASM
-        let target = await Target.findOne({
-          assignedTo: asm._id,
-          role: ROLES.ASM,
-          month,
-          year,
-        });
-
-        let finalAsmTarget = asmTarget;
-
-        if (target) {
-          target.targetValue = Number(
-            (target.targetValue + asmTarget).toFixed(2)
-          ); // cumulative
-          target.assignedBy = assignerId;
-          await target.save();
-          finalAsmTarget = target.targetValue;
-        } else {
-          target = await Target.create({
-            assignedBy: assignerId,
-            assignedTo: asm._id,
-            role: ROLES.ASM,
-            month,
-            year,
-            targetValue: asmTarget,
-          });
-        }
-        assignments.push(target);
-
-        // 🔹 Distribute ASM target among RMs
-        const rms = await User.find({ role: ROLES.RM, asmId: asm._id }).lean();
-        if (rms.length) {
-          const perRmTarget = Number((asmTarget / rms.length).toFixed(2));
-
-          for (let rm of rms) {
-            let rmT = await Target.findOne({
-              assignedTo: rm._id,
-              role: ROLES.RM,
-              month,
-              year,
-            });
-
-            if (rmT) {
-              rmT.targetValue = perRmTarget; // overwrite
-              rmT.assignedBy = assignerId;
-              await rmT.save();
-            } else {
-              rmT = await Target.create({
-                assignedBy: assignerId,
-                assignedTo: rm._id,
-                role: ROLES.RM,
-                month,
-                year,
-                targetValue: perRmTarget,
-              });
-            }
-            assignments.push(rmT);
-
-            // 🔹 Distribute RM target among Partners
-            const partners = await User.find({
-              role: ROLES.PARTNER,
-              rmId: rm._id,
-            }).lean();
-            if (partners.length) {
-              const perPartnerTarget = Number(
-                (perRmTarget / partners.length).toFixed(2)
-              );
-              for (let p of partners) {
-                let pT = await Target.findOne({
-                  assignedTo: p._id,
-                  role: ROLES.PARTNER,
-                  month,
-                  year,
-                });
-
-                if (pT) {
-                  pT.targetValue = perPartnerTarget; // overwrite
-                  pT.assignedBy = assignerId;
-                  await pT.save();
-                } else {
-                  pT = await Target.create({
-                    assignedBy: assignerId,
-                    assignedTo: p._id,
-                    role: ROLES.PARTNER,
-                    month,
-                    year,
-                    targetValue: perPartnerTarget,
-                  });
-                }
-                assignments.push(pT);
-              }
-            }
-          }
-        }
-      }
-
-      res.status(201).json({
-        message: "Bulk hierarchical target assigned successfully",
-        totalTarget,
-        month,
-        year,
-        assignments,
-      });
-    } catch (err) {
-      console.error("Bulk hierarchical target error:", err);
-      res.status(500).json({ message: "Server error" });
-    }
-  }
-);
+// ================== REMOVED: ASM/RSM/RM TARGET ASSIGNMENT ==================
+// Targets are now only for Partners. ASM/RSM/RM targets have been removed.
 
 // router.post(
 //   "/target/assign-bulk",
@@ -2352,162 +2743,8 @@ router.post(
 //   }
 // );
 
-router.post(
-  "/target/assign-bulk",
-  auth,
-  requireRole(ROLES.SUPER_ADMIN),
-  async (req, res) => {
-    try {
-      let { month, year, totalTarget } = req.body;
-      if (!month || !year || !totalTarget)
-        return res
-          .status(400)
-          .json({ message: "Month, year, totalTarget required" });
-
-      totalTarget = Number(totalTarget);
-      year = Number(year);
-
-      const monthMap = {
-        January: 1,
-        February: 2,
-        March: 3,
-        April: 4,
-        May: 5,
-        June: 6,
-        July: 7,
-        August: 8,
-        September: 9,
-        October: 10,
-        November: 11,
-        December: 12,
-      };
-      if (typeof month === "string") month = monthMap[month];
-      if (!month || month < 1 || month > 12)
-        return res.status(400).json({ message: "Invalid month" });
-
-      const assignerId = req.user.sub;
-
-      // Get all ASMs under this admin
-      const asms = await User.find({
-        role: ROLES.ASM,
-        adminId: assignerId,
-      }).lean();
-      if (!asms.length)
-        return res.status(404).json({ message: "No ASMs found" });
-
-      const assignments = [];
-      const asmTarget = Number((totalTarget / asms.length).toFixed(2));
-
-      for (let asm of asms) {
-        let target = await Target.findOne({
-          assignedTo: asm._id,
-          role: ROLES.ASM,
-          month,
-          year,
-        });
-
-        if (target) {
-          // Add new increment
-          target.targetValue = Number(
-            (target.targetValue + asmTarget).toFixed(2)
-          );
-          target.assignedBy = assignerId;
-          await target.save();
-        } else {
-          target = await Target.create({
-            assignedBy: assignerId,
-            assignedTo: asm._id,
-            role: ROLES.ASM,
-            month,
-            year,
-            targetValue: asmTarget,
-          });
-        }
-        assignments.push(target);
-
-        // Get RMs under ASM
-        const rms = await User.find({ role: ROLES.RM, asmId: asm._id }).lean();
-        if (rms.length) {
-          const perRmTarget = Number((asmTarget / rms.length).toFixed(2));
-
-          for (let rm of rms) {
-            let rmT = await Target.findOne({
-              assignedTo: rm._id,
-              role: ROLES.RM,
-              month,
-              year,
-            });
-            if (rmT) {
-              rmT.targetValue = Number(
-                (rmT.targetValue + perRmTarget).toFixed(2)
-              );
-              rmT.assignedBy = assignerId;
-              await rmT.save();
-            } else {
-              rmT = await Target.create({
-                assignedBy: assignerId,
-                assignedTo: rm._id,
-                role: ROLES.RM,
-                month,
-                year,
-                targetValue: perRmTarget,
-              });
-            }
-            assignments.push(rmT);
-
-            // Get Partners under RM
-            const partners = await User.find({
-              role: ROLES.PARTNER,
-              rmId: rm._id,
-            }).lean();
-            if (partners.length) {
-              const perPartnerTarget = Number(
-                (perRmTarget / partners.length).toFixed(2)
-              );
-
-              for (let p of partners) {
-                let pT = await Target.findOne({
-                  assignedTo: p._id,
-                  role: ROLES.PARTNER,
-                  month,
-                  year,
-                });
-                if (pT) {
-                  pT.targetValue = Number(
-                    (pT.targetValue + perPartnerTarget).toFixed(2)
-                  );
-                  pT.assignedBy = assignerId;
-                  await pT.save();
-                } else {
-                  pT = await Target.create({
-                    assignedBy: assignerId,
-                    assignedTo: p._id,
-                    role: ROLES.PARTNER,
-                    month,
-                    year,
-                    targetValue: perPartnerTarget,
-                  });
-                }
-                assignments.push(pT);
-              }
-            }
-          }
-        }
-      }
-
-      res.status(201).json({
-        message: "Bulk hierarchical target assigned successfully",
-        totalTarget,
-        month,
-        year,
-        assignments,
-      });
-    } catch (err) {
-      console.error("Bulk hierarchical target error:", err);
-      res.status(500).json({ message: "Server error" });
-    }
-  }
-);
+// ================== REMOVED: ASM/RSM/RM TARGET ASSIGNMENT ==================
+// Targets are now only for Partners. ASM/RSM/RM targets have been removed.
 
 router.get(
   "/target/asm/:asmId/:year",
@@ -2578,7 +2815,30 @@ router.get(
       const user = await User.findById(id).lean();
       if (!user) return res.status(404).json({ message: "User not found" });
 
-      // Helper: Sum disbursed amounts
+      // ⚠️ CRITICAL: If user is SUSPENDED, return zero targets and achievements
+      if (user.status === "SUSPENDED") {
+        return res.json({
+          data: {
+            profile: {
+              userId: user._id,
+              name: `${user.firstName} ${user.lastName}`,
+              role: user.role,
+              email: user.email,
+              phone: user.phone,
+              employeeId: user.employeeId || null,
+              status: user.status,
+            },
+            analytics: {
+              totals: {},
+              totalDisbursed: 0,
+              assignedTarget: { targetValue: 0, achievedValue: 0 },
+              performance: "0.00%",
+            },
+          },
+        });
+      }
+
+      // Helper: Sum disbursed amounts (only for ACTIVE users)
       const sumDisbursedBy = async (filter) => {
         const agg = await Application.aggregate([
           { $match: { ...filter, status: "DISBURSED" } },
@@ -2670,7 +2930,7 @@ router.get(
         return {
           month: monthNames[currentMonth - 1],
           year: currentYear,
-          targetValue: t ? Number(t.targetValue) : 0,
+          targetValue: t ? Number(t.disbursementTarget || t.targetValue || 0) : 0,
           achievedValue,
         };
       };
@@ -2703,7 +2963,12 @@ router.get(
 
       // Role-wise calculations
       if (user.role === ROLES.ASM) {
-        const rms = await User.find({ asmId: id, role: ROLES.RM })
+        // Only include ACTIVE RMs and their ACTIVE partners
+        const rms = await User.find({ 
+          asmId: id, 
+          role: ROLES.RM,
+          status: "ACTIVE" // Only ACTIVE RMs
+        })
           .select("_id")
           .lean();
         const rmIds = rms.map((x) => x._id);
@@ -2711,6 +2976,7 @@ router.get(
         const partners = await User.find({
           rmId: { $in: rmIds },
           role: ROLES.PARTNER,
+          status: "ACTIVE" // Only ACTIVE partners
         })
           .select("_id")
           .lean();
@@ -2745,19 +3011,41 @@ router.get(
       }
 
       if (user.role === ROLES.RM) {
-        const partners = await User.find({ rmId: id, role: ROLES.PARTNER })
+        // Get all ACTIVE partners under this RM
+        const partners = await User.find({ 
+          rmId: id, 
+          role: ROLES.PARTNER,
+          status: "ACTIVE" // Only ACTIVE partners
+        })
           .select("_id")
           .lean();
-        const partnerIds = partners.map((x) => x._id);
+        let partnerIds = partners.map((x) => x._id);
+
+        // ⚠️ CRITICAL: For SUSPENDED RM, only count ACTIVE partners who have done disbursement
+        if (user.status === "SUSPENDED") {
+          // Find which ACTIVE partners have actually disbursed
+          const partnersWithDisbursement = await Application.distinct("partnerId", {
+            partnerId: { $in: partnerIds },
+            status: "DISBURSED"
+          });
+          
+          // Only count partners who have disbursed
+          partnerIds = partnersWithDisbursement;
+        }
 
         const customers = await Application.distinct("customerId", {
           partnerId: { $in: partnerIds },
         });
 
-        totalDisbursed = await sumDisbursedBy({ rmId: user._id });
-        assignedTargetValue = await getAssignedTarget(user._id, ROLES.RM, {
-          rmId: user._id,
-        });
+        // For both ACTIVE and SUSPENDED RM, count disbursements from ACTIVE partners
+        // For SUSPENDED RM, partnerIds already filtered to only those who have disbursed
+        const disbursementFilter = { partnerId: { $in: partnerIds }, status: "DISBURSED" };
+        
+        totalDisbursed = await sumDisbursedBy(disbursementFilter);
+        
+        // Target calculation - uses the same filter to ensure consistency
+        // For SUSPENDED RM, this will only count targets from active partners who have disbursed
+        assignedTargetValue = await getAssignedTarget(user._id, ROLES.RM, disbursementFilter);
 
         performance =
           assignedTargetValue.targetValue > 0
@@ -2797,6 +3085,57 @@ router.get(
         totals = { customers: customers.length };
       }
 
+      if (user.role === ROLES.RSM) {
+        // Get all RMs under this RSM
+        const rms = await User.find({
+          role: ROLES.RM,
+          $or: [
+            { personalRsmId: id },
+            { businessHomeRsmId: id }
+          ],
+          status: "ACTIVE" // Only ACTIVE RMs
+        })
+          .select("_id")
+          .lean();
+        const rmIds = rms.map((x) => x._id);
+
+        // Get all ACTIVE partners under these RMs
+        const partners = await User.find({
+          rmId: { $in: rmIds },
+          role: ROLES.PARTNER,
+          status: "ACTIVE" // Only ACTIVE partners
+        })
+          .select("_id")
+          .lean();
+        const partnerIds = partners.map((x) => x._id);
+
+        const customers = await Application.distinct("customerId", {
+          $or: [
+            { rsmId: id },
+            { rmId: { $in: rmIds } },
+            { partnerId: { $in: partnerIds } }
+          ]
+        });
+
+        totalDisbursed = await sumDisbursedBy({ rsmId: id });
+        assignedTargetValue = await getAssignedTarget(user._id, ROLES.RSM, { rsmId: id });
+
+        performance =
+          assignedTargetValue.targetValue > 0
+            ? (
+                (assignedTargetValue.achievedValue /
+                  assignedTargetValue.targetValue) *
+                100
+              ).toFixed(2)
+            : "0.00";
+
+        totals = {
+          rms: rmIds.length,
+          partners: partnerIds.length,
+          customers: customers.length,
+        };
+      }
+
       if (user.role === ROLES.CUSTOMER) {
         totalDisbursed = await sumDisbursedBy({ customerId: user._id });
         assignedTargetValue = 0;
@@ -2804,23 +3143,114 @@ router.get(
         totals = {};
       }
 
-      // Response
+      // Response - wrap in data object to match frontend expectations
       return res.json({
-        profile: base,
-        analytics: {
-          scope,
-          totals,
-          assignedTarget: assignedTargetValue,
-          totalDisbursed,
-          performance:
-            scope === ROLES.ASM || scope === ROLES.RM || scope === ROLES.PARTNER
-              ? `${performance}%`
-              : undefined,
+        data: {
+          profile: base,
+          analytics: {
+            scope,
+            totals,
+            assignedTarget: assignedTargetValue,
+            totalDisbursed,
+            performance:
+              scope === ROLES.ASM || scope === ROLES.RSM || scope === ROLES.RM || scope === ROLES.PARTNER
+                ? `${performance}%`
+                : undefined,
+          },
         },
       });
     } catch (err) {
       console.error("Universal analytics error:", err);
       res.status(500).json({ message: "Failed to fetch analytics" });
+    }
+  }
+);
+
+// Get all delete-account requests
+router.get(
+  "/delete-account-requests",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (_req, res) => {
+    try {
+      const requests = await DeleteAccountRequest.find()
+        .sort({ createdAt: -1 })
+        .populate("user", "firstName lastName email phone employeeId role status");
+
+      res.json(requests);
+    } catch (err) {
+      console.error("Error fetching delete account requests:", err);
+      res.status(500).json({ message: "Server error while fetching requests" });
+    }
+  }
+);
+
+// Update delete-account request status (e.g., mark as COMPLETED or REJECTED)
+router.patch(
+  "/delete-account-requests/:id",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body || {};
+
+      if (!["PENDING", "COMPLETED", "REJECTED"].includes(status)) {
+        return res
+          .status(400)
+          .json({ message: "Invalid status. Allowed: PENDING, COMPLETED, REJECTED" });
+      }
+
+      const requestDoc = await DeleteAccountRequest.findById(id);
+      if (!requestDoc) {
+        return res.status(404).json({ message: "Request not found" });
+      }
+
+      const previousStatus = requestDoc.status;
+      requestDoc.status = status;
+
+      if (status !== "PENDING") {
+        requestDoc.processedAt = requestDoc.processedAt || new Date();
+        requestDoc.processedBy = requestDoc.processedBy || req.user.sub;
+      } else {
+        requestDoc.processedAt = undefined;
+        requestDoc.processedBy = undefined;
+      }
+
+      await requestDoc.save();
+
+      // On first transition to COMPLETED, send confirmation email to user
+      if (previousStatus !== "COMPLETED" && status === "COMPLETED") {
+        setImmediate(async () => {
+          try {
+            const user = await User.findById(requestDoc.user).lean();
+            if (user && user.email) {
+              await sendDeleteAccountConfirmationEmail(user);
+            }
+          } catch (err) {
+            console.error(
+              "Failed to send delete account confirmation email:",
+              err.message
+            );
+          }
+        });
+      }
+
+      const populated = await requestDoc.populate(
+        "user",
+        "firstName lastName email phone employeeId role status"
+      );
+
+      res.json({
+        message: "Delete account request updated successfully",
+        request: populated,
+      });
+    } catch (err) {
+      console.error("Error updating delete account request:", err);
+      res.status(500).json({
+        message: "Server error while updating delete account request",
+        error: err.message,
+      });
     }
   }
 );
@@ -3253,6 +3683,852 @@ router.post(
         message: "Email test failed",
         error: error.message,
       });
+    }
+  }
+);
+
+// ==================== PAYOUT MANAGEMENT - PENDING/DONE (ADMIN) ====================
+
+// GET /api/admin/customers/pending-payouts
+// Admin gets pending payout customers (disbursed loans without DONE payout)
+router.get("/customers/pending-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    // Fetch all disbursed applications
+    const applications = await Application.find({ status: "DISBURSED" })
+      .populate("customerId", "employeeId firstName lastName email phone")
+      .populate("partnerId", "firstName lastName email phone")
+      .lean();
+
+    // Get all payouts with DONE
+    const donePayouts = await Payout.find({ payOutStatus: "DONE" })
+      .select("application")
+      .lean();
+
+    const doneAppIds = new Set(
+      donePayouts.map((p) => p.application.toString())
+    );
+
+    // Only consider applications with DISBURSED and NOT already DONE
+    const disbursedApps = applications.filter(
+      (app) =>
+        app.status === "DISBURSED" && !doneAppIds.has(app._id.toString())
+    );
+
+    // Map to customer format
+    const customers = disbursedApps.map((app) => ({
+      customerId: app.customerId?._id,
+      customerEmployeeId: app.customerId?.employeeId || null,
+      customerName: `${app.customerId?.firstName ?? ""} ${
+        app.customerId?.lastName ?? ""
+      }`.trim(),
+      contact: app.customerId?.phone || null,
+      email: app.customerId?.email || null,
+      loanType: app.loanType,
+      requestedAmount: app.customer?.loanAmount || null,
+      approvedAmount: app.approvedLoanAmount || null,
+      status: app.status,
+      payOutStatus: "PENDING",
+      partner: {
+        partnerId: app.partnerId?._id,
+        name: `${app.partnerId?.firstName ?? ""} ${
+          app.partnerId?.lastName ?? ""
+        }`.trim(),
+        email: app.partnerId?.email,
+        phone: app.partnerId?.phone,
+      },
+      applicationId: app._id,
+      createdAt: app.createdAt,
+    }));
+
+    return res.json(customers);
+  } catch (err) {
+    console.error("Error fetching pending payout customers:", err);
+    return res
+      .status(500)
+      .json({ message: "Server error", error: err.message });
+  }
+});
+
+// GET /api/admin/customers/done-payouts
+// Admin gets done payout customers
+router.get("/customers/done-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    // Fetch all applications
+    const applications = await Application.find()
+      .populate("customerId", "employeeId firstName lastName email phone")
+      .populate("partnerId", "firstName lastName email phone")
+      .lean();
+
+    const appIds = applications.map((app) => app._id);
+
+    const donePayouts = await Payout.find({
+      application: { $in: appIds },
+      payOutStatus: "DONE",
+    })
+      .select("application payOutStatus")
+      .lean();
+
+    const doneMap = {};
+    donePayouts.forEach((p) => {
+      doneMap[p.application.toString()] = p.payOutStatus;
+    });
+
+    const customers = applications
+      .filter((app) => doneMap[app._id.toString()]) // only apps with DONE payout
+      .map((app) => ({
+        customerId: app.customerId?._id,
+        customerEmployeeId: app.customerId?.employeeId || null,
+        customerName: `${app.customerId?.firstName ?? ""} ${
+          app.customerId?.lastName ?? ""
+        }`.trim(),
+        contact: app.customerId?.phone || null,
+        email: app.customerId?.email || null,
+        loanType: app.loanType,
+        requestedAmount: app.customer?.loanAmount || null,
+        approvedAmount: app.approvedLoanAmount || null,
+        status: app.status,
+        payOutStatus: "DONE",
+        partner: {
+          partnerId: app.partnerId?._id,
+          name: `${app.partnerId?.firstName ?? ""} ${
+            app.partnerId?.lastName ?? ""
+          }`.trim(),
+          email: app.partnerId?.email,
+          phone: app.partnerId?.phone,
+        },
+        applicationId: app._id,
+        createdAt: app.createdAt,
+      }));
+
+    return res.json(customers);
+  } catch (err) {
+    console.error("Error fetching done payout customers:", err);
+    return res
+      .status(500)
+      .json({ message: "Server error", error: err.message });
+  }
+});
+
+// GET /api/admin/customer/:customerId/partners-payout
+// Admin gets partner details for a customer's applications with payout info
+router.get("/customer/:customerId/partners-payout", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const { customerId } = req.params;
+
+    // Find all applications for this customer
+    const applications = await Application.find({ customerId })
+      .select("_id partnerId")
+      .lean();
+
+    if (!applications.length) {
+      return res
+        .status(404)
+        .json({ message: "No partners found for this customer" });
+    }
+
+    // Get unique partner IDs
+    const partnerIds = [
+      ...new Set(applications.map((app) => app.partnerId.toString())),
+    ];
+
+    // Fetch partner details
+    const partnersData = await User.find({ _id: { $in: partnerIds } })
+      .select(
+        "firstName lastName email phone bankName accountNumber ifscCode accountHolderName"
+      )
+      .lean();
+
+    // Fetch payouts for these applications
+    const appIds = applications.map((app) => app._id);
+    const payouts = await Payout.find({ application: { $in: appIds } })
+      .select("application partnerId amount payOutStatus note")
+      .lean();
+
+    // Map partner details + application info + payout status
+    const partnerDetails = partnersData
+      .map((partner) => {
+        // Find applications for this partner and customer
+        const partnerApps = applications.filter(
+          (app) => app.partnerId?.toString() === partner._id.toString()
+        );
+
+        return partnerApps.map((app) => {
+          // Find payout for this application if exists
+          const payout = payouts.find(
+            (p) => p.application.toString() === app._id.toString()
+          );
+
+          return {
+            _id: partner._id,
+            firstName: partner.firstName,
+            lastName: partner.lastName,
+            email: partner.email,
+            phone: partner.phone,
+            bankName: partner.bankName,
+            ifscCode: partner.ifscCode,
+            accountNumber: partner.accountNumber,
+            accountHolderName: partner.accountHolderName,
+            applicationId: app._id,
+            payoutAmount: payout?.amount || 0,
+            payoutStatus: payout?.payOutStatus || "PENDING",
+            payoutNote: payout?.note || "",
+          };
+        });
+      })
+      .flat();
+
+    res.json({ partners: partnerDetails });
+  } catch (err) {
+    console.error("Error fetching partners for customer with payout:", err);
+    return res
+      .status(500)
+      .json({ message: "Server error", error: err.message });
+  }
+});
+
+// POST /api/admin/set-payouts
+// Admin creates/updates payout for disbursed application
+router.post("/set-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const { applicationId, partnerId, payoutPercentage, note, payOutStatus } =
+      req.body;
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(applicationId)) {
+      return res.status(400).json({ message: "Invalid application ID" });
+    }
+
+    // Fetch application (Admin can access all)
+    const application = await Application.findOne({
+      _id: applicationId,
+    }).select("approvedLoanAmount partnerId");
+
+    if (!application) {
+      return res.status(404).json({ message: "Application not found" });
+    }
+
+    // Ensure partner matches
+    if (application.partnerId && application.partnerId.toString() !== partnerId) {
+      return res
+        .status(400)
+        .json({ message: "Application does not belong to this partner" });
+    }
+
+    // Calculate payout amount
+    let payoutAmount = 0;
+    if (payoutPercentage) {
+      payoutAmount = (application.approvedLoanAmount * payoutPercentage) / 100;
+    }
+
+    // Check if payout already exists
+    let payout = await Payout.findOne({
+      application: applicationId,
+      partnerId,
+    });
+
+    if (payout) {
+      // ✅ Update existing payout
+      payout.amount = payoutAmount || payout.amount;
+      payout.note = note || payout.note;
+      if (payOutStatus && ["PENDING", "DONE"].includes(payOutStatus)) {
+        payout.payOutStatus = payOutStatus;
+      }
+      await payout.save();
+    } else {
+      // ✅ Create new payout
+      payout = await Payout.create({
+        application: applicationId,
+        partnerId,
+        amount: payoutAmount,
+        note,
+        payOutStatus:
+          payOutStatus && ["PENDING", "DONE"].includes(payOutStatus)
+            ? payOutStatus
+            : "PENDING",
+        addedBy: req.user.sub, // Admin user
+      });
+    }
+
+    return res.status(201).json({
+      message: "Payout saved successfully",
+      payout,
+    });
+  } catch (err) {
+    console.error("Error saving payout:", err);
+    return res
+      .status(500)
+      .json({ message: "Server error", error: err.message });
+  }
+});
+
+// ==================== PARTNER TARGET POLICY CONFIG ====================
+
+// GET /api/admin/target-policy
+// Admin gets current partner target policy
+router.get("/target-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const { Config } = await import("../models/Config.js");
+    let config = await Config.findOne({ key: "PARTNER_TARGET_POLICY" });
+
+    if (!config) {
+      // Return defaults if not set
+      config = {
+        key: "PARTNER_TARGET_POLICY",
+        value: {
+          fileCountTarget: 4,
+          disbursementTarget: 2000000, // ₹20,00,000
+        },
+      };
+    }
+
+    res.json(config.value);
+  } catch (err) {
+    console.error("Error fetching target policy:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
+
+// POST /api/admin/target-policy
+// Admin sets partner target policy (file count target - disbursement is now top-down distributed)
+router.post("/target-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const { fileCountTarget, disbursementTarget } = req.body;
+
+    // fileCountTarget is required
+    if (!fileCountTarget || fileCountTarget < 1) {
+      return res.status(400).json({ 
+        message: "fileCountTarget is required and must be at least 1" 
+      });
+    }
+
+    // disbursementTarget is optional (not used in top-down model, kept for backward compatibility)
+    const finalDisbursementTarget = disbursementTarget !== undefined ? Number(disbursementTarget) : 0;
+
+    const { Config } = await import("../models/Config.js");
+    let config = await Config.findOne({ key: "PARTNER_TARGET_POLICY" });
+
+    if (config) {
+      config.value = {
+        fileCountTarget: Number(fileCountTarget),
+        disbursementTarget: finalDisbursementTarget, // Optional, defaults to 0 in top-down model
+      };
+      await config.save();
+    } else {
+      config = await Config.create({
+        key: "PARTNER_TARGET_POLICY",
+        value: {
+          fileCountTarget: Number(fileCountTarget),
+          disbursementTarget: finalDisbursementTarget,
+        },
+      });
+    }
+
+    res.json({
+      message: "Partner target policy updated successfully",
+      policy: config.value,
+    });
+  } catch (err) {
+    console.error("Error updating target policy:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
+
+// ==================== PARTNER TARGET MANAGEMENT (Admin) ====================
+
+// GET /api/admin/partners/targets
+// Admin gets all partner targets
+router.get("/partners/targets", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const { year, month } = req.query;
+
+    // Get all partners
+    const partners = await User.find({
+      role: ROLES.PARTNER,
+    }).select("firstName lastName employeeId email phone rmId").lean();
+
+    const partnerIds = partners.map((p) => p._id);
+
+    // Build date filter
+    const dateFilter = {};
+    if (year && month) {
+      dateFilter.month = Number(month);
+      dateFilter.year = Number(year);
+    }
+
+    // Get targets for these partners
+    const targets = await Target.find({
+      assignedTo: { $in: partnerIds },
+      role: ROLES.PARTNER,
+      ...dateFilter,
+    }).lean();
+
+    // Get disbursed applications for achievement calculation
+    const disbursedApps = await Application.find({
+      status: "DISBURSED",
+      partnerId: { $in: partnerIds },
+      ...(year && month ? {
+        updatedAt: {
+          $gte: new Date(year, month - 1, 1),
+          $lt: new Date(year, month, 1)
+        }
+      } : {})
+    }).lean();
+
+    // Combine partner data with targets and achievements
+    const partnerTargets = partners.map((partner) => {
+      const target = targets.find(
+        (t) => t.assignedTo.toString() === partner._id.toString()
+      );
+      const partnerDisbursed = disbursedApps.filter(
+        (app) => app.partnerId.toString() === partner._id.toString()
+      );
+
+      const fileCountTarget = target?.fileCountTarget || 4;
+      const disbursementTarget = target?.disbursementTarget || 2000000;
+      const achievedFileCount = partnerDisbursed.length;
+      const achievedDisbursement = partnerDisbursed.reduce(
+        (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
+        0
+      );
+
+      return {
+        partnerId: partner._id,
+        partnerName: `${partner.firstName} ${partner.lastName}`,
+        partnerEmployeeId: partner.employeeId,
+        partnerEmail: partner.email,
+        partnerPhone: partner.phone,
+        rmId: partner.rmId,
+        month: target?.month || (month ? Number(month) : new Date().getMonth() + 1),
+        year: target?.year || (year ? Number(year) : new Date().getFullYear()),
+        fileCountTarget,
+        achievedFileCount,
+        disbursementTarget,
+        achievedDisbursement,
+        fileTargetMet: achievedFileCount >= fileCountTarget,
+        disbursementTargetMet: achievedDisbursement >= disbursementTarget,
+        targetAchieved: achievedFileCount >= fileCountTarget && achievedDisbursement >= disbursementTarget,
+        hasTarget: !!target,
+      };
+    });
+
+    res.json(partnerTargets);
+  } catch (err) {
+    console.error("Error fetching partner targets:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
+
+// POST /api/admin/target/assign-partner
+// Admin assigns target to a single partner
+router.post("/target/assign-partner", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const { partnerId, month, year, fileCountTarget, disbursementTarget } = req.body;
+
+    if (!partnerId || !month || !year || !fileCountTarget || !disbursementTarget) {
+      return res.status(400).json({ 
+        message: "partnerId, month, year, fileCountTarget, and disbursementTarget are required" 
+      });
+    }
+
+    if (month < 1 || month > 12) {
+      return res.status(400).json({ message: "Invalid month value" });
+    }
+
+    const adminId = req.user.sub;
+
+    // Verify partner exists
+    const partner = await User.findOne({
+      _id: partnerId,
+      role: ROLES.PARTNER,
+    }).lean();
+
+    if (!partner) {
+      return res.status(404).json({ message: "Partner not found" });
+    }
+
+    let target = await Target.findOne({
+      assignedTo: partnerId,
+      role: ROLES.PARTNER,
+      month: Number(month),
+      year: Number(year),
+    });
+
+    if (target) {
+      target.fileCountTarget = Number(fileCountTarget);
+      target.disbursementTarget = Number(disbursementTarget);
+      target.assignedBy = adminId;
+      await target.save();
+    } else {
+      target = await Target.create({
+        assignedBy: adminId,
+        assignedTo: partnerId,
+        role: ROLES.PARTNER,
+        month: Number(month),
+        year: Number(year),
+        fileCountTarget: Number(fileCountTarget),
+        disbursementTarget: Number(disbursementTarget),
+      });
+    }
+
+    res.status(201).json({
+      message: "Target assigned to partner successfully",
+      target,
+    });
+  } catch (err) {
+    console.error("Assign partner target error:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
+
+// POST /api/admin/target/distribute-hierarchical
+// Top-Down Target Distribution: Admin sets total company target, system divides it down the hierarchy
+// Admin → ASM → RSM → RM → Partner
+router.post(
+  "/target/distribute-hierarchical",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { month, year, totalCompanyTarget, partnerFileCountTarget } = req.body;
+
+      if (!month || !year) {
+        return res.status(400).json({ message: "Month and year are required" });
+      }
+
+      if (!totalCompanyTarget || totalCompanyTarget <= 0) {
+        return res.status(400).json({ 
+          message: "totalCompanyTarget is required and must be greater than 0" 
+        });
+      }
+
+      // Minimum realistic company target (₹10,00,000 = ₹10 Lakhs)
+      const MIN_COMPANY_TARGET = 1000000;
+      if (totalCompanyTarget < MIN_COMPANY_TARGET) {
+        return res.status(400).json({ 
+          message: `Total Company Target must be at least ₹10,00,000 (₹10 Lakhs). Current value: ₹${Number(totalCompanyTarget).toLocaleString('en-IN')}` 
+        });
+      }
+
+      if (!partnerFileCountTarget || partnerFileCountTarget < 1) {
+        return res.status(400).json({ 
+          message: "partnerFileCountTarget is required and must be at least 1" 
+        });
+      }
+
+      const adminId = req.user.sub;
+      const targetMonth = Number(month);
+      const targetYear = Number(year);
+      const totalTarget = Number(totalCompanyTarget);
+      const fileCountTarget = Number(partnerFileCountTarget);
+
+      if (targetMonth < 1 || targetMonth > 12) {
+        return res.status(400).json({ message: "Invalid month value" });
+      }
+
+      const assignments = [];
+      const distributionSummary = {
+        totalCompanyTarget: totalTarget,
+        asmCount: 0,
+        rsmCount: 0,
+        rmCount: 0,
+        partnerCount: 0,
+      };
+
+      // Step 1: Get all ASMs
+      const asms = await User.find({ role: ROLES.ASM }).lean();
+      
+      if (asms.length === 0) {
+        return res.status(400).json({ message: "No ASMs found. Please create ASMs first." });
+      }
+
+      // Step 2: Divide total target equally among ASMs
+      const asmTarget = Math.round(totalTarget / asms.length);
+      distributionSummary.asmCount = asms.length;
+      
+      for (const asm of asms) {
+        // Step 3: Get all RSMs under this ASM
+        const rsms = await User.find({ role: ROLES.RSM, asmId: asm._id }).lean();
+        
+        if (rsms.length === 0) {
+          // If no RSMs, assign entire ASM target to ASM (they can manage directly)
+          let asmTargetDoc = await Target.findOne({
+            assignedTo: asm._id,
+            role: ROLES.ASM,
+            month: targetMonth,
+            year: targetYear,
+          });
+
+          if (asmTargetDoc) {
+            asmTargetDoc.disbursementTarget = asmTarget;
+            asmTargetDoc.targetValue = asmTarget;
+            asmTargetDoc.fileCountTarget = 0;
+            asmTargetDoc.assignedBy = adminId;
+            asmTargetDoc.isCalculated = true;
+            await asmTargetDoc.save();
+          } else {
+            asmTargetDoc = await Target.create({
+              assignedBy: adminId,
+              assignedTo: asm._id,
+              role: ROLES.ASM,
+              month: targetMonth,
+              year: targetYear,
+              fileCountTarget: 0,
+              disbursementTarget: asmTarget,
+              targetValue: asmTarget,
+              isCalculated: true,
+            });
+          }
+          assignments.push(asmTargetDoc);
+          continue;
+        }
+
+        // Step 4: Divide ASM target equally among RSMs
+        const rsmTarget = Math.round(asmTarget / rsms.length);
+        distributionSummary.rsmCount += rsms.length;
+
+        for (const rsm of rsms) {
+          // Step 5: Get all RMs under this RSM
+          const rms = await User.find({
+            role: ROLES.RM,
+            $or: [
+              { personalRsmId: rsm._id },
+              { businessHomeRsmId: rsm._id }
+            ]
+          }).lean();
+
+          // Remove duplicates (RMs can have both personalRsmId and businessHomeRsmId)
+          const uniqueRms = rms.filter((rm, index, self) =>
+            index === self.findIndex((r) => r._id.toString() === rm._id.toString())
+          );
+
+          if (uniqueRms.length === 0) {
+            // If no RMs, assign entire RSM target to RSM
+            let rsmTargetDoc = await Target.findOne({
+              assignedTo: rsm._id,
+              role: ROLES.RSM,
+              month: targetMonth,
+              year: targetYear,
+            });
+
+            if (rsmTargetDoc) {
+              rsmTargetDoc.disbursementTarget = rsmTarget;
+              rsmTargetDoc.targetValue = rsmTarget;
+              rsmTargetDoc.fileCountTarget = 0;
+              rsmTargetDoc.assignedBy = adminId;
+              rsmTargetDoc.isCalculated = true;
+              await rsmTargetDoc.save();
+            } else {
+              rsmTargetDoc = await Target.create({
+                assignedBy: adminId,
+                assignedTo: rsm._id,
+                role: ROLES.RSM,
+                month: targetMonth,
+                year: targetYear,
+                fileCountTarget: 0,
+                disbursementTarget: rsmTarget,
+                targetValue: rsmTarget,
+                isCalculated: true,
+              });
+            }
+            assignments.push(rsmTargetDoc);
+            continue;
+          }
+
+          // Step 6: Divide RSM target equally among RMs
+          const rmTarget = Math.round(rsmTarget / uniqueRms.length);
+          distributionSummary.rmCount += uniqueRms.length;
+
+          for (const rm of uniqueRms) {
+            // Step 7: Get all Partners under this RM
+            const partners = await User.find({
+              role: ROLES.PARTNER,
+              rmId: rm._id,
+            }).lean();
+
+            if (partners.length === 0) {
+              // If no partners, assign entire RM target to RM
+              let rmTargetDoc = await Target.findOne({
+                assignedTo: rm._id,
+                role: ROLES.RM,
+                month: targetMonth,
+                year: targetYear,
+              });
+
+              if (rmTargetDoc) {
+                rmTargetDoc.disbursementTarget = rmTarget;
+                rmTargetDoc.targetValue = rmTarget;
+                rmTargetDoc.fileCountTarget = 0;
+                rmTargetDoc.assignedBy = adminId;
+                rmTargetDoc.isCalculated = true;
+                await rmTargetDoc.save();
+              } else {
+                rmTargetDoc = await Target.create({
+                  assignedBy: adminId,
+                  assignedTo: rm._id,
+                  role: ROLES.RM,
+                  month: targetMonth,
+                  year: targetYear,
+                  fileCountTarget: 0,
+                  disbursementTarget: rmTarget,
+                  targetValue: rmTarget,
+                  isCalculated: true,
+                });
+              }
+              assignments.push(rmTargetDoc);
+              continue;
+            }
+
+            // Step 8: Divide RM target equally among Partners
+            const partnerDisbursementTarget = Math.round(rmTarget / partners.length);
+            distributionSummary.partnerCount += partners.length;
+
+            for (const partner of partners) {
+              // Step 9: Assign target to Partner (both file count and disbursement)
+              let partnerTarget = await Target.findOne({
+                assignedTo: partner._id,
+                role: ROLES.PARTNER,
+                month: targetMonth,
+                year: targetYear,
+              });
+
+              if (partnerTarget) {
+                partnerTarget.fileCountTarget = fileCountTarget;
+                partnerTarget.disbursementTarget = partnerDisbursementTarget;
+                partnerTarget.targetValue = partnerDisbursementTarget;
+                partnerTarget.assignedBy = adminId;
+                partnerTarget.isCalculated = false;
+                await partnerTarget.save();
+              } else {
+                partnerTarget = await Target.create({
+                  assignedBy: adminId,
+                  assignedTo: partner._id,
+                  role: ROLES.PARTNER,
+                  month: targetMonth,
+                  year: targetYear,
+                  fileCountTarget: fileCountTarget,
+                  disbursementTarget: partnerDisbursementTarget,
+                  targetValue: partnerDisbursementTarget,
+                  isCalculated: false,
+                });
+              }
+              assignments.push(partnerTarget);
+            }
+
+            // Step 10: Assign target to RM (disbursement only - sum of partner targets)
+            const rmActualTarget = partnerDisbursementTarget * partners.length;
+            let rmTargetDoc = await Target.findOne({
+              assignedTo: rm._id,
+              role: ROLES.RM,
+              month: targetMonth,
+              year: targetYear,
+            });
+
+            if (rmTargetDoc) {
+              rmTargetDoc.disbursementTarget = rmActualTarget;
+              rmTargetDoc.targetValue = rmActualTarget;
+              rmTargetDoc.fileCountTarget = 0;
+              rmTargetDoc.assignedBy = adminId;
+              rmTargetDoc.isCalculated = true;
+              await rmTargetDoc.save();
+            } else {
+              rmTargetDoc = await Target.create({
+                assignedBy: adminId,
+                assignedTo: rm._id,
+                role: ROLES.RM,
+                month: targetMonth,
+                year: targetYear,
+                fileCountTarget: 0,
+                disbursementTarget: rmActualTarget,
+                targetValue: rmActualTarget,
+                isCalculated: true,
+              });
+            }
+            assignments.push(rmTargetDoc);
+          }
+
+          // Step 11: Assign target to RSM (disbursement only - sum of RM targets)
+          const rsmActualTarget = rmTarget * uniqueRms.length;
+          let rsmTargetDoc = await Target.findOne({
+            assignedTo: rsm._id,
+            role: ROLES.RSM,
+            month: targetMonth,
+            year: targetYear,
+          });
+
+          if (rsmTargetDoc) {
+            rsmTargetDoc.disbursementTarget = rsmActualTarget;
+            rsmTargetDoc.targetValue = rsmActualTarget;
+            rsmTargetDoc.fileCountTarget = 0;
+            rsmTargetDoc.assignedBy = adminId;
+            rsmTargetDoc.isCalculated = true;
+            await rsmTargetDoc.save();
+          } else {
+            rsmTargetDoc = await Target.create({
+              assignedBy: adminId,
+              assignedTo: rsm._id,
+              role: ROLES.RSM,
+              month: targetMonth,
+              year: targetYear,
+              fileCountTarget: 0,
+              disbursementTarget: rsmActualTarget,
+              targetValue: rsmActualTarget,
+              isCalculated: true,
+            });
+          }
+          assignments.push(rsmTargetDoc);
+        }
+
+        // Step 12: Assign target to ASM (disbursement only - sum of RSM targets)
+        const asmActualTarget = rsmTarget * rsms.length;
+        let asmTargetDoc = await Target.findOne({
+          assignedTo: asm._id,
+          role: ROLES.ASM,
+          month: targetMonth,
+          year: targetYear,
+        });
+
+        if (asmTargetDoc) {
+          asmTargetDoc.disbursementTarget = asmActualTarget;
+          asmTargetDoc.targetValue = asmActualTarget;
+          asmTargetDoc.fileCountTarget = 0;
+          asmTargetDoc.assignedBy = adminId;
+          asmTargetDoc.isCalculated = true;
+          await asmTargetDoc.save();
+        } else {
+          asmTargetDoc = await Target.create({
+            assignedBy: adminId,
+            assignedTo: asm._id,
+            role: ROLES.ASM,
+            month: targetMonth,
+            year: targetYear,
+            fileCountTarget: 0,
+            disbursementTarget: asmActualTarget,
+            targetValue: asmActualTarget,
+            isCalculated: true,
+          });
+        }
+        assignments.push(asmTargetDoc);
+      }
+
+      res.status(201).json({
+        message: "Top-down hierarchical targets distributed successfully",
+        month: targetMonth,
+        year: targetYear,
+        totalCompanyTarget: totalTarget,
+        partnerFileCountTarget: fileCountTarget,
+        distributionSummary,
+        totalAssignments: assignments.length,
+        assignments: assignments.map((t) => ({
+          role: t.role,
+          assignedTo: t.assignedTo,
+          fileCountTarget: t.fileCountTarget,
+          disbursementTarget: t.disbursementTarget,
+          isCalculated: t.isCalculated,
+        })),
+      });
+    } catch (err) {
+      console.error("Top-down hierarchical target distribution error:", err);
+      res.status(500).json({ message: "Server error", error: err.message });
     }
   }
 );

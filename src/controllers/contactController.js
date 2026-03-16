@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 
 export const contactFunction = async (req, res) => {
-  const { name, email, phone, message } = req.body;
+  const { name, email, phone, message, subject } = req.body;
   
   // Validate input
   if (!name || !email || !phone || !message) {
@@ -31,17 +31,24 @@ export const contactFunction = async (req, res) => {
       },
     });
 
+    const finalSubject =
+      subject && subject.trim().length > 0
+        ? subject.trim()
+        : `[TrustlineFin] New Inquiry - ${name}`;
+
     const mailOptions = {
       from: `"${name}" <${process.env.EMAIL_USER}>`, // ✅ your domain email
       replyTo: email, // ✅ customer's real email
       to: process.env.EMAIL_USER, // ✅ your inbox
-      subject: `[TrustlineFin] New Inquiry - ${name}`,
+      subject: finalSubject,
       html: `
         <h2>📩 New Inquiry Received</h2>
+        ${subject ? `<p><strong>Subject:</strong> ${subject}</p>` : ""}
         <p><strong>Name:</strong> ${name}</p>
         <p><strong>Email:</strong> ${email}</p>
         <p><strong>Phone:</strong> ${phone}</p>
-        <p><strong>Message:</strong> ${message}</p>
+        <p><strong>Message:</strong></p>
+        <p>${message.replace(/\n/g, "<br/>")}</p>
       `,
     };
 

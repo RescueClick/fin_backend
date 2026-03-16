@@ -661,3 +661,123 @@ export const sendPasswordResetEmail = async (user, resetToken, resetUrl) => {
     return false;
   }
 };
+
+/**
+ * Send delete account request email to admin / support
+ */
+export const sendDeleteAccountRequestEmail = async (user, reason = "", source = "WEB") => {
+  const adminEmail =
+    process.env.SUPPORT_EMAIL ||
+    process.env.ADMIN_EMAIL ||
+    process.env.EMAIL_USER ||
+    "support@trustlinefintech.com";
+
+  const content = `
+    <h2>New Delete Account Request</h2>
+    <p>A user has requested to delete their account.</p>
+
+    <div class="info-box">
+      <h3 style="margin-top: 0; color: #12B99C;">User Details</h3>
+      <div class="info-row">
+        <span class="label">Name:</span>
+        <span class="value">${user.firstName || ""} ${user.lastName || ""}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Email:</span>
+        <span class="value">${user.email}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Phone:</span>
+        <span class="value">${user.phone || "N/A"}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Role:</span>
+        <span class="value">${user.role}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Employee ID:</span>
+        <span class="value">${user.employeeId || "N/A"}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Requested From:</span>
+        <span class="value">${source}</span>
+      </div>
+    </div>
+
+    ${
+      reason
+        ? `
+    <div class="info-box">
+      <h3 style="margin-top: 0; color: #12B99C;">User Reason</h3>
+      <p style="white-space: pre-wrap; margin: 0;">${reason}</p>
+    </div>
+    `
+        : ""
+    }
+
+    <div class="alert alert-warning">
+      <strong>Next Steps:</strong> Please verify the user identity and delete/suspend their account in the admin panel. 
+      After completing, send a confirmation email to the user.
+    </div>
+  `;
+
+  try {
+    await sendMail({
+      to: adminEmail,
+      subject: `Delete Account Request - ${user.email}`,
+      html: getEmailTemplate("Delete Account Request", content, "Trustline Fintech Admin"),
+    });
+    console.log("✅ Delete account request email sent for:", user.email);
+    return true;
+  } catch (error) {
+    console.error("❌ Failed to send delete account request email:", error);
+    return false;
+  }
+};
+
+/**
+ * Send confirmation email to user after account deletion
+ */
+export const sendDeleteAccountConfirmationEmail = async (user) => {
+  const content = `
+    <h2>Dear ${user.firstName || ""} ${user.lastName || ""},</h2>
+    <p>Your request to delete your Trustline Fintech account has been processed.</p>
+
+    <div class="info-box">
+      <h3 style="margin-top: 0; color: #12B99C;">Account Details</h3>
+      <div class="info-row">
+        <span class="label">Email:</span>
+        <span class="value">${user.email}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Employee ID:</span>
+        <span class="value">${user.employeeId || "N/A"}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Role:</span>
+        <span class="value">${user.role}</span>
+      </div>
+    </div>
+
+    <div class="alert alert-info">
+      <strong>Note:</strong> As per our data retention and regulatory policies, certain transactional records may be retained even after account deletion.
+    </div>
+
+    <p style="margin-top: 24px;">
+      If you did not request this change or believe this is a mistake, please contact our support team immediately.
+    </p>
+  `;
+
+  try {
+    await sendMail({
+      to: user.email,
+      subject: "Your Trustline Fintech Account Has Been Deleted",
+      html: getEmailTemplate("Account Deletion Confirmation", content),
+    });
+    console.log("✅ Delete account confirmation email sent to:", user.email);
+    return true;
+  } catch (error) {
+    console.error("❌ Failed to send delete account confirmation email:", error);
+    return false;
+  }
+};

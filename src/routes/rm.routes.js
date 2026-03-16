@@ -520,23 +520,63 @@ router.post(
   requireRole(ROLES.RM),
   async (req, res) => {
     try {
-      const { to, note, approvedLoanAmount } = req.body;
+      const { to, note } = req.body;
 
       if (!to)
         return res.status(400).json({ message: "Target status 'to' required" });
 
+      // ✅ RM can ONLY handle document-related statuses (up to DOC_COMPLETE)
+      const RM_ALLOWED_STATUSES = [
+        "DRAFT",
+        "SUBMITTED",
+        "DOC_INCOMPLETE",
+        "DOC_COMPLETE",
+        "DOC_SUBMITTED"
+      ];
+
+      if (!RM_ALLOWED_STATUSES.includes(to)) {
+        return res.status(403).json({
+          message: `RM can only transition to document statuses: ${RM_ALLOWED_STATUSES.join(", ")}. Processing statuses (UNDER_REVIEW, APPROVED, etc.) are handled by RSM.`
+        });
+      }
+
       if (!APP_STATUSES.includes(to))
         return res.status(400).json({ message: "Invalid status" });
 
+      const rmId = req.user.sub;
+      
+      // Get all partners under this RM
+      const partners = await User.find({ rmId, role: ROLES.PARTNER }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+
+      // Find application either directly assigned to RM or via partners
       const app = await Application.findOne({
         _id: req.params.id,
-        rmId: req.user.sub,
+        $or: [
+          { rmId: rmId }, // Direct RM assignment
+          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+        ]
       }).populate("customerId");
 
       if (!app)
         return res
           .status(404)
           .json({ message: "Application not found under this RM" });
+
+      // ✅ CRITICAL: If application has rsmId set (transferred to RSM), RM CANNOT change status at all
+      // Once DOC_COMPLETE is set and rsmId is assigned, the application belongs to RSM
+      if (app.rsmId) {
+        return res.status(403).json({
+          message: "This application has been transferred to RSM and can no longer be modified by RM. Once documents are complete, only RSM can handle status changes."
+        });
+      }
+
+      // ✅ Also prevent changing FROM DOC_COMPLETE if somehow rsmId wasn't set (shouldn't happen, but safety check)
+      if (app.status === "DOC_COMPLETE" && to !== "DOC_COMPLETE") {
+        return res.status(403).json({
+          message: "Cannot change status from DOC_COMPLETE. Once documents are complete, the application is transferred to RSM for processing."
+        });
+      }
 
       // ✅ Validate DOC_COMPLETE transition - all documents must be verified
       if (to === "DOC_COMPLETE") {
@@ -574,16 +614,63 @@ router.post(
             unverifiedDocs,
           });
         }
-      }
 
-      // ✅ Only set approvedLoanAmount for DISBURSED
-      if (to === "DISBURSED") {
-        if (approvedLoanAmount == null || isNaN(Number(approvedLoanAmount))) {
+        // ✅ AUTO-ROUTE TO RSM based on loanType + RM's RSM mapping
+        const rm = await User.findById(req.user.sub).select("personalRsmId businessHomeRsmId");
+        if (!rm) {
+          return res.status(404).json({ message: "RM not found" });
+        }
+
+        let targetRsmId = null;
+        let targetAsmId = null;
+
+        // Determine which RSM should handle this loan based on loanType
+        if (app.loanType === "PERSONAL") {
+          targetRsmId = rm.personalRsmId;
+          console.log(`📋 Loan Type: PERSONAL → Routing to Personal Loan RSM: ${targetRsmId}`);
+        } else if (
+          app.loanType === "BUSINESS" ||
+          app.loanType === "HOME_LOAN_SALARIED" ||
+          app.loanType === "HOME_LOAN_SELF_EMPLOYED"
+        ) {
+          targetRsmId = rm.businessHomeRsmId;
+          console.log(`📋 Loan Type: ${app.loanType} → Routing to Business & Home Loan RSM: ${targetRsmId}`);
+        } else {
+          console.error(`❌ Unknown loan type: ${app.loanType}`);
+        }
+
+        if (!targetRsmId) {
           return res.status(400).json({
-            message: "approvedLoanAmount is required and must be a number",
+            message: `RM is not assigned to an RSM for loan type ${app.loanType}. Please contact admin to assign RSM.`
           });
         }
-        app.approvedLoanAmount = Number(approvedLoanAmount);
+
+        // Fetch RSM to get ASM link and verify RSM type matches loan type
+        const rsm = await User.findById(targetRsmId).select("asmId rsmType firstName lastName employeeId");
+        if (!rsm) {
+          return res.status(404).json({ message: "Assigned RSM not found" });
+        }
+
+        // ✅ Verify RSM type matches loan type
+        if (app.loanType === "PERSONAL" && rsm.rsmType !== "PERSONAL") {
+          console.error(`⚠️ WARNING: Personal loan routed to RSM with type ${rsm.rsmType}. Expected PERSONAL.`);
+        } else if (
+          (app.loanType === "BUSINESS" || 
+           app.loanType === "HOME_LOAN_SALARIED" || 
+           app.loanType === "HOME_LOAN_SELF_EMPLOYED") &&
+          rsm.rsmType !== "BUSINESS_HOME"
+        ) {
+          console.error(`⚠️ WARNING: ${app.loanType} loan routed to RSM with type ${rsm.rsmType}. Expected BUSINESS_HOME.`);
+        }
+
+        targetAsmId = rsm.asmId;
+
+        // Assign RSM and ASM to application
+        app.rsmId = targetRsmId;
+        app.asmId = targetAsmId;
+
+        console.log(`✅ Auto-routed application ${app.appNo} (${app.loanType}) to RSM ${rsm.firstName} ${rsm.lastName} (${rsm.employeeId}, Type: ${rsm.rsmType}) - ASM: ${targetAsmId}`);
+        console.log(`   📝 Setting rsmId: ${targetRsmId} (${typeof targetRsmId}), asmId: ${targetAsmId} (${typeof targetAsmId})`);
       }
 
       // Store old status before transition
@@ -594,20 +681,7 @@ router.post(
 
       // ✅ Auto-update document statuses based on application status change
       const now = new Date();
-      if (to === "APPROVED" || to === "DISBURSED") {
-        // When RM approves/disburses, mark all PENDING/UPDATED documents as VERIFIED
-        app.docs.forEach((doc) => {
-          if (doc.status === "PENDING" || doc.status === "UPDATED") {
-            doc.status = "VERIFIED";
-            doc.verifiedAt = now;
-            doc.verifiedBy = req.user.sub;
-            doc.updatedAt = now;
-            // Clear rejection info if any
-            doc.rejectedAt = null;
-            doc.rejectedBy = null;
-          }
-        });
-      } else if (to === "DOC_COMPLETE") {
+      if (to === "DOC_COMPLETE") {
         // When moving to DOC_COMPLETE, verify all PENDING/UPDATED documents
         app.docs.forEach((doc) => {
           if (doc.status === "PENDING" || doc.status === "UPDATED") {
@@ -620,17 +694,18 @@ router.post(
             doc.rejectedBy = null;
           }
         });
-      } else if (to === "UNDER_REVIEW") {
-        // When moving to UNDER_REVIEW, mark UPDATED documents as PENDING (awaiting review)
-        app.docs.forEach((doc) => {
-          if (doc.status === "UPDATED") {
-            doc.status = "PENDING";
-            doc.updatedAt = now;
-          }
-        });
       }
 
+      // ✅ Save application with rsmId and asmId
       await app.save();
+      
+      // ✅ Verify the save was successful
+      const savedApp = await Application.findById(app._id).select("rsmId asmId status loanType appNo").lean();
+      console.log(`💾 Saved application ${savedApp.appNo}: rsmId=${savedApp.rsmId}, asmId=${savedApp.asmId}, status=${savedApp.status}, loanType=${savedApp.loanType}`);
+      
+      if (!savedApp.rsmId) {
+        console.error(`❌ ERROR: Application ${savedApp.appNo} was saved but rsmId is null!`);
+      }
 
       // Emit socket notification with action tracking
       try {
@@ -678,33 +753,20 @@ router.post(
       }
 
       // Send response immediately (don't wait for email)
-      res.json({
+      const responseData = {
         message: "Application status updated successfully",
         status: app.status,
-        approvedLoanAmount: app.approvedLoanAmount,
         allDocumentsVerified: app.areAllDocumentsVerified(),
-      });
+      };
 
-      // ✅ If status = REJECTED → mark for auto-delete after 3 months
-      if (to === "REJECTED") {
-        const threeMonthsLater = new Date(
-          Date.now() + 90 * 24 * 60 * 60 * 1000
-        );
-        app.deletedAt = threeMonthsLater; // Application TTL
-        await User.findByIdAndUpdate(app.customerId._id, {
-          deletedAt: threeMonthsLater, // Customer TTL
-        });
+      // If DOC_COMPLETE, include routing info
+      if (to === "DOC_COMPLETE" && app.rsmId) {
+        responseData.rsmId = app.rsmId;
+        responseData.asmId = app.asmId;
+        responseData.message = "Documents completed. Application routed to RSM for processing.";
       }
 
-      await app.save();
-
-      // Send response immediately (don't wait for email)
-      res.json({
-        message: "Application status updated successfully",
-        status: app.status,
-        approvedLoanAmount: app.approvedLoanAmount,
-        stageHistory: app.stageHistory,
-      });
+      res.json(responseData);
 
       // 📧 Send email asynchronously (non-blocking) using professional email service
       setImmediate(async () => {
@@ -723,7 +785,7 @@ router.post(
             const emailSent = await sendApplicationStatusEmail(
               customerData,
               applicationData,
-              from,
+              oldStatus,
               to
             );
             if (emailSent) {
@@ -1110,8 +1172,17 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
     const rmId = req.user.sub; // RM ID from token
 
-    // RM Details
-    const rm = await User.findOne({ _id: rmId, role: ROLES.RM }).lean();
+    // RM Details with RSM population
+    const rm = await User.findOne({ _id: rmId, role: ROLES.RM })
+      .populate({
+        path: "personalRsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
+        path: "businessHomeRsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .lean();
     if (!rm) return res.status(404).json({ message: "RM not found" });
 
     // Partners under RM
@@ -1167,42 +1238,74 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       ? (ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1)
       : 0;
 
-    // 12-month RM targets and achieved
+    // Current Month Target (RM's hierarchical target - sum of partner targets)
     const now = new Date();
-    const startOfYear = new Date(now.getFullYear(), 0, 1);
+    const currentMonth = now.getMonth() + 1;
+    const currentYear = now.getFullYear();
 
-    // RM's own monthly targets
-    const monthlyTarget = await Target.aggregate([
+    // Get RM's current month target (hierarchical - sum of partner targets)
+    const rmTarget = await Target.findOne({
+      assignedTo: rm._id,
+      role: ROLES.RM,
+      month: currentMonth,
+      year: currentYear,
+    }).lean();
+
+    // Calculate current month achievements (disbursed applications)
+    const currentMonthStart = new Date(currentYear, currentMonth - 1, 1);
+    const currentMonthEnd = new Date(currentYear, currentMonth, 1);
+
+    const currentMonthDisbursed = await Application.aggregate([
       {
         $match: {
-          assignedTo: rm._id,
-          role: ROLES.RM,
-          createdAt: { $gte: startOfYear },
+          $or: [
+            { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
+            { partnerId: { $in: partnerIds }, status: "DISBURSED" }
+          ],
+          updatedAt: {
+            $gte: currentMonthStart,
+            $lt: currentMonthEnd,
+          },
         },
       },
       {
         $group: {
-          _id: { month: { $month: "$createdAt" } },
-          totalTarget: { $sum: "$targetValue" },
+          _id: null,
+          totalDisbursement: { $sum: { $toDouble: "$approvedLoanAmount" } },
+          totalFiles: { $sum: 1 },
         },
       },
-      { $sort: { "_id.month": 1 } },
     ]);
+
+    const currentMonthAchievedDisbursement = currentMonthDisbursed[0]?.totalDisbursement || 0;
+    const currentMonthAchievedFileCount = currentMonthDisbursed[0]?.totalFiles || 0;
+
+    // 12-month RM targets and achieved
+    const startOfYear = new Date(currentYear, 0, 1);
+
+    // RM's own monthly targets (hierarchical)
+    const monthlyTarget = await Target.find({
+      assignedTo: rm._id,
+      role: ROLES.RM,
+      year: currentYear,
+    }).lean();
 
     // Monthly Achieved from Applications under RM (including from partners)
     const monthlyAchieved = await Application.aggregate([
       {
         $match: {
           $or: [
-            { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED", createdAt: { $gte: startOfYear } },
-            { partnerId: { $in: partnerIds }, status: "DISBURSED", createdAt: { $gte: startOfYear } }
-          ]
+            { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
+            { partnerId: { $in: partnerIds }, status: "DISBURSED" }
+          ],
+          updatedAt: { $gte: startOfYear },
         },
       },
       {
         $group: {
-          _id: { month: { $month: "$createdAt" } },
+          _id: { month: { $month: "$updatedAt" } },
           totalAchieved: { $sum: { $toDouble: "$approvedLoanAmount" } },
+          totalFiles: { $sum: 1 },
         },
       },
       { $sort: { "_id.month": 1 } },
@@ -1215,11 +1318,17 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
 
     const targets = Array.from({ length: 12 }, (_, i) => {
       const month = i + 1;
-      const t =
-        monthlyTarget.find((m) => m._id.month === month)?.totalTarget || 0;
+      const targetDoc = monthlyTarget.find((t) => t.month === month);
+      const t = targetDoc?.disbursementTarget || 0;
       const a =
         monthlyAchieved.find((m) => m._id.month === month)?.totalAchieved || 0;
-      return { month: monthNames[i], target: t, achieved: a };
+      return { 
+        month: monthNames[i], 
+        target: t, 
+        achieved: a,
+        fileCountTarget: targetDoc?.fileCountTarget || 0,
+        achievedFileCount: monthlyAchieved.find((m) => m._id.month === month)?.totalFiles || 0,
+      };
     });
 
     // High-value customers (top 10 disbursed loans, including from partners)
@@ -1271,7 +1380,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       }
     ]);
 
-    // Response
+    // Response with RSM details
     res.json({
       totals: {
         totalPartners,
@@ -1281,9 +1390,35 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
         avgRating,
         inProcessApplications,
       },
-      targets, // RM monthly targets & achieved
+      // Current month target and achievement
+      currentMonthTarget: {
+        fileCountTarget: rmTarget?.fileCountTarget || 0,
+        disbursementTarget: rmTarget?.disbursementTarget || 0,
+        achievedFileCount: currentMonthAchievedFileCount,
+        achievedDisbursement: currentMonthAchievedDisbursement,
+        fileTargetMet: currentMonthAchievedFileCount >= (rmTarget?.fileCountTarget || 0),
+        disbursementTargetMet: currentMonthAchievedDisbursement >= (rmTarget?.disbursementTarget || 0),
+        targetAchieved: currentMonthAchievedFileCount >= (rmTarget?.fileCountTarget || 0) && 
+                       currentMonthAchievedDisbursement >= (rmTarget?.disbursementTarget || 0),
+      },
+      targets, // RM monthly targets & achieved (12-month breakdown)
       highValueCustomers,
       salesPipeline,
+      // RSM details
+      personalRsm: rm.personalRsmId ? {
+        id: rm.personalRsmId._id,
+        name: `${rm.personalRsmId.firstName} ${rm.personalRsmId.lastName}`,
+        employeeId: rm.personalRsmId.employeeId,
+        phone: rm.personalRsmId.phone,
+        email: rm.personalRsmId.email,
+      } : null,
+      businessHomeRsm: rm.businessHomeRsmId ? {
+        id: rm.businessHomeRsmId._id,
+        name: `${rm.businessHomeRsmId.firstName} ${rm.businessHomeRsmId.lastName}`,
+        employeeId: rm.businessHomeRsmId.employeeId,
+        phone: rm.businessHomeRsmId.phone,
+        email: rm.businessHomeRsmId.email,
+      } : null,
     });
 
   } catch (error) {
@@ -1306,6 +1441,8 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
     // Find all applications under this RM:
     // 1. Applications where rmId directly matches, OR
     // 2. Applications from partners under this RM (even if rmId wasn't set on application)
+    // ✅ RM can see all their applications, but can only control statuses up to DOC_COMPLETE
+    // Applications with status beyond DOC_COMPLETE are shown for reference but cannot be modified
     const applications = await Application.find({
       $or: [
         { rmId: rmId }, // Direct RM assignment
@@ -1360,163 +1497,7 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
   }
 });
 
-router.get(
-  "/customers/pending-payouts",
-  auth,
-  requireRole(ROLES.RM),
-  async (req, res) => {
-    try {
-      const rmId = req.user.sub;
-
-      // Get all partners under this RM
-      const partners = await User.find({ 
-        rmId: rmId, 
-        role: ROLES.PARTNER 
-      }).select("_id").lean();
-      const partnerIds = partners.map(p => p._id);
-
-      // Fetch all applications under this RM:
-      // 1. Applications where rmId directly matches, OR
-      // 2. Applications from partners under this RM
-      const applications = await Application.find({
-        $or: [
-          { rmId: rmId }, // Direct RM assignment
-          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
-        ]
-      })
-        .populate("customerId", "employeeId firstName lastName email phone")
-        .populate("partnerId", "firstName lastName email phone")
-        .lean();
-
-      // Get all payouts with DONE
-      const donePayouts = await Payout.find({ payOutStatus: "DONE" })
-        .select("application")
-        .lean();
-
-      const doneAppIds = new Set(
-        donePayouts.map((p) => p.application.toString())
-      );
-
-      // Only consider applications with DISBURSED and NOT already DONE
-      const disbursedApps = applications.filter(
-        (app) =>
-          app.status === "DISBURSED" && !doneAppIds.has(app._id.toString())
-      );
-
-      // Map to customer format
-      const customers = disbursedApps.map((app) => ({
-        customerId: app.customerId?._id,
-        customerEmployeeId: app.customerId?.employeeId || null,
-        customerName: `${app.customerId?.firstName ?? ""} ${
-          app.customerId?.lastName ?? ""
-        }`.trim(),
-        contact: app.customerId?.phone || null,
-        email: app.customerId?.email || null,
-        loanType: app.loanType,
-        requestedAmount: app.customer?.loanAmount || null,
-        approvedAmount: app.approvedLoanAmount || null,
-        status: app.status,
-        payOutStatus: "PENDING",
-        partner: {
-          partnerId: app.partnerId?._id,
-          name: `${app.partnerId?.firstName ?? ""} ${
-            app.partnerId?.lastName ?? ""
-          }`.trim(),
-          email: app.partnerId?.email,
-          phone: app.partnerId?.phone,
-        },
-        applicationId: app._id,
-        createdAt: app.createdAt,
-      }));
-
-      return res.json(customers);
-    } catch (err) {
-      console.error("Error fetching pending payout customers:", err);
-      return res
-        .status(500)
-        .json({ message: "Server error", error: err.message });
-    }
-  }
-);
-
-router.get(
-  "/customers/done-payouts",
-  auth,
-  requireRole(ROLES.RM),
-  async (req, res) => {
-    try {
-      const rmId = req.user.sub;
-
-      // Get all partners under this RM
-      const partners = await User.find({ 
-        rmId: rmId, 
-        role: ROLES.PARTNER 
-      }).select("_id").lean();
-      const partnerIds = partners.map(p => p._id);
-
-      // Fetch all applications under this RM:
-      // 1. Applications where rmId directly matches, OR
-      // 2. Applications from partners under this RM
-      const applications = await Application.find({
-        $or: [
-          { rmId: rmId }, // Direct RM assignment
-          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
-        ]
-      })
-        .populate("customerId", "employeeId firstName lastName email phone")
-        .populate("partnerId", "firstName lastName email phone")
-        .lean();
-
-      const appIds = applications.map((app) => app._id);
-
-      const donePayouts = await Payout.find({
-        application: { $in: appIds },
-        payOutStatus: "DONE",
-      })
-        .select("application payOutStatus")
-        .lean();
-
-      const doneMap = {};
-      donePayouts.forEach((p) => {
-        doneMap[p.application.toString()] = p.payOutStatus;
-      });
-
-      const customers = applications
-        .filter((app) => doneMap[app._id.toString()]) // only apps with DONE payout
-        .map((app) => ({
-          customerId: app.customerId?._id,
-          customerEmployeeId: app.customerId?.employeeId || null,
-          customerName: `${app.customerId?.firstName ?? ""} ${
-            app.customerId?.lastName ?? ""
-          }`.trim(),
-          contact: app.customerId?.phone || null,
-          email: app.customerId?.email || null,
-          loanType: app.loanType,
-          requestedAmount: app.customer?.loanAmount || null,
-          approvedAmount: app.approvedLoanAmount || null,
-          status: app.status,
-          payOutStatus: "DONE",
-          partner: {
-            partnerId: app.partnerId?._id,
-            name: `${app.partnerId?.firstName ?? ""} ${
-              app.partnerId?.lastName ?? ""
-            }`.trim(),
-            email: app.partnerId?.email,
-            phone: app.partnerId?.phone,
-          },
-          applicationId: app._id,
-          createdAt: app.createdAt,
-        }));
-
-      return res.json(customers);
-    } catch (err) {
-      console.error("Error fetching done payout customers:", err);
-      return res
-        .status(500)
-        .json({ message: "Server error", error: err.message });
-    }
-  }
-);
+// Payout endpoints moved to ASM and Admin routes
 
 // ✅ Get full loan application details (everything from schema)
 // router.get(
@@ -1565,11 +1546,18 @@ router.get(
       const rmId = req.user.sub; // RM logged in
       const { customerId, applicationId } = req.params;
 
-      // Find the full application belonging to this RM + Customer
+      // Get all partners under this RM
+      const partners = await User.find({ rmId, role: ROLES.PARTNER }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+
+      // Find the full application belonging to this RM + Customer (either directly or via partners)
       const application = await Application.findOne({
         _id: applicationId,
-        rmId,
         customerId,
+        $or: [
+          { rmId: rmId }, // Direct RM assignment
+          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+        ]
       })
         .populate("customerId", "firstName lastName email phone") // 👤 User-level info
         .populate("partnerId", "firstName lastName email phone") // 👔 Partner info
@@ -1698,14 +1686,39 @@ router.put(
         });
       }
 
+      const rmId = req.user.sub;
+      
+      // Get all partners under this RM
+      const partners = await User.find({ rmId, role: ROLES.PARTNER }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+
+      // Find application either directly assigned to RM or via partners
       const app = await Application.findOne({
         _id: id,
-        rmId: req.user.sub,
+        $or: [
+          { rmId: rmId }, // Direct RM assignment
+          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+        ]
       });
 
       if (!app) {
         return res.status(404).json({
           message: "Application not found or not assigned to this RM",
+        });
+      }
+
+      // ✅ CRITICAL: If application has rsmId set (transferred to RSM), RM CANNOT modify documents
+      // Once DOC_COMPLETE is set and rsmId is assigned, the application belongs to RSM
+      if (app.rsmId) {
+        return res.status(403).json({
+          message: "This application has been transferred to RSM and can no longer be modified by RM. Once documents are complete, only RSM can handle document changes."
+        });
+      }
+
+      // ✅ Also prevent modifying documents if status is DOC_COMPLETE (even if rsmId wasn't set - safety check)
+      if (app.status === "DOC_COMPLETE") {
+        return res.status(403).json({
+          message: "Cannot modify documents for applications with DOC_COMPLETE status. Once documents are complete, the application is transferred to RSM for processing."
         });
       }
 
@@ -1787,15 +1800,58 @@ router.put(
       }
 
       // If all documents are verified and application is DOC_INCOMPLETE, check if can move to DOC_COMPLETE
-      if (status === "VERIFIED" && app.status === "DOC_INCOMPLETE") {
+      // ✅ Only allow if application hasn't been transferred to RSM yet
+      if (status === "VERIFIED" && app.status === "DOC_INCOMPLETE" && !app.rsmId) {
         const allDocsVerified = app.docs.every(doc => 
           doc.status === "VERIFIED"
         );
         
         if (allDocsVerified && app.docs.length > 0) {
           try {
+            // Transition to DOC_COMPLETE
             app.transition("DOC_COMPLETE", req.user.sub, 
               "All documents have been verified");
+            
+            // ✅ AUTO-ROUTE TO RSM based on loanType + RM's RSM mapping
+            // This ensures rsmId is ALWAYS assigned when DOC_COMPLETE is set
+            if (!app.rsmId) {
+              const rm = await User.findById(req.user.sub).select("personalRsmId businessHomeRsmId");
+              if (rm) {
+                let targetRsmId = null;
+                let targetAsmId = null;
+
+                // Determine which RSM should handle this loan based on loanType
+                if (app.loanType === "PERSONAL") {
+                  targetRsmId = rm.personalRsmId;
+                  console.log(`📋 Auto-routing: Loan Type PERSONAL → Personal Loan RSM: ${targetRsmId}`);
+                } else if (
+                  app.loanType === "BUSINESS" ||
+                  app.loanType === "HOME_LOAN_SALARIED" ||
+                  app.loanType === "HOME_LOAN_SELF_EMPLOYED"
+                ) {
+                  targetRsmId = rm.businessHomeRsmId;
+                  console.log(`📋 Auto-routing: Loan Type ${app.loanType} → Business & Home Loan RSM: ${targetRsmId}`);
+                }
+
+                if (targetRsmId) {
+                  // Fetch RSM to get ASM link
+                  const rsm = await User.findById(targetRsmId).select("asmId rsmType firstName lastName employeeId");
+                  if (rsm) {
+                    targetAsmId = rsm.asmId;
+                    
+                    // Assign RSM and ASM to application
+                    app.rsmId = targetRsmId;
+                    app.asmId = targetAsmId;
+                    
+                    console.log(`✅ Auto-routed application ${app.appNo} (${app.loanType}) to RSM ${rsm.firstName} ${rsm.lastName} (${rsm.employeeId}, Type: ${rsm.rsmType}) - ASM: ${targetAsmId}`);
+                  } else {
+                    console.error(`❌ RSM ${targetRsmId} not found for auto-routing`);
+                  }
+                } else {
+                  console.error(`❌ RM ${req.user.sub} is not assigned to an RSM for loan type ${app.loanType}`);
+                }
+              }
+            }
           } catch (transitionErr) {
             console.error("Transition to DOC_COMPLETE error:", transitionErr.message);
           }
@@ -1977,6 +2033,21 @@ router.post(
         });
       }
 
+      // ✅ CRITICAL: If application has rsmId set (transferred to RSM), RM CANNOT modify documents
+      // Once DOC_COMPLETE is set and rsmId is assigned, the application belongs to RSM
+      if (app.rsmId) {
+        return res.status(403).json({
+          message: "This application has been transferred to RSM and can no longer be modified by RM. Once documents are complete, only RSM can handle document changes."
+        });
+      }
+
+      // ✅ Also prevent modifying documents if status is DOC_COMPLETE (even if rsmId wasn't set - safety check)
+      if (app.status === "DOC_COMPLETE") {
+        return res.status(403).json({
+          message: "Cannot modify documents for applications with DOC_COMPLETE status. Once documents are complete, the application is transferred to RSM for processing."
+        });
+      }
+
       const docIndex = app.docs.findIndex(
         (d) => d.docType.toUpperCase() === decodedDocType.toUpperCase()
       );
@@ -2011,6 +2082,65 @@ router.post(
               at: new Date(),
               note: `Document ${decodedDocType} marked as REJECTED. ${remarks || ""}`
             });
+          }
+        }
+      }
+
+      // ✅ If all documents are verified and application is DOC_INCOMPLETE, check if can move to DOC_COMPLETE
+      // ✅ Only allow if application hasn't been transferred to RSM yet
+      if (status === "VERIFIED" && app.status === "DOC_INCOMPLETE" && !app.rsmId) {
+        const allDocsVerified = app.docs.every(doc => 
+          doc.status === "VERIFIED"
+        );
+        
+        if (allDocsVerified && app.docs.length > 0) {
+          try {
+            // Transition to DOC_COMPLETE
+            app.transition("DOC_COMPLETE", req.user.sub, 
+              "All documents have been verified");
+            
+            // ✅ AUTO-ROUTE TO RSM based on loanType + RM's RSM mapping
+            // This ensures rsmId is ALWAYS assigned when DOC_COMPLETE is set
+            if (!app.rsmId) {
+              const rm = await User.findById(req.user.sub).select("personalRsmId businessHomeRsmId");
+              if (rm) {
+                let targetRsmId = null;
+                let targetAsmId = null;
+
+                // Determine which RSM should handle this loan based on loanType
+                if (app.loanType === "PERSONAL") {
+                  targetRsmId = rm.personalRsmId;
+                  console.log(`📋 Auto-routing: Loan Type PERSONAL → Personal Loan RSM: ${targetRsmId}`);
+                } else if (
+                  app.loanType === "BUSINESS" ||
+                  app.loanType === "HOME_LOAN_SALARIED" ||
+                  app.loanType === "HOME_LOAN_SELF_EMPLOYED"
+                ) {
+                  targetRsmId = rm.businessHomeRsmId;
+                  console.log(`📋 Auto-routing: Loan Type ${app.loanType} → Business & Home Loan RSM: ${targetRsmId}`);
+                }
+
+                if (targetRsmId) {
+                  // Fetch RSM to get ASM link
+                  const rsm = await User.findById(targetRsmId).select("asmId rsmType firstName lastName employeeId");
+                  if (rsm) {
+                    targetAsmId = rsm.asmId;
+                    
+                    // Assign RSM and ASM to application
+                    app.rsmId = targetRsmId;
+                    app.asmId = targetAsmId;
+                    
+                    console.log(`✅ Auto-routed application ${app.appNo} (${app.loanType}) to RSM ${rsm.firstName} ${rsm.lastName} (${rsm.employeeId}, Type: ${rsm.rsmType}) - ASM: ${targetAsmId}`);
+                  } else {
+                    console.error(`❌ RSM ${targetRsmId} not found for auto-routing`);
+                  }
+                } else {
+                  console.error(`❌ RM ${req.user.sub} is not assigned to an RSM for loan type ${app.loanType}`);
+                }
+              }
+            }
+          } catch (transitionErr) {
+            console.error("Transition to DOC_COMPLETE error:", transitionErr.message);
           }
         }
       }
@@ -2126,10 +2256,23 @@ router.get(
   async (req, res) => {
     try {
       const { id, docType } = req.params;
-      const app = await Application.findById(id).lean();
+      const rmId = req.user.sub;
+
+      // Get all partners under this RM
+      const partners = await User.find({ rmId, role: ROLES.PARTNER }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+
+      // Find application either directly assigned to RM or via partners
+      const app = await Application.findOne({
+        _id: id,
+        $or: [
+          { rmId: rmId }, // Direct RM assignment
+          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+        ]
+      }).lean();
 
       if (!app) {
-        return res.status(404).json({ message: "Application not found" });
+        return res.status(404).json({ message: "Application not found or not assigned to this RM" });
       }
 
       const doc = app.docs.find(
@@ -2570,6 +2713,14 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
         path: "asmId",
         select: "firstName lastName employeeId region phone",
       })
+      .populate({
+        path: "personalRsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
+        path: "businessHomeRsmId",
+        select: "firstName lastName employeeId phone email",
+      })
       .lean();
 
     if (!rm) {
@@ -2604,6 +2755,20 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
       asmEmployeeId: rm.asmId?.employeeId || null,
       asmRegion: rm.asmId?.region || null,
       asmPhone: rm.asmId?.phone || null,
+
+      // Flattened Personal Loan RSM details
+      personalRsmId: rm.personalRsmId?._id || null,
+      personalRsmName: rm.personalRsmId ? `${rm.personalRsmId.firstName} ${rm.personalRsmId.lastName}` : null,
+      personalRsmEmployeeId: rm.personalRsmId?.employeeId || null,
+      personalRsmPhone: rm.personalRsmId?.phone || null,
+      personalRsmEmail: rm.personalRsmId?.email || null,
+
+      // Flattened Business & Home Loan RSM details
+      businessHomeRsmId: rm.businessHomeRsmId?._id || null,
+      businessHomeRsmName: rm.businessHomeRsmId ? `${rm.businessHomeRsmId.firstName} ${rm.businessHomeRsmId.lastName}` : null,
+      businessHomeRsmEmployeeId: rm.businessHomeRsmId?.employeeId || null,
+      businessHomeRsmPhone: rm.businessHomeRsmId?.phone || null,
+      businessHomeRsmEmail: rm.businessHomeRsmId?.email || null,
     });
   } catch (err) {
     console.error("Error fetching RM profile:", err);
@@ -2671,120 +2836,32 @@ router.patch(
   }
 );
 
-// POST /target/assign-partner-bulk
-router.post(
-  "/target/assign-partner-bulk",
-  auth,
-  requireRole(ROLES.RM),
-  async (req, res) => {
-    try {
-      let { month, year, totalTarget } = req.body;
+// ================== PARTNER TARGET ASSIGNMENT (REMOVED - ASM Only) ==================
+// RM cannot assign partner targets - only ASM can assign partner targets
+// RM can only view/monitor partner targets and follow up with partners
+// This endpoint has been removed to match industry standards where ASM sets partner targets
 
-      if (!month || !year || !totalTarget) {
-        return res
-          .status(400)
-          .json({ message: "Month, year, and totalTarget are required" });
-      }
-
-      // Convert totalTarget to number
-      totalTarget = Number(totalTarget);
-      year = Number(year);
-
-      // Map month name to number
-      const monthMap = {
-        January: 1,
-        February: 2,
-        March: 3,
-        April: 4,
-        May: 5,
-        June: 6,
-        July: 7,
-        August: 8,
-        September: 9,
-        October: 10,
-        November: 11,
-        December: 12,
-      };
-
-      if (typeof month === "string") {
-        month = monthMap[month];
-      }
-
-      // Validate month
-      if (!month || month < 1 || month > 12) {
-        return res.status(400).json({ message: "Invalid month value" });
-      }
-
-      const rmId = req.user.sub; // logged-in RM ID
-
-      // Get all partners under this RM
-      const partners = await User.find({
-        role: ROLES.PARTNER,
-        rmId: rmId,
-      }).lean();
-
-      if (!partners.length) {
-        return res
-          .status(404)
-          .json({ message: "No Partners found under this RM" });
-      }
-
-      const perPartnerTarget = Math.floor(totalTarget / partners.length);
-      const bulkAssignments = [];
-
-      for (let partner of partners) {
-        let target = await Target.findOne({
-          assignedTo: partner._id,
-          month,
-          year,
-          role: ROLES.PARTNER,
-        });
-
-        if (target) {
-          target.targetValue = perPartnerTarget;
-          target.assignedBy = rmId;
-          await target.save();
-          bulkAssignments.push(target);
-        } else {
-          const newTarget = await Target.create({
-            assignedBy: rmId,
-            assignedTo: partner._id,
-            role: ROLES.PARTNER,
-            month,
-            year,
-            targetValue: perPartnerTarget,
-          });
-          bulkAssignments.push(newTarget);
-        }
-      }
-
-      res.status(201).json({
-        message:
-          "Bulk target assigned successfully to all Partners under this RM",
-        totalTarget,
-        perPartnerTarget,
-        month, // number (1-12)
-        year,
-        assignments: bulkAssignments,
-      });
-    } catch (err) {
-      console.error("Assign Partner bulk error:", err);
-      res.status(500).json({ message: "Server error" });
-    }
-  }
-);
-
-// Universal analytics/dashboard API with user profile
-router.get("/:id/analytics", auth, requireRole(ROLES.RM), async (req, res) => {
+// GET /api/rm/partner/:partnerId/analytics
+// RM views analytics for a specific Partner (Hierarchical Access - RM can only see Partners)
+router.get("/partner/:partnerId/analytics", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
-    const { id } = req.params;
+    const rmId = req.user.sub;
+    const { partnerId } = req.params;
 
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ message: "Invalid user ID" });
+    if (!mongoose.Types.ObjectId.isValid(partnerId)) {
+      return res.status(400).json({ message: "Invalid partner ID" });
     }
 
-    const user = await User.findById(id).lean();
-    if (!user) return res.status(404).json({ message: "User not found" });
+    // Verify Partner belongs to this RM (Hierarchical Access Control)
+    const partner = await User.findOne({
+      _id: partnerId,
+      rmId: rmId,
+      role: ROLES.PARTNER
+    }).lean();
+
+    if (!partner) {
+      return res.status(404).json({ message: "Partner not found or not under this RM" });
+    }
 
     // Helper functions
     const sumDisbursedBy = async (filter) => {
@@ -2815,128 +2892,58 @@ router.get("/:id/analytics", auth, requireRole(ROLES.RM), async (req, res) => {
 
     // Base profile
     const base = {
-      userId: user._id,
-      name: `${user.firstName} ${user.lastName}`,
-      role: user.role,
-      email: user.email,
-      phone: user.phone,
-      employeeId: user.employeeId || null,
-      dob: user.dob || null,
-      address: user.address || null,
-      experience: user.experience || null,
-      region: user.region || null,
-      asmCode: user.asmCode || null,
-      rmCode: user.rmCode || null,
-      partnerCode: user.partnerCode || null,
-      status: user.status,
-      createdAt: user.createdAt,
-      updatedAt: user.updatedAt,
+      userId: partner._id,
+      name: `${partner.firstName} ${partner.lastName}`,
+      role: partner.role,
+      email: partner.email,
+      phone: partner.phone,
+      employeeId: partner.employeeId || null,
+      dob: partner.dob || null,
+      address: partner.address || null,
+      experience: partner.experience || null,
+      region: partner.region || null,
+      partnerCode: partner.partnerCode || null,
+      status: partner.status,
+      createdAt: partner.createdAt,
+      updatedAt: partner.updatedAt,
     };
 
     let totals = {};
     let totalDisbursed = 0;
     let performance = "0.00";
     let assignedTargetValue = 0;
-    let scope = user.role;
+    let scope = ROLES.PARTNER;
 
-    // ================= ROLE LOGIC =================
-    switch (user.role) {
-      case ROLES.ASM: {
-        const rms = await User.find({ asmId: id, role: ROLES.RM })
-          .select("_id")
-          .lean();
-        const rmIds = rms.map((x) => x._id);
+    // ================= PARTNER ANALYTICS ONLY =================
+    // RM can only view Partner analytics (hierarchical access - RM → Partner)
+    const customers = await Application.distinct("customerId", {
+      partnerId: partnerId,
+    });
 
-        const partners = await User.find({
-          rmId: { $in: rmIds },
-          role: ROLES.PARTNER,
-        })
-          .select("_id")
-          .lean();
-        const partnerIds = partners.map((x) => x._id);
+    totalDisbursed = await sumDisbursedBy({ partnerId: partnerId });
+    assignedTargetValue = await getAssignedTarget(partnerId, ROLES.PARTNER);
 
-        const customers = await Application.distinct("customerId", {
-          partnerId: { $in: partnerIds },
-        });
+    performance =
+      assignedTargetValue > 0
+        ? ((totalDisbursed / assignedTargetValue) * 100).toFixed(2)
+        : "0.00";
 
-        totalDisbursed = await sumDisbursedBy({
-          partnerId: { $in: partnerIds },
-        });
-        assignedTargetValue = await getAssignedTarget(user._id, ROLES.ASM);
+    totals = { customers: customers.length };
 
-        performance =
-          assignedTargetValue > 0
-            ? ((totalDisbursed / assignedTargetValue) * 100).toFixed(2)
-            : "0.00";
-
-        totals = {
-          rms: rmIds.length,
-          partners: partnerIds.length,
-          customers: customers.length,
-        };
-        break;
-      }
-
-      case ROLES.RM: {
-        const partners = await User.find({ rmId: id, role: ROLES.PARTNER })
-          .select("_id")
-          .lean();
-        const partnerIds = partners.map((x) => x._id);
-
-        const customers = await Application.distinct("customerId", {
-          partnerId: { $in: partnerIds },
-        });
-
-        totalDisbursed = await sumDisbursedBy({ rmId: user._id });
-        assignedTargetValue = await getAssignedTarget(user._id, ROLES.RM);
-
-        performance =
-          assignedTargetValue > 0
-            ? ((totalDisbursed / assignedTargetValue) * 100).toFixed(2)
-            : "0.00";
-
-        totals = { partners: partnerIds.length, customers: customers.length };
-        break;
-      }
-
-      case ROLES.PARTNER: {
-        const customers = await Application.distinct("customerId", {
-          partnerId: user._id,
-        });
-
-        totalDisbursed = await sumDisbursedBy({ partnerId: user._id });
-        assignedTargetValue = await getAssignedTarget(user._id, ROLES.PARTNER);
-
-        performance =
-          assignedTargetValue > 0
-            ? ((totalDisbursed / assignedTargetValue) * 100).toFixed(2)
-            : "0.00";
-
-        totals = { customers: customers.length };
-        break;
-      }
-
-      case ROLES.CUSTOMER: {
-        totalDisbursed = await sumDisbursedBy({ customerId: user._id });
-        assignedTargetValue = 0;
-        performance = undefined;
-        totals = {};
-        break;
-      }
-    }
-
-    // ============== RESPONSE =================
+    // ============== RESPONSE - Match Admin Analytics format =================
     return res.json({
-      profile: base,
-      analytics: {
-        scope,
-        totals,
-        assignedTarget: assignedTargetValue,
-        totalDisbursed,
-        performance:
-          scope === ROLES.ASM || scope === ROLES.RM || scope === ROLES.PARTNER
-            ? `${performance}%`
-            : undefined,
+      data: {
+        profile: base,
+        analytics: {
+          scope,
+          totals,
+          assignedTarget: {
+            targetValue: assignedTargetValue,
+            achievedValue: totalDisbursed
+          },
+          totalDisbursed,
+          performance: `${performance}%`,
+        },
       },
     });
   } catch (err) {
@@ -2945,161 +2952,7 @@ router.get("/:id/analytics", auth, requireRole(ROLES.RM), async (req, res) => {
   }
 });
 
-router.get(
-  "/customer/:customerId/partners-payout",
-  auth,
-  requireRole(ROLES.RM),
-  async (req, res) => {
-    try {
-      const { customerId } = req.params;
-
-      // Find all applications for this customer
-      const applications = await Application.find({ customerId })
-        .select("_id partnerId approvedLoanAmount status")
-        .lean();
-
-      if (!applications.length) {
-        return res
-          .status(404)
-          .json({ message: "No partners found for this customer" });
-      }
-
-      // Get unique partner IDs
-      const partnerIds = [
-        ...new Set(applications.map((app) => app.partnerId.toString())),
-      ];
-
-      // Fetch partner details
-      const partnersData = await User.find({ _id: { $in: partnerIds } })
-        .select(
-          "firstName lastName email phone bankName accountNumber ifscCode accountHolderName"
-        )
-        .lean();
-
-      // Fetch payouts for these applications
-      const appIds = applications.map((app) => app._id);
-      const payouts = await Payout.find({ application: { $in: appIds } })
-        .select("application partnerId status")
-        .lean();
-
-      // Map partner details + application info + payout status
-      const partners = partnersData.map((partner) => {
-        // Find all applications for this partner for this customer
-        const apps = applications.filter(
-          (app) => app.partnerId.toString() === partner._id.toString()
-        );
-
-        // Pick latest application
-        const latestApp = apps[apps.length - 1];
-
-        // Find payout for this application if exists
-        const payout = payouts.find(
-          (p) =>
-            p.application.toString() === latestApp._id.toString() &&
-            p.partnerId.toString() === partner._id.toString()
-        );
-
-        return {
-          _id: partner._id,
-          firstName: partner.firstName,
-          lastName: partner.lastName,
-          email: partner.email,
-          phone: partner.phone,
-          accountHolderName: partner.accountHolderName,
-          accountNumber: partner.accountNumber,
-          bankName: partner.bankName,
-          ifscCode: partner.ifscCode,
-          approvedLoanAmount: latestApp.approvedLoanAmount || 0,
-          payoutStatus: payout?.status || "PENDING",
-          applicationId: appIds[0],
-        };
-      });
-
-      return res.json({
-        customerId,
-        partners,
-      });
-    } catch (err) {
-      console.error("Error fetching partners for customer with payout:", err);
-      return res
-        .status(500)
-        .json({ message: "Server error", error: err.message });
-    }
-  }
-);
-
-// POST /rm/payouts
-router.post("/set-payouts", auth, requireRole(ROLES.RM), async (req, res) => {
-  try {
-    const { applicationId, partnerId, payoutPercentage, note, payOutStatus } =
-      req.body;
-
-    // Validate ObjectId
-    if (!mongoose.Types.ObjectId.isValid(applicationId)) {
-      return res.status(400).json({ message: "Invalid application ID" });
-    }
-
-    // Fetch application
-    const application = await Application.findById(applicationId).select(
-      "approvedLoanAmount partnerId"
-    );
-    if (!application) {
-      return res.status(404).json({ message: "Application not found" });
-    }
-
-    // Ensure partner matches
-    if (application.partnerId.toString() !== partnerId) {
-      return res
-        .status(400)
-        .json({ message: "Application does not belong to this partner" });
-    }
-
-    // Calculate payout amount
-    let payoutAmount = 0;
-    if (payoutPercentage) {
-      payoutAmount = (application.approvedLoanAmount * payoutPercentage) / 100;
-    }
-
-    // Check if payout already exists
-    let payout = await Payout.findOne({
-      application: applicationId,
-      partnerId,
-    });
-
-    if (payout) {
-      // ✅ Update existing payout
-      payout.amount = payoutAmount || payout.amount;
-      payout.note = note || payout.note;
-      if (payOutStatus && ["PENDING", "DONE"].includes(payOutStatus)) {
-        payout.payOutStatus = payOutStatus;
-      }
-      await payout.save();
-    } else {
-      // ✅ Create new payout
-      payout = await Payout.create({
-        application: applicationId,
-        partnerId,
-        amount: payoutAmount,
-        note,
-        payOutStatus:
-          payOutStatus && ["PENDING", "DONE"].includes(payOutStatus)
-            ? payOutStatus
-            : "PENDING",
-        addedBy: req.user.sub, // RM user
-      });
-    }
-
-    return res.status(201).json({
-      message: "Payout saved successfully",
-      payout,
-    });
-  } catch (err) {
-    console.error("Error saving payout:", err);
-    return res
-      .status(500)
-      .json({ message: "Server error", error: err.message });
-  }
-});
+// Payout endpoints moved to ASM and Admin routes
 
 
 // router.get(
@@ -3346,5 +3199,92 @@ router.get("/partner-reports", auth, requireRole(ROLES.RM), async (req, res) => 
   }
 });
 
+
+// ==================== PARTNER TARGET MANAGEMENT (RM) ====================
+
+// GET /api/rm/partners/targets
+// RM gets all partner targets under their hierarchy
+router.get("/partners/targets", auth, requireRole(ROLES.RM), async (req, res) => {
+  try {
+    const rmId = req.user.sub;
+    const { year, month } = req.query;
+
+    // Get all partners under this RM
+    const partners = await User.find({
+      role: ROLES.PARTNER,
+      rmId: rmId,
+    }).select("firstName lastName employeeId email phone rmId").lean();
+
+    const partnerIds = partners.map((p) => p._id);
+
+    // Build date filter
+    const dateFilter = {};
+    if (year && month) {
+      dateFilter.month = Number(month);
+      dateFilter.year = Number(year);
+    }
+
+    // Get targets for these partners
+    const targets = await Target.find({
+      assignedTo: { $in: partnerIds },
+      role: ROLES.PARTNER,
+      ...dateFilter,
+    }).lean();
+
+    // Get disbursed applications for achievement calculation
+    const disbursedApps = await Application.find({
+      status: "DISBURSED",
+      partnerId: { $in: partnerIds },
+      ...(year && month ? {
+        updatedAt: {
+          $gte: new Date(year, month - 1, 1),
+          $lt: new Date(year, month, 1)
+        }
+      } : {})
+    }).lean();
+
+    // Combine partner data with targets and achievements
+    const partnerTargets = partners.map((partner) => {
+      const target = targets.find(
+        (t) => t.assignedTo.toString() === partner._id.toString()
+      );
+      const partnerDisbursed = disbursedApps.filter(
+        (app) => app.partnerId.toString() === partner._id.toString()
+      );
+
+      const fileCountTarget = target?.fileCountTarget || 4;
+      const disbursementTarget = target?.disbursementTarget || 2000000;
+      const achievedFileCount = partnerDisbursed.length;
+      const achievedDisbursement = partnerDisbursed.reduce(
+        (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
+        0
+      );
+
+      return {
+        partnerId: partner._id,
+        partnerName: `${partner.firstName} ${partner.lastName}`,
+        partnerEmployeeId: partner.employeeId,
+        partnerEmail: partner.email,
+        partnerPhone: partner.phone,
+        rmId: partner.rmId,
+        month: target?.month || (month ? Number(month) : new Date().getMonth() + 1),
+        year: target?.year || (year ? Number(year) : new Date().getFullYear()),
+        fileCountTarget,
+        achievedFileCount,
+        disbursementTarget,
+        achievedDisbursement,
+        fileTargetMet: achievedFileCount >= fileCountTarget,
+        disbursementTargetMet: achievedDisbursement >= disbursementTarget,
+        targetAchieved: achievedFileCount >= fileCountTarget && achievedDisbursement >= disbursementTarget,
+        hasTarget: !!target,
+      };
+    });
+
+    res.json(partnerTargets);
+  } catch (err) {
+    console.error("Error fetching partner targets:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
 
 export default router;

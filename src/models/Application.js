@@ -182,6 +182,10 @@ const ApplicationSchema = new mongoose.Schema(
     appNo: { type: String, unique: true, index: true },
     partnerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     rmId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    // Assigned RSM (set automatically after DOC_COMPLETE based on loanType + RM mapping)
+    rsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    // Convenience link to ASM for fast reporting (set when routed to RSM)
+    asmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     
     loanType: {

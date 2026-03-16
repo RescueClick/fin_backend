@@ -1,6 +1,6 @@
 // models/User.js
 import mongoose from "mongoose";
-import { ALL_ROLES, ROLES } from "../config/roles.js";
+import { ALL_ROLES, ROLES, RSM_TYPES } from "../config/roles.js";
 import { FollowUp } from "../models/followUp.js";
 
 // Document sub-schema for dynamic files
@@ -72,9 +72,23 @@ const userSchema = new mongoose.Schema(
       enum: ["ACTIVE", "PENDING", "SUSPENDED"],
       default: "ACTIVE",
     },
+    // Hierarchy links
+    // For ASM: adminId (set in admin.routes)
+    adminId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    // For RSM: parent ASM
     asmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    // For RM: parent RSMs (split by loan type)
+    personalRsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    businessHomeRsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    // For Partner / Customer: parent RM / Partner
     rmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     partnerId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+
+    // RSM specific type (what loan types this RSM owns)
+    rsmType: {
+      type: String,
+      enum: Object.values(RSM_TYPES),
+    },
 
     // Employee identifiers & codes
     employeeId: { type: String, unique: true, sparse: true },
@@ -104,6 +118,9 @@ userSchema.virtual("isAdmin").get(function () {
 });
 userSchema.virtual("isAsm").get(function () {
   return this.role === ROLES.ASM;
+});
+userSchema.virtual("isRsm").get(function () {
+  return this.role === ROLES.RSM;
 });
 userSchema.virtual("isRm").get(function () {
   return this.role === ROLES.RM;

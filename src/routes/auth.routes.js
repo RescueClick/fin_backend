@@ -129,7 +129,7 @@ router.post("/login", async (req, res) => {
 router.post(
   "/login-as/:userId",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ASM, ROLES.RM),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ASM, ROLES.RSM, ROLES.RM),
   async (req, res) => {
     try {
       const { userId } = req.params;
@@ -144,10 +144,11 @@ router.post(
           .status(403)
           .json({ message: "Cannot login as inactive user" });
 
-      // Enforce hierarchy: SUPER_ADMIN > ASM > RM > PARTNER
+      // Enforce hierarchy: SUPER_ADMIN > ASM > RSM > RM > PARTNER > CUSTOMER
       const roleHierarchy = {
-        [ROLES.SUPER_ADMIN]: [ROLES.ASM, ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
-        [ROLES.ASM]: [ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
+        [ROLES.SUPER_ADMIN]: [ROLES.ASM, ROLES.RSM, ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
+        [ROLES.ASM]: [ROLES.RSM, ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
+        [ROLES.RSM]: [ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
         [ROLES.RM]: [ROLES.PARTNER, ROLES.CUSTOMER],
       };
 

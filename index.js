@@ -8,11 +8,13 @@ import morgan from "morgan";
 import authRoutes from "./src/routes/auth.routes.js";
 import adminRoutes from "./src/routes/admin.routes.js";
 import asmRoutes from "./src/routes/asm.routes.js";
+import rsmRoutes from "./src/routes/rsm.routes.js";
 import rmRoutes from "./src/routes/rm.routes.js";
 import partnerRoutes from "./src/routes/partner.routes.js";
 import contactRoutes from "./src/routes/contact.routes.js";
 import customerRoutes from "./src/routes/customer.routes.js";
 import notificationRoutes from "./src/routes/notification.routes.js";
+import analyticsRoutes from "./src/routes/analytics.routes.js";
 import { connectDB } from "./src/db/db.js";
 import dotenv from "dotenv";
 import path from "path";
@@ -162,11 +164,13 @@ app.get("/health", (_, res) => res.json({ status: "ok" }));
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/asm", asmRoutes);
+app.use("/api/rsm", rsmRoutes);
 app.use("/api/rm", rmRoutes);
 app.use("/api/partner", partnerRoutes);
 app.use("/api/customer", customerRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/analytics", analyticsRoutes); // Universal Analytics API
 
 // Public email test endpoint (no auth required for testing)
 app.post("/api/test-email", async (req, res) => {

@@ -18,6 +18,12 @@ export async function generateEmployeeId(role, maxRetries = 10) {
       idField = "employeeId";
       break;
 
+    case "RSM":
+      prefix = "TLS";
+      Model = User;
+      idField = "employeeId";
+      break;
+
     case "RM":
       prefix = "TLR";
       Model = User;
