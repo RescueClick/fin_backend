@@ -1303,3 +1303,107 @@ export const emitPayoutStatusChanged = async (io, payoutId, status, partnerId) =
     timestamp: new Date(),
   });
 };
+
+// Incentive status (PENDING → PAID) notifications
+export const emitIncentiveStatusChanged = async (io, incentive, partnerId) => {
+  if (!io || !incentive || !partnerId) return;
+
+  const incentiveId = String(incentive._id);
+  const partnerIdStr = String(partnerId);
+  const status = incentive.status;
+
+  const notificationId = generateNotificationId({
+    applicationId: incentiveId,
+    status,
+    timestamp: Date.now(),
+    type: "incentive",
+  });
+
+  const message = `Incentive of ₹${incentive.amount} has been marked as ${status}`;
+
+  // Save notification for partner
+  await createNotification(partnerIdStr, {
+    type: "incentive",
+    title: "Incentive Status Updated",
+    message,
+    data: {
+      incentiveId,
+      status,
+      month: incentive.month,
+      year: incentive.year,
+      amount: incentive.amount,
+    },
+    notificationId,
+    timestamp: new Date(),
+  });
+
+  // Notify admins as well
+  try {
+    const { User } = await import("../models/User.js");
+    const { createNotificationsForUsers } = await import("./notificationService.js");
+
+    const adminUsers = await User.find({
+      role: { $in: ["ADMIN", "SUPER_ADMIN"] },
+    })
+      .select("_id")
+      .lean();
+
+    const adminUserIds = adminUsers.map((u) => u._id.toString());
+
+    await createNotificationsForUsers(adminUserIds, {
+      type: "incentive",
+      title: "Incentive Status Updated",
+      message,
+      data: {
+        incentiveId,
+        status,
+        partnerId: partnerIdStr,
+        month: incentive.month,
+        year: incentive.year,
+        amount: incentive.amount,
+      },
+      notificationId: generateNotificationId({
+        applicationId: incentiveId,
+        status,
+        timestamp: Date.now(),
+        type: "incentive",
+      }),
+      timestamp: new Date(),
+    });
+  } catch (err) {
+    console.error("❌ Error creating admin incentive notifications:", err);
+  }
+
+  // Emit socket events
+  io.to(`partner_${partnerIdStr}`).emit("incentiveStatusChanged", {
+    incentiveId,
+    status,
+    amount: incentive.amount,
+    month: incentive.month,
+    year: incentive.year,
+    notificationId,
+    timestamp: new Date(),
+  });
+
+  io.to("admin").emit("incentiveStatusChanged", {
+    incentiveId,
+    status,
+    partnerId: partnerIdStr,
+    amount: incentive.amount,
+    month: incentive.month,
+    year: incentive.year,
+    notificationId,
+    timestamp: new Date(),
+  });
+
+  io.to("super_admin").emit("incentiveStatusChanged", {
+    incentiveId,
+    status,
+    partnerId: partnerIdStr,
+    amount: incentive.amount,
+    month: incentive.month,
+    year: incentive.year,
+    notificationId,
+    timestamp: new Date(),
+  });
+};

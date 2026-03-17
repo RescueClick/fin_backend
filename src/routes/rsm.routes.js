@@ -6,6 +6,7 @@ import { requireRole } from "../middleware/requireRole.js";
 import { ROLES, RSM_TYPES } from "../config/roles.js";
 import { User } from "../models/User.js";
 import { Application, APP_STATUSES } from "../models/Application.js";
+import { BankMaster } from "../models/BankMaster.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { sendUserAccountEmail, sendApplicationStatusEmail } from "../utils/emailService.js";
 import { sendMail } from "../utils/sendMail.js";
@@ -230,12 +231,19 @@ router.post(
       }
 
       // ✅ Set approvedLoanAmount for DISBURSED
-      if (to === "DISBURSED") {
+      // When moving to APPROVED, approvedLoanAmount is REQUIRED
+      if (to === "APPROVED") {
         if (approvedLoanAmount == null || isNaN(Number(approvedLoanAmount))) {
           return res.status(400).json({
-            message: "approvedLoanAmount is required and must be a number for DISBURSED status",
+            message: "approvedLoanAmount is required and must be a number for APPROVED status",
           });
         }
+        app.approvedLoanAmount = Number(approvedLoanAmount);
+      }
+
+      // When moving to DISBURSED, we keep existing approvedLoanAmount.
+      // If frontend still sends a value, we accept it and overwrite.
+      if (to === "DISBURSED" && approvedLoanAmount != null && !isNaN(Number(approvedLoanAmount))) {
         app.approvedLoanAmount = Number(approvedLoanAmount);
       }
 
@@ -1129,6 +1137,40 @@ router.get("/profile", auth, requireRole(ROLES.RSM), async (req, res) => {
   } catch (err) {
     console.error("Error fetching RSM profile:", err);
     res.status(500).json({ message: err.message });
+  }
+});
+
+// ==================== BANK MASTER (RSM) ====================
+
+// GET /api/rsm/banks
+// RSM fetches banks allowed for their rsmType
+router.get("/banks", auth, requireRole(ROLES.RSM), async (req, res) => {
+  try {
+    const rsm = await User.findById(req.user.sub)
+      .select("rsmType")
+      .lean();
+
+    if (!rsm) {
+      return res.status(404).json({ message: "RSM not found" });
+    }
+
+    if (!rsm.rsmType) {
+      return res.status(400).json({
+        message: "RSM type is not set for this user. Please contact admin.",
+      });
+    }
+
+    const banks = await BankMaster.find({
+      isActive: true,
+      rsmTypes: rsm.rsmType,
+    })
+      .sort({ bankName: 1 })
+      .lean();
+
+    return res.json(banks);
+  } catch (err) {
+    console.error("Error fetching banks for RSM:", err);
+    return res.status(500).json({ message: "Error fetching banks" });
   }
 });
 

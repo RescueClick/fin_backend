@@ -11,6 +11,7 @@ import { ROLES } from "../config/roles.js";
 import { User } from "../models/User.js";
 import { Application } from "../models/Application.js";
 import { Target } from "../models/Target.js";
+import { Incentive } from "../models/Incentive.js";
 
 const router = express.Router();
 
@@ -31,6 +32,7 @@ router.get(
   async (req, res) => {
     try {
       const { id } = req.params;
+      const { year } = req.query;
       const requesterId = req.user.sub;
       const requesterRole = req.user.role;
 
@@ -161,11 +163,6 @@ router.get(
        * Get assigned target and achieved value for current month
        */
       const getAssignedTarget = async (userId, role, filter) => {
-        const monthNames = [
-          "January", "February", "March", "April", "May", "June",
-          "July", "August", "September", "October", "November", "December",
-        ];
-
         const now = new Date();
         const currentMonth = now.getMonth() + 1;
         const currentYear = now.getFullYear();
@@ -213,11 +210,31 @@ router.get(
         const achievedValue = agg.length > 0 ? Number(agg[0].total) : 0;
 
         return {
-          month: monthNames[currentMonth - 1],
+          month: currentMonth,
           year: currentYear,
           targetValue: t ? Number(t.disbursementTarget || t.targetValue || 0) : 0,
           achievedValue,
         };
+      };
+
+      /**
+       * Sum incentives paid based on partner filter
+       */
+      const sumIncentivesPaidByPartners = async (partnerFilter) => {
+        const match = {
+          status: "PAID",
+          ...partnerFilter,
+        };
+        const agg = await Incentive.aggregate([
+          { $match: match },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: { $toDouble: { $ifNull: ["$amount", 0] } } },
+            },
+          },
+        ]);
+        return agg.length > 0 ? Number(agg[0].total) : 0;
       };
 
       // ==================== BASE PROFILE ====================
@@ -234,9 +251,11 @@ router.get(
       // ==================== ROLE-SPECIFIC CALCULATIONS ====================
       let totals = {};
       let totalDisbursed = 0;
+      let totalIncentivesPaid = 0;
       let performance = "0.00";
       let assignedTargetValue = { targetValue: 0, achievedValue: 0 };
       const scope = targetUser.role;
+      let appMatchBase = {};
 
       // ASM Analytics
       if (targetUser.role === ROLES.ASM) {
@@ -282,8 +301,17 @@ router.get(
         ]);
         totalDisbursed = disbursedAggASM.length > 0 ? Number(disbursedAggASM[0].total || 0) : 0;
 
+        appMatchBase = partnerIds.length > 0
+          ? { partnerId: { $in: partnerIds.map((pId) => new mongoose.Types.ObjectId(pId)) } }
+          : {};
+
         // Get assigned target
         assignedTargetValue = await getAssignedTarget(targetUser._id, ROLES.ASM, {
+          partnerId: { $in: partnerIds },
+        });
+
+        // Total incentives paid to partners under this ASM
+        totalIncentivesPaid = await sumIncentivesPaidByPartners({
           partnerId: { $in: partnerIds },
         });
 
@@ -356,6 +384,18 @@ router.get(
         ]);
         totalDisbursed = disbursedAgg.length > 0 ? Number(disbursedAgg[0].total || 0) : 0;
 
+        appMatchBase = {
+          $or: [
+            { rsmId: new mongoose.Types.ObjectId(id) },
+            ...(rmIds.length > 0
+              ? [{ rmId: { $in: rmIds.map((rmId) => new mongoose.Types.ObjectId(rmId)) } }]
+              : []),
+            ...(partnerIds.length > 0
+              ? [{ partnerId: { $in: partnerIds.map((pId) => new mongoose.Types.ObjectId(pId)) } }]
+              : []),
+          ],
+        };
+
         // Get assigned target
         assignedTargetValue = await getAssignedTarget(targetUser._id, ROLES.RSM, {
           $or: [
@@ -363,6 +403,11 @@ router.get(
             { rmId: { $in: rmIds } },
             { partnerId: { $in: partnerIds } },
           ],
+        });
+
+        // Total incentives paid to partners under this RSM
+        totalIncentivesPaid = await sumIncentivesPaidByPartners({
+          partnerId: { $in: partnerIds },
         });
 
         // Calculate performance
@@ -412,8 +457,17 @@ router.get(
         ]);
         totalDisbursed = disbursedAggRM.length > 0 ? Number(disbursedAggRM[0].total || 0) : 0;
 
+        appMatchBase = partnerIds.length > 0
+          ? { partnerId: { $in: partnerIds.map((pId) => new mongoose.Types.ObjectId(pId)) } }
+          : {};
+
         // Get assigned target
         assignedTargetValue = await getAssignedTarget(targetUser._id, ROLES.RM, {
+          partnerId: { $in: partnerIds },
+        });
+
+        // Total incentives paid to partners under this RM
+        totalIncentivesPaid = await sumIncentivesPaidByPartners({
           partnerId: { $in: partnerIds },
         });
 
@@ -453,9 +507,16 @@ router.get(
         ]);
         totalDisbursed = disbursedAgg.length > 0 ? Number(disbursedAgg[0].total || 0) : 0;
 
+        appMatchBase = { partnerId: new mongoose.Types.ObjectId(id) };
+
         // Get assigned target
         assignedTargetValue = await getAssignedTarget(targetUser._id, ROLES.PARTNER, {
           partnerId: id,
+        });
+
+        // Total incentives paid to this Partner
+        totalIncentivesPaid = await sumIncentivesPaidByPartners({
+          partnerId: new mongoose.Types.ObjectId(id),
         });
 
         // Calculate performance
@@ -475,6 +536,70 @@ router.get(
         assignedTargetValue = { targetValue: 0, achievedValue: 0 };
         performance = undefined;
         totals = {};
+        appMatchBase = { customerId: new mongoose.Types.ObjectId(id) };
+      }
+
+      // ==================== Monthly History (12 months) ====================
+      const now = new Date();
+      const targetYear = year ? parseInt(year, 10) : now.getFullYear();
+      const targetYearSafe = Number.isFinite(targetYear) ? targetYear : now.getFullYear();
+
+      const monthlyPerformance = [];
+      for (let month = 1; month <= 12; month++) {
+        // Target for this month
+        const t = await Target.findOne({
+          assignedTo: targetUser._id,
+          role: scope,
+          month,
+          year: targetYearSafe,
+        }).lean();
+
+        const monthStart = new Date(targetYearSafe, month - 1, 1);
+        const monthEnd = new Date(targetYearSafe, month, 1);
+
+        const match = {
+          ...appMatchBase,
+          status: "DISBURSED",
+          $expr: {
+            $and: [
+              {
+                $eq: [
+                  { $month: { $ifNull: ["$disbursedDate", "$createdAt"] } },
+                  month,
+                ],
+              },
+              {
+                $eq: [
+                  { $year: { $ifNull: ["$disbursedDate", "$createdAt"] } },
+                  targetYearSafe,
+                ],
+              },
+            ],
+          },
+        };
+
+        const agg = await Application.aggregate([
+          { $match: match },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: { $toDouble: "$approvedLoanAmount" } },
+            },
+          },
+        ]);
+
+        const achievedValue =
+          agg.length > 0 && agg[0].total ? Number(agg[0].total) : 0;
+        const targetValue = t
+          ? Number(t.disbursementTarget || t.targetValue || 0)
+          : 0;
+
+        monthlyPerformance.push({
+          month,
+          year: targetYearSafe,
+          targetValue,
+          achievedValue,
+        });
       }
 
       // ==================== RESPONSE ====================
@@ -486,6 +611,8 @@ router.get(
             totals,
             assignedTarget: assignedTargetValue,
             totalDisbursed,
+            totalIncentivesPaid,
+            monthlyPerformance,
             performance:
               scope === ROLES.ASM || scope === ROLES.RSM || scope === ROLES.RM || scope === ROLES.PARTNER
                 ? `${performance}%`

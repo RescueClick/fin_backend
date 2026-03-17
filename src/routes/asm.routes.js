@@ -8,6 +8,7 @@ import { makeRmCode } from "../utils/codes.js";
 import { Payout } from "../models/Payout.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { Target } from "../models/Target.js";
+import { Incentive } from "../models/Incentive.js";
 import mongoose from "mongoose";
 import { Application } from "../models/Application.js";
 import { sendMail } from "../utils/sendMail.js";
@@ -1478,13 +1479,16 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
       .populate("partnerId", "firstName lastName email phone")
       .lean();
 
-    // Get all payouts with DONE
-    const donePayouts = await Payout.find({ payOutStatus: "DONE" })
-      .select("application")
+    // Get all payouts for these applications
+    const appIds = applications.map((app) => app._id);
+    const payouts = await Payout.find({ application: { $in: appIds } })
+      .select("application amount payOutStatus")
       .lean();
 
     const doneAppIds = new Set(
-      donePayouts.map((p) => p.application.toString())
+      payouts
+        .filter((p) => p.payOutStatus === "DONE")
+        .map((p) => p.application.toString())
     );
 
     // Only consider applications with DISBURSED and NOT already DONE
@@ -1493,8 +1497,13 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
         app.status === "DISBURSED" && !doneAppIds.has(app._id.toString())
     );
 
-    // Map to customer format
-    const customers = disbursedApps.map((app) => ({
+    // Map to customer format (include proposed payout amount if any)
+    const customers = disbursedApps.map((app) => {
+      const payout = payouts.find(
+        (p) => p.application.toString() === app._id.toString()
+      );
+
+      return {
       customerId: app.customerId?._id,
       customerEmployeeId: app.customerId?.employeeId || null,
       customerName: `${app.customerId?.firstName ?? ""} ${
@@ -1506,7 +1515,8 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
       requestedAmount: app.customer?.loanAmount || null,
       approvedAmount: app.approvedLoanAmount || null,
       status: app.status,
-      payOutStatus: "PENDING",
+      payOutStatus: payout?.payOutStatus || "PENDING",
+      payoutAmount: payout?.amount || 0,
       partner: {
         partnerId: app.partnerId?._id,
         name: `${app.partnerId?.firstName ?? ""} ${
@@ -1517,7 +1527,8 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
       },
       applicationId: app._id,
       createdAt: app.createdAt,
-    }));
+    };
+    });
 
     return res.json(customers);
   } catch (err) {
@@ -1573,40 +1584,44 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.ASM), async (req, 
       application: { $in: appIds },
       payOutStatus: "DONE",
     })
-      .select("application payOutStatus")
+      .select("application amount payOutStatus")
       .lean();
 
     const doneMap = {};
     donePayouts.forEach((p) => {
-      doneMap[p.application.toString()] = p.payOutStatus;
+      doneMap[p.application.toString()] = p;
     });
 
     const customers = applications
       .filter((app) => doneMap[app._id.toString()]) // only apps with DONE payout
-      .map((app) => ({
-        customerId: app.customerId?._id,
-        customerEmployeeId: app.customerId?.employeeId || null,
-        customerName: `${app.customerId?.firstName ?? ""} ${
-          app.customerId?.lastName ?? ""
-        }`.trim(),
-        contact: app.customerId?.phone || null,
-        email: app.customerId?.email || null,
-        loanType: app.loanType,
-        requestedAmount: app.customer?.loanAmount || null,
-        approvedAmount: app.approvedLoanAmount || null,
-        status: app.status,
-        payOutStatus: "DONE",
-        partner: {
-          partnerId: app.partnerId?._id,
-          name: `${app.partnerId?.firstName ?? ""} ${
-            app.partnerId?.lastName ?? ""
+      .map((app) => {
+        const payout = doneMap[app._id.toString()];
+        return {
+          customerId: app.customerId?._id,
+          customerEmployeeId: app.customerId?.employeeId || null,
+          customerName: `${app.customerId?.firstName ?? ""} ${
+            app.customerId?.lastName ?? ""
           }`.trim(),
-          email: app.partnerId?.email,
-          phone: app.partnerId?.phone,
-        },
-        applicationId: app._id,
-        createdAt: app.createdAt,
-      }));
+          contact: app.customerId?.phone || null,
+          email: app.customerId?.email || null,
+          loanType: app.loanType,
+          requestedAmount: app.customer?.loanAmount || null,
+          approvedAmount: app.approvedLoanAmount || null,
+          status: app.status,
+          payOutStatus: payout?.payOutStatus || "DONE",
+          payoutAmount: payout?.amount || 0,
+          partner: {
+            partnerId: app.partnerId?._id,
+            name: `${app.partnerId?.firstName ?? ""} ${
+              app.partnerId?.lastName ?? ""
+            }`.trim(),
+            email: app.partnerId?.email,
+            phone: app.partnerId?.phone,
+          },
+          applicationId: app._id,
+          createdAt: app.createdAt,
+        };
+      });
 
     return res.json(customers);
   } catch (err) {
@@ -1779,24 +1794,20 @@ router.post("/set-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
     });
 
     if (payout) {
-      // ✅ Update existing payout
+      // ✅ Update existing payout (ASM can only change amount/note, NOT final status)
       payout.amount = payoutAmount || payout.amount;
       payout.note = note || payout.note;
-      if (payOutStatus && ["PENDING", "DONE"].includes(payOutStatus)) {
-        payout.payOutStatus = payOutStatus;
-      }
+      // Force ASM-created payouts to stay in PENDING status
+      payout.payOutStatus = "PENDING";
       await payout.save();
     } else {
-      // ✅ Create new payout
+      // ✅ Create new payout (always PENDING when created by ASM)
       payout = await Payout.create({
         application: applicationId,
         partnerId,
         amount: payoutAmount,
         note,
-        payOutStatus:
-          payOutStatus && ["PENDING", "DONE"].includes(payOutStatus)
-            ? payOutStatus
-            : "PENDING",
+        payOutStatus: "PENDING",
         addedBy: req.user.sub, // ASM user
       });
     }
@@ -1896,9 +1907,11 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       const targetAchieved = fileTargetMet && disbursementTargetMet;
 
       // Check if partner EXCEEDED targets (for incentive eligibility)
+      // 👉 Incentives are based primarily on DISBURSEMENT performance.
+      // Partner must meet BOTH targets, and EXCEED the DISBURSEMENT target (files can meet but don't need to exceed).
       const fileTargetExceeded = achievedFileCount > fileCountTarget;
       const disbursementTargetExceeded = achievedDisbursement > disbursementTarget;
-      const targetExceeded = fileTargetExceeded || disbursementTargetExceeded;
+      const targetExceeded = disbursementTargetExceeded;
 
       // Calculate percentages
       const fileAchievementPercentage = fileCountTarget > 0 
@@ -1971,12 +1984,138 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       };
     });
 
-    res.json(incentiveData);
+    // Attach Incentive records (PENDING / PAID) for this period
+    const incentiveDocs = await Incentive.find({
+      partnerId: { $in: partnerIds },
+      month: targetMonth,
+      year: targetYear,
+    })
+      .select("partnerId amount status month year basis percentValue fixedValue notes")
+      .lean();
+
+    const docMap = new Map();
+    incentiveDocs.forEach((inv) => {
+      docMap.set(inv.partnerId.toString(), inv);
+    });
+
+    const response = incentiveData.map((row) => {
+      const doc = docMap.get(row.partnerId.toString());
+      return {
+        ...row,
+        incentiveRecordId: doc?._id || null,
+        incentiveStatus: doc?.status || null,
+        proposedAmount: doc?.amount || 0,
+        basis: doc?.basis || null,
+        percentValue: doc?.percentValue || null,
+        fixedValue: doc?.fixedValue || null,
+        notes: doc?.notes || null,
+        incentivePaid: doc?.status === "PAID",
+        paidAmount: doc?.status === "PAID" ? doc.amount : 0,
+      };
+    });
+
+    res.json(response);
   } catch (error) {
     console.error("Error fetching incentives:", error);
     res.status(500).json({ message: "Server error" });
   }
 });
+
+// POST /api/asm/incentives/:partnerId/pay
+// ASM records a proposed incentive for a partner (stored in Incentive collection as PENDING)
+router.post(
+  "/incentives/:partnerId/pay",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    try {
+      const asmId = req.user.sub;
+      const { partnerId } = req.params;
+      const { basis, percentValue, fixedValue, amount, month, year, notes } = req.body;
+
+      if (!partnerId) {
+        return res.status(400).json({ message: "PartnerId is required" });
+      }
+
+      if (!basis || !["PERCENT", "FIXED"].includes(basis)) {
+        return res.status(400).json({ message: "Invalid basis. Use PERCENT or FIXED." });
+      }
+
+      if (!amount || Number(amount) <= 0) {
+        return res.status(400).json({ message: "Valid incentive amount is required" });
+      }
+
+      const now = new Date();
+      const payMonth = month || now.getMonth() + 1;
+      const payYear = year || now.getFullYear();
+
+      // Optional: verify partner exists and is under this ASM hierarchy
+      const partner = await User.findOne({
+        _id: partnerId,
+        role: ROLES.PARTNER,
+      }).lean();
+
+      if (!partner) {
+        return res.status(404).json({ message: "Partner not found" });
+      }
+
+      // Snapshot current incentive metrics from latest calculation
+      // Reuse the same logic as /asm/incentives to fetch one partner's row
+      const incentivesSnapshot = await Application.aggregate([
+        {
+          $match: {
+            status: "DISBURSED",
+            partnerId: new mongoose.Types.ObjectId(partnerId),
+          },
+        },
+        {
+          $group: {
+            _id: "$partnerId",
+            achievedDisbursement: { $sum: "$approvedLoanAmount" },
+            achievedFileCount: { $sum: 1 },
+          },
+        },
+      ]);
+
+      const snapshot = incentivesSnapshot[0] || {
+        achievedDisbursement: 0,
+        achievedFileCount: 0,
+      };
+
+      const target = await Target.findOne({
+        assignedTo: partnerId,
+        role: ROLES.PARTNER,
+        month: payMonth,
+        year: payYear,
+      }).lean();
+
+      const fileCountTarget = target?.fileCountTarget || 4;
+      const disbursementTarget = target?.disbursementTarget || target?.targetValue || 2000000;
+
+      const incentiveDoc = await Incentive.create({
+        partnerId,
+        asmId,
+        month: payMonth,
+        year: payYear,
+        fileCountTarget,
+        achievedFileCount: snapshot.achievedFileCount || 0,
+        disbursementTarget,
+        achievedDisbursement: snapshot.achievedDisbursement || 0,
+        basis,
+        percentValue: basis === "PERCENT" ? Number(percentValue) || 0 : undefined,
+        fixedValue: basis === "FIXED" ? Number(fixedValue) || Number(amount) : undefined,
+        amount: Number(amount),
+        status: "PENDING",
+        notes: notes || "",
+      });
+
+      return res.status(201).json(incentiveDoc);
+    } catch (error) {
+      console.error("Error recording incentive payment:", error);
+      return res.status(500).json({ message: "Server error", error: error.message });
+    }
+  }
+);
 
 router.get(
   "/partner/:partnerId/get-customers",

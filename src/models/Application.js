@@ -1,5 +1,4 @@
 import mongoose from "mongoose";
-import { type } from "os";
 
 // =================== CONSTANTS ===================
 export const APP_STATUSES = [
@@ -169,12 +168,12 @@ const ReferenceSchema = new mongoose.Schema(
   { _id: false }
 );
 
-const CoApplicantSchema =  new mongoose.Schema(
+const CoApplicantSchema = new mongoose.Schema(
   {
-    phone: {type:String}
+    phone: { type: String },
   },
   { _id: false }
-)
+);
 
 // =================== MAIN APPLICATION ===================
 const ApplicationSchema = new mongoose.Schema(

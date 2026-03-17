@@ -15,6 +15,7 @@ import { makePartnerCode } from "../utils/codes.js";
 import { sendMail } from "../utils/sendMail.js";
 import { sendPartnerRegistrationEmail, sendLoanApplicationEmail, sendDeleteAccountRequestEmail } from "../utils/emailService.js";
 import { Target } from "../models/Target.js";
+import { Incentive } from "../models/Incentive.js";
 import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 
@@ -1829,7 +1830,24 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     );
 
     // ------------------
-    // 8️⃣ Response
+    // 8️⃣ Incentive history (from Incentive collection)
+    // ------------------
+    const incentives = await Incentive.find({
+      partnerId: partner._id,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const totalIncentivePaid = incentives
+      .filter((inv) => inv.status === "PAID")
+      .reduce((sum, inv) => sum + (inv.amount || 0), 0);
+
+    const pendingIncentiveAmount = incentives
+      .filter((inv) => inv.status === "PENDING")
+      .reduce((sum, inv) => sum + (inv.amount || 0), 0);
+
+    // ------------------
+    // 9️⃣ Response
     // ------------------
     res.json({
       totalFiles,
@@ -1866,12 +1884,82 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       monthlyPayouts: last3MonthsPayouts, // Last 3 months payout breakdown
       allYearsPayouts, // All years payout breakdown for lifetime earnings
       currentMonthEarning, // Current month earning
+      incentives,
+      totalIncentivePaid,
+      pendingIncentiveAmount,
     });
   } catch (err) {
     console.error("Partner dashboard error:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 });
+
+// ✅ Partner payout history (detailed list only for payouts)
+router.get(
+  "/payouts/history",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const { year, month } = req.query;
+
+      const match = {
+        partnerId: new mongoose.Types.ObjectId(partnerId),
+        payOutStatus: "DONE",
+      };
+
+      if (year && !month) {
+        const y = parseInt(year, 10);
+        if (!isNaN(y)) {
+          match.createdAt = {
+            $gte: new Date(y, 0, 1),
+            $lt: new Date(y + 1, 0, 1),
+          };
+        }
+      }
+
+      if (year && month) {
+        const y = parseInt(year, 10);
+        const m = parseInt(month, 10); // 1-12
+        if (!isNaN(y) && !isNaN(m) && m >= 1 && m <= 12) {
+          match.createdAt = {
+            $gte: new Date(y, m - 1, 1),
+            $lt: new Date(y, m, 1),
+          };
+        }
+      }
+
+      const payouts = await Payout.find(match)
+        .populate("application", "appNo loanType approvedLoanAmount createdAt")
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const formatted = payouts.map((p) => ({
+        id: p._id,
+        amount: p.amount || 0,
+        status: p.payOutStatus,
+        notes: p.notes || "",
+        createdAt: p.createdAt,
+        application: p.application
+          ? {
+              appNo: p.application.appNo || "",
+              loanType: p.application.loanType || "",
+              approvedLoanAmount: p.application.approvedLoanAmount || 0,
+              createdAt: p.application.createdAt,
+            }
+          : null,
+      }));
+
+      return res.json({ payouts: formatted });
+    } catch (err) {
+      console.error("Error fetching Partner payout history:", err);
+      return res
+        .status(500)
+        .json({ message: "Error fetching Partner payout history" });
+    }
+  }
+);
 
 // router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
 //   try {
@@ -2325,6 +2413,204 @@ router.patch(
     } catch (err) {
       console.error("Error updating bank details:", err);
       res.status(500).json({ message: err.message });
+    }
+  }
+);
+
+// ==================== PARTNER PAYOUT & INCENTIVE HISTORY ====================
+
+// 1) CURRENT-MONTH PAYOUT SUMMARY
+// GET /api/partner/payouts/current
+router.get(
+  "/payouts/current",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const now = new Date();
+      const month = now.getMonth(); // 0-11
+      const year = now.getFullYear();
+
+      const monthStart = new Date(year, month, 1);
+      const monthEnd = new Date(year, month + 1, 1);
+
+      const payouts = await Payout.find({
+        partnerId,
+        createdAt: { $gte: monthStart, $lt: monthEnd },
+      })
+        .populate("application", "appNo loanType loanAmount status")
+        .select("amount payOutStatus note createdAt application")
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const totalPayoutThisMonth = payouts.reduce(
+        (sum, p) => sum + (Number(p.amount) || 0),
+        0
+      );
+
+      return res.json({
+        month: month + 1,
+        year,
+        totalPayoutThisMonth,
+        payouts,
+      });
+    } catch (err) {
+      console.error("Error fetching current month payouts:", err);
+      return res.status(500).json({ message: "Error fetching payouts" });
+    }
+  }
+);
+
+// 2) CURRENT-MONTH INCENTIVE SUMMARY
+// GET /api/partner/incentives/current
+router.get(
+  "/incentives/current",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const now = new Date();
+      const month = now.getMonth() + 1; // 1-12
+      const year = now.getFullYear();
+
+      const incentives = await Incentive.find({
+        partnerId,
+        month,
+        year,
+      })
+        .select(
+          "amount status paidAt notes fileCountTarget achievedFileCount disbursementTarget achievedDisbursement month year"
+        )
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const totalIncentiveThisMonth = incentives.reduce(
+        (sum, i) => sum + (Number(i.amount) || 0),
+        0
+      );
+
+      return res.json({
+        month,
+        year,
+        totalIncentiveThisMonth,
+        incentives,
+      });
+    } catch (err) {
+      console.error("Error fetching current month incentives:", err);
+      return res.status(500).json({ message: "Error fetching incentives" });
+    }
+  }
+);
+
+// 3) PAYOUT HISTORY (MONTH/YEAR)
+// GET /api/partner/payouts/history?month=MM&year=YYYY
+router.get(
+  "/payouts/history",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      let { month, year } = req.query;
+
+      const now = new Date();
+      const currentMonth = now.getMonth() + 1;
+      const currentYear = now.getFullYear();
+
+      month = month ? Number(month) : currentMonth;
+      year = year ? Number(year) : currentYear;
+
+      if (Number.isNaN(month) || month < 1 || month > 12) {
+        return res.status(400).json({ message: "Invalid month. Use 1-12." });
+      }
+      if (Number.isNaN(year) || year < 2000) {
+        return res.status(400).json({ message: "Invalid year." });
+      }
+
+      const monthStart = new Date(year, month - 1, 1);
+      const monthEnd = new Date(year, month, 1);
+
+      const payouts = await Payout.find({
+        partnerId,
+        createdAt: { $gte: monthStart, $lt: monthEnd },
+      })
+        .populate("application", "appNo loanType loanAmount status")
+        .select("amount payOutStatus note createdAt application")
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const totalPayout = payouts.reduce(
+        (sum, p) => sum + (Number(p.amount) || 0),
+        0
+      );
+
+      return res.json({
+        month,
+        year,
+        totalPayout,
+        payouts,
+      });
+    } catch (err) {
+      console.error("Error fetching payout history:", err);
+      return res.status(500).json({ message: "Error fetching payout history" });
+    }
+  }
+);
+
+// 4) INCENTIVE HISTORY (MONTH/YEAR)
+// GET /api/partner/incentives/history?month=MM&year=YYYY
+router.get(
+  "/incentives/history",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      let { month, year } = req.query;
+
+      const now = new Date();
+      const currentMonth = now.getMonth() + 1;
+      const currentYear = now.getFullYear();
+
+      month = month ? Number(month) : currentMonth;
+      year = year ? Number(year) : currentYear;
+
+      if (Number.isNaN(month) || month < 1 || month > 12) {
+        return res.status(400).json({ message: "Invalid month. Use 1-12." });
+      }
+      if (Number.isNaN(year) || year < 2000) {
+        return res.status(400).json({ message: "Invalid year." });
+      }
+
+      const incentives = await Incentive.find({
+        partnerId,
+        month,
+        year,
+      })
+        .select(
+          "amount status paidAt notes fileCountTarget achievedFileCount disbursementTarget achievedDisbursement month year"
+        )
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const totalIncentive = incentives.reduce(
+        (sum, i) => sum + (Number(i.amount) || 0),
+        0
+      );
+
+      return res.json({
+        month,
+        year,
+        totalIncentive,
+        incentives,
+      });
+    } catch (err) {
+      console.error("Error fetching incentive history:", err);
+      return res
+        .status(500)
+        .json({ message: "Error fetching incentive history" });
     }
   }
 );

@@ -345,6 +345,52 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
   }
 });
 
+// ==================== PARTNER MANAGEMENT (RM) ====================
+
+// DELETE /api/rm/partners/:partnerId
+// RM can soft-delete (deactivate) a partner under them
+router.delete(
+  "/partners/:partnerId",
+  auth,
+  requireRole(ROLES.RM),
+  async (req, res) => {
+    try {
+      const rmId = req.user.sub;
+      const { partnerId } = req.params;
+
+      // Ensure this partner belongs to the logged-in RM
+      const partner = await User.findOne({
+        _id: partnerId,
+        role: ROLES.PARTNER,
+        rmId,
+      });
+
+      if (!partner) {
+        return res.status(404).json({
+          message: "Partner not found or not under this RM",
+        });
+      }
+
+      // Soft delete: mark suspended and set deletedAt
+      partner.status = "SUSPENDED";
+      partner.deletedAt = new Date();
+
+      // Optionally also detach from RM
+      partner.rmId = null;
+
+      await partner.save();
+
+      return res.json({
+        message: "Partner deleted successfully from this RM",
+        partnerId: partner._id,
+      });
+    } catch (err) {
+      console.error("Error deleting partner from RM:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
 router.get(
   "/partner/:partnerId/customers",
   auth,
