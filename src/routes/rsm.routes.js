@@ -183,8 +183,9 @@ router.post(
       if (!to)
         return res.status(400).json({ message: "Target status 'to' required" });
 
-      // ✅ RSM can ONLY handle processing statuses
+      // ✅ RSM can ONLY handle processing statuses (including LOGIN)
       const RSM_ALLOWED_STATUSES = [
+        "LOGIN",
         "UNDER_REVIEW",
         "APPROVED",
         "AGREEMENT",
@@ -194,7 +195,7 @@ router.post(
 
       if (!RSM_ALLOWED_STATUSES.includes(to)) {
         return res.status(403).json({
-          message: `RSM can only transition to processing statuses: ${RSM_ALLOWED_STATUSES.join(", ")}. Document statuses are handled by RM.`
+            message: `RSM can only transition to processing statuses: ${RSM_ALLOWED_STATUSES.join(", ")}. Document statuses are handled by RM.`
         });
       }
 
@@ -218,7 +219,9 @@ router.post(
       // Validate status transition is allowed from current status
       const currentStatus = app.status;
       const allowedTransitions = {
-        DOC_COMPLETE: ["UNDER_REVIEW"],
+        // After RM marks DOC_COMPLETE, RSM must first LOGIN, then move to UNDER_REVIEW
+        DOC_COMPLETE: ["LOGIN"],
+        LOGIN: ["UNDER_REVIEW"],
         UNDER_REVIEW: ["APPROVED", "REJECTED"],
         APPROVED: ["AGREEMENT", "DISBURSED"],
         AGREEMENT: ["DISBURSED"],
@@ -226,7 +229,9 @@ router.post(
 
       if (!allowedTransitions[currentStatus]?.includes(to)) {
         return res.status(400).json({
-          message: `Cannot transition from ${currentStatus} to ${to}. Allowed transitions: ${allowedTransitions[currentStatus]?.join(", ") || "none"}`
+          message: `Cannot transition from ${currentStatus} to ${to}. Allowed transitions: ${
+            allowedTransitions[currentStatus]?.join(", ") || "none"
+          }`,
         });
       }
 

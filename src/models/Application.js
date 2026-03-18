@@ -6,12 +6,13 @@ export const APP_STATUSES = [
   "SUBMITTED",
   "DOC_INCOMPLETE",
   "DOC_COMPLETE",
+  "LOGIN",
   "DOC_SUBMITTED",
   "UNDER_REVIEW",
   "APPROVED",
   "AGREEMENT",
   "REJECTED",
-  "DISBURSED"
+  "DISBURSED",
 ];
 
 export const LOAN_TYPES = [
@@ -251,9 +252,11 @@ ApplicationSchema.methods.areAllDocumentsVerified = function() {
 ApplicationSchema.methods.transition = function (to, byUserId, note) {
   const allowed = {
     DRAFT: ["SUBMITTED"],
-    SUBMITTED: ["DOC_INCOMPLETE", "UNDER_REVIEW", "DOC_COMPLETE", "UNDER_REVIEW"],
+    SUBMITTED: ["DOC_INCOMPLETE", "DOC_COMPLETE"],
     DOC_INCOMPLETE: ["DOC_COMPLETE", "REJECTED"],
-    DOC_COMPLETE: ["UNDER_REVIEW", "DOC_INCOMPLETE"], // ✅ Allow reverting to DOC_INCOMPLETE
+    // After RM marks DOC_COMPLETE, RSM must first move to LOGIN, then UNDER_REVIEW
+    DOC_COMPLETE: ["LOGIN", "DOC_INCOMPLETE"],
+    LOGIN: ["UNDER_REVIEW"],
     UNDER_REVIEW: ["APPROVED", "REJECTED"],
     APPROVED: ["AGREEMENT", "DISBURSED"],
     AGREEMENT: ["DISBURSED"],

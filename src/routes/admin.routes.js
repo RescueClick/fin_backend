@@ -4490,21 +4490,27 @@ router.get(
 
       let response = incentiveData.map((row) => {
         const doc = docMap.get(row.partnerId.toString());
-        const proposedAmount = doc?.amount || 0;
+
+        // Canonical incentive amount:
+        // 👉 Incentive is NOT auto-calculated anymore.
+        // 👉 Only use the amount explicitly set in Incentive documents.
+        const canonicalAmount =
+          typeof doc?.amount === "number" ? doc.amount : 0;
+
         return {
           ...row,
+          // Ensure frontend sees the same value everywhere
+          incentiveAmount: Math.round(canonicalAmount),
           incentiveRecordId: doc?._id || null,
           incentiveStatus: doc?.status || null,
-          proposedAmount,
           basis: doc?.basis || null,
           percentValue: doc?.percentValue || null,
           fixedValue: doc?.fixedValue || null,
           notes: doc?.notes || null,
           incentivePaid: doc?.status === "PAID",
-          paidAmount: doc?.status === "PAID" ? doc.amount : 0,
-          // Backward‑compat fields used by frontend
+          // Backward‑compat single source of truth
           id: doc?._id || null,
-          amount: proposedAmount,
+          amount: Math.round(canonicalAmount),
           status: doc?.status || (row.eligibleForIncentive ? "PENDING" : null),
         };
       });

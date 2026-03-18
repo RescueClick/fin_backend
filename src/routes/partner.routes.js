@@ -1281,9 +1281,9 @@ router.get(
   requireRole(ROLES.PARTNER),
   async (req, res) => {
     try {
-      const apps = await Application.find({ 
+      const apps = await Application.find({
         partnerId: req.user.sub,
-        deletedAt: null 
+        deletedAt: null,
       })
         .populate("customerId", "firstName lastName email phone") // fetch linked user
         .lean();
@@ -1291,12 +1291,17 @@ router.get(
       // fetch payouts separately and attach them
       const appsWithPayouts = await Promise.all(
         apps.map(async (app) => {
+          // Mask internal statuses for Partner:
+          // - LOGIN is shown as DOC_COMPLETE
+          const maskedStatus =
+            app.status === "LOGIN" ? "DOC_COMPLETE" : app.status;
+
           const payouts = await Payout.find(
             { application: app._id }, // ✅ use correct field name
             "amount status note createdAt"
           ).lean();
 
-          return { ...app, payouts };
+          return { ...app, status: maskedStatus, payouts };
         })
       );
 
@@ -1336,13 +1341,23 @@ router.get(
           .json({ message: "Application not found or not accessible" });
       }
 
+      // Mask internal statuses for Partner:
+      // - LOGIN is shown as DOC_COMPLETE
+      const maskedStatus =
+        app.status === "LOGIN" ? "DOC_COMPLETE" : app.status;
+
+      const appWithMaskedStatus = {
+        ...app,
+        status: maskedStatus,
+      };
+
       // Get payouts for this application
       const payouts = await Payout.find({ application: app._id })
         .select("amount status note createdAt")
         .lean();
 
       return res.json({
-        application: app,
+        application: appWithMaskedStatus,
         payouts,
       });
     } catch (err) {
@@ -1378,8 +1393,16 @@ router.get(
           message: "Application not found or not accessible",
         });
       }
+      
+      // Mask internal statuses for Partner:
+      // - LOGIN is shown as DOC_COMPLETE
+      const maskedStatus =
+        application.status === "LOGIN" ? "DOC_COMPLETE" : application.status;
 
-      return res.json(application);
+      return res.json({
+        ...application,
+        status: maskedStatus,
+      });
     } catch (err) {
       console.error("Error fetching partner application:", err);
       return res
@@ -1428,7 +1451,9 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       loanType: app.loanType,
       loanAmount: app.customer?.loanAmount || null,
       approvedAmount: app.approvedLoanAmount || null,
-      status: app.status,
+      // Mask internal statuses for Partner:
+      // - LOGIN is shown as DOC_COMPLETE
+      status: app.status === "LOGIN" ? "DOC_COMPLETE" : app.status,
       payoutAmount: payoutMap[app._id.toString()] || 0, // ✅ only payout amount
       docs: app.docs || [], // ✅ Include documents for incomplete doc tracking
       rm: {

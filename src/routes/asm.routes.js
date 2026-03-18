@@ -1880,7 +1880,9 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       },
     }).lean();
 
-    // Calculate achievements using Hybrid Target Model
+    // Calculate achievements using Hybrid Target Model (for display only)
+    // NOTE: Incentive AMOUNT is NOT auto-calculated anymore.
+    // ASM will decide the amount manually and record it via /asm/incentives/:partnerId/pay.
     const incentiveData = partners.map((partner) => {
       const partnerTargets = targets.filter(
         (t) => t.assignedTo.toString() === partner._id.toString()
@@ -1906,9 +1908,8 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       const disbursementTargetMet = achievedDisbursement >= disbursementTarget;
       const targetAchieved = fileTargetMet && disbursementTargetMet;
 
-      // Check if partner EXCEEDED targets (for incentive eligibility)
-      // 👉 Incentives are based primarily on DISBURSEMENT performance.
-      // Partner must meet BOTH targets, and EXCEED the DISBURSEMENT target (files can meet but don't need to exceed).
+      // Check if partner met / exceeded targets (for information only)
+      // Incentive itself will be set manually, not computed from these numbers.
       const fileTargetExceeded = achievedFileCount > fileCountTarget;
       const disbursementTargetExceeded = achievedDisbursement > disbursementTarget;
       const targetExceeded = disbursementTargetExceeded;
@@ -1926,34 +1927,6 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
         fileAchievementPercentage,
         disbursementAchievementPercentage
       );
-
-      // Determine incentive eligibility and level (only if EXCEEDED targets)
-      let incentiveLevel = "NONE";
-      let incentiveAmount = 0;
-      
-      if (targetExceeded && targetAchieved) {
-        // Calculate excess percentage
-        const fileExcessPercentage = fileAchievementPercentage - 100;
-        const disbursementExcessPercentage = disbursementAchievementPercentage - 100;
-        const averageExcess = (fileExcessPercentage + disbursementExcessPercentage) / 2;
-
-        if (achievedFileCount >= 6 && achievedDisbursement >= 3000000) {
-          // 6+ files + ₹30L+ (exceeded significantly)
-          incentiveLevel = "HIGH";
-          // Calculate incentive based on excess percentage (e.g., 1% of excess disbursement)
-          incentiveAmount = Math.max(2000, (achievedDisbursement - disbursementTarget) * 0.01);
-        } else if (achievedFileCount >= 5 && achievedDisbursement >= 2500000) {
-          // 5 files + ₹25L+ (exceeded)
-          incentiveLevel = "MEDIUM";
-          // Calculate incentive based on excess percentage
-          incentiveAmount = Math.max(1000, (achievedDisbursement - disbursementTarget) * 0.01);
-        } else if (targetExceeded) {
-          // Exceeded but not in specific tiers
-          incentiveLevel = "BASIC";
-          // Small incentive based on excess
-          incentiveAmount = Math.max(500, (achievedDisbursement - disbursementTarget) * 0.005);
-        }
-      }
 
       return {
         partnerId: partner._id,
@@ -1977,10 +1950,10 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
         targetExceeded: targetExceeded || false,
         fileAchievementPercentage: fileAchievementPercentage.toFixed(2),
         disbursementAchievementPercentage: disbursementAchievementPercentage.toFixed(2),
-        // Incentive details (only eligible if EXCEEDED targets)
+        // Incentive flags for UI only – amount is set manually by ASM
         eligibleForIncentive: targetExceeded && targetAchieved,
-        incentiveLevel,
-        incentiveAmount: Math.round(incentiveAmount),
+        incentiveLevel: "NONE",
+        incentiveAmount: 0,
       };
     });
 

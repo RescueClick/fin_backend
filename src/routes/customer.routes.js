@@ -371,12 +371,16 @@ router.get(
             ? app.stageHistory[app.stageHistory.length - 1]
             : null;
 
+        // Mask internal statuses: LOGIN is shown as DOC_COMPLETE to customer
+        const maskedStatus =
+          app.status === "LOGIN" ? "DOC_COMPLETE" : app.status;
+
         return {
           appNo: app.appNo || "",
           loanType: app.loanType || "",
           appliedLoanAmount: app.customer?.loanAmount || 0,
           approvedLoanAmount: app.approvedLoanAmount || null,
-          status: app.status || "",
+          status: maskedStatus || "",
           remarks: lastStage?.note || null,
           lastUpdateDate: lastStage?.at || null,
           formFillingDate: app.createdAt || null,
