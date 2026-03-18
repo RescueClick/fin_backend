@@ -628,6 +628,67 @@ export const sendPayoutEmail = async (partner, payout) => {
 };
 
 /**
+ * Send incentive paid email
+ */
+export const sendIncentiveEmail = async (partner, incentive) => {
+  const content = `
+    <h2>Dear ${partner.firstName} ${partner.lastName},</h2>
+    <p>Your incentive status has been updated.</p>
+    
+    <div class="info-box">
+      <h3 style="margin-top: 0; color: #12B99C;">Incentive Details</h3>
+      <div class="info-row">
+        <span class="label">Incentive ID:</span>
+        <span class="value">${incentive.incentiveId || incentive._id}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Amount:</span>
+        <span class="value">₹${Number(incentive.amount || 0).toLocaleString("en-IN")}</span>
+      </div>
+      <div class="info-row">
+        <span class="label">Status:</span>
+        <span class="status-badge ${
+          incentive.status === "PAID"
+            ? "status-approved"
+            : incentive.status === "REJECTED"
+            ? "status-rejected"
+            : "status-pending"
+        }">${incentive.status}</span>
+      </div>
+      ${incentive.month && incentive.year ? `
+      <div class="info-row">
+        <span class="label">Period:</span>
+        <span class="value">${incentive.month}/${incentive.year}</span>
+      </div>
+      ` : ""}
+      ${incentive.paidAt ? `
+      <div class="info-row">
+        <span class="label">Paid On:</span>
+        <span class="value">${new Date(incentive.paidAt).toLocaleDateString()}</span>
+      </div>
+      ` : ""}
+    </div>
+    
+    <div style="text-align: center;">
+      <a href="https://trustlinefintech.com/login" class="button">View Incentive Details</a>
+    </div>
+  `;
+
+  try {
+    await sendMail({
+      to: partner.email,
+      subject: `Incentive Status Update - ₹${Number(incentive.amount || 0).toLocaleString("en-IN")}`,
+      html: getEmailTemplate("Incentive Status Update", content),
+    });
+    console.log("✅ Incentive email sent to:", partner.email);
+    return true;
+  } catch (error) {
+    console.error("❌ Failed to send incentive email:", error);
+    return false;
+  }
+};
+
+/**
  * Send password reset email
  */
 export const sendPasswordResetEmail = async (user, resetToken, resetUrl) => {

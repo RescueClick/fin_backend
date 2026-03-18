@@ -814,9 +814,12 @@ router.post(
 
       res.json(responseData);
 
-      // 📧 Send email asynchronously (non-blocking) using professional email service
+      // 📧 Send email only for critical statuses (non-blocking)
       setImmediate(async () => {
         try {
+          const shouldEmailCustomer = ["APPROVED", "REJECTED", "DISBURSED", "AGREEMENT"].includes(to);
+          if (!shouldEmailCustomer) return;
+
           if (app.customerId && app.customerId.email) {
             const customerData = {
               firstName: app.customerId.firstName || app.customer?.firstName || "Customer",
@@ -1976,62 +1979,8 @@ router.put(
         allDocumentsVerified: app.docs.every(doc => doc.status === "VERIFIED"),
       });
 
-      // Send email notification asynchronously (non-blocking) - notify partner about document status
-      setImmediate(async () => {
-        try {
-          const partner = await User.findById(app.partnerId).lean();
-          const customer = await User.findById(app.customerId).lean();
-          
-          if (partner && partner.email && customer) {
-            // Send to customer using professional email service
-            const emailSent = await sendDocumentStatusEmail(
-              {
-                firstName: customer.firstName || app.customer?.firstName || "Customer",
-                email: customer.email || app.customer?.email,
-              },
-              {
-                appNo: app.appNo,
-                loanType: app.loanType,
-              },
-              decodedDocType,
-              status
-            );
-            if (emailSent) {
-              console.log(`✅ Document status email sent to customer: ${customer.email}`);
-            }
-            
-            // Also notify partner about document status change
-            try {
-              const statusMessage = status === "REJECTED" 
-                ? "has been REJECTED and needs to be re-uploaded"
-                : status === "VERIFIED"
-                ? "has been VERIFIED"
-                : status === "UPDATED"
-                ? "has been marked as UPDATED and is under review"
-                : "status has been updated to PENDING";
-              
-              await sendMail({
-                to: partner.email,
-                subject: `Document Status Update - ${decodedDocType}`,
-                html: `
-                  <h2>Dear ${partner.firstName || "Partner"},</h2>
-                  <p>The document <strong>${decodedDocType}</strong> for application <strong>${app.appNo}</strong> ${statusMessage}.</p>
-                  ${remarks ? `<p><b>Remarks from RM:</b> ${remarks}</p>` : ""}
-                  ${status === "REJECTED" ? `<p>Please re-upload this document through the application form.</p>` : ""}
-                  <br/>
-                  <p>Thank you,<br/>Trustline Fintech</p>
-                `,
-              });
-              console.log(`✅ Document status notification sent to partner: ${partner.email}`);
-            } catch (partnerMailErr) {
-              console.error("❌ Failed to send partner notification:", partnerMailErr.message);
-            }
-          }
-        } catch (mailErr) {
-          console.error("❌ Failed to send document status email:", mailErr.message);
-          // Don't fail the request if email fails
-        }
-      });
+      // Email is intentionally NOT sent for document status changes (too noisy).
+      // Users should rely on in-app notifications instead.
     } catch (err) {
       console.error("Error updating document status:", err);
       res.status(500).json({

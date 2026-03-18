@@ -333,9 +333,12 @@ router.post(
         await app.save();
       }
 
-      // 📧 Send email asynchronously (non-blocking)
+      // 📧 Send email only for critical statuses (non-blocking)
       setImmediate(async () => {
         try {
+          const shouldEmailCustomer = ["APPROVED", "REJECTED", "DISBURSED", "AGREEMENT"].includes(to);
+          if (!shouldEmailCustomer) return;
+
           if (app.customerId && app.customerId.email) {
             const customerData = {
               firstName: app.customerId.firstName || app.customer?.firstName || "Customer",
@@ -1193,7 +1196,26 @@ router.get("/banks", auth, requireRole(ROLES.RSM), async (req, res) => {
       .sort({ bankName: 1 })
       .lean();
 
-    return res.json(banks);
+    // Filter according to Application.js LOAN_TYPES:
+    // PERSONAL RSM -> PERSONAL
+    // BUSINESS_HOME RSM -> BUSINESS + HOME_LOAN_SALARIED + HOME_LOAN_SELF_EMPLOYED
+    // Normalize legacy values PERSONAL_LOAN/BUSINESS_LOAN to PERSONAL/BUSINESS.
+    const normalizeLoanType = (lt) => {
+      const raw = String(lt || "").trim().toUpperCase();
+      if (raw === "PERSONAL_LOAN") return "PERSONAL";
+      if (raw === "BUSINESS_LOAN") return "BUSINESS";
+      return raw;
+    };
+
+    const rsmType = String(rsm.rsmType || "").trim().toUpperCase();
+    const filtered = banks.filter((b) => {
+      const lt = normalizeLoanType(b.loanType);
+      if (rsmType === String(RSM_TYPES.PERSONAL)) return lt === "PERSONAL";
+      if (rsmType === String(RSM_TYPES.BUSINESS_HOME)) return lt === "BUSINESS" || lt.startsWith("HOME_LOAN_");
+      return true;
+    });
+
+    return res.json(filtered);
   } catch (err) {
     console.error("Error fetching banks for RSM:", err);
     return res.status(500).json({ message: "Error fetching banks" });

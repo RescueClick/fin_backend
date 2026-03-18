@@ -1217,9 +1217,10 @@ export const emitNewCustomerRegistered = async (io, customer, partnerId) => {
   }
 };
 
-export const emitPayoutStatusChanged = async (io, payoutId, status, partnerId) => {
+export const emitPayoutStatusChanged = async (io, payoutId, status, partnerId, amount = null) => {
   if (!io) return;
 
+  const displayStatus = status === "DONE" ? "PAID" : status;
   const notificationId = generateNotificationId({
     applicationId: payoutId,
     status: status,
@@ -1227,7 +1228,10 @@ export const emitPayoutStatusChanged = async (io, payoutId, status, partnerId) =
     type: "payout",
   });
 
-  const message = `Payout status changed to ${status}`;
+  const amountText = typeof amount === "number" ? `₹${amount.toLocaleString("en-IN")}` : null;
+  const message = amountText
+    ? `Payout of ${amountText} has been marked as ${displayStatus}`
+    : `Payout status changed to ${displayStatus}`;
 
   // Save notification to MongoDB for partner
   if (partnerId) {
@@ -1239,6 +1243,7 @@ export const emitPayoutStatusChanged = async (io, payoutId, status, partnerId) =
       data: {
         payoutId,
         status,
+        amount,
       },
       notificationId,
       timestamp: new Date(),
@@ -1264,6 +1269,7 @@ export const emitPayoutStatusChanged = async (io, payoutId, status, partnerId) =
         payoutId,
         status,
         partnerId,
+        amount,
       },
       notificationId: generateNotificationId({
         applicationId: payoutId,
@@ -1282,6 +1288,7 @@ export const emitPayoutStatusChanged = async (io, payoutId, status, partnerId) =
     io.to(`partner_${String(partnerId)}`).emit("payoutStatusChanged", {
       payoutId,
       status,
+      amount,
       notificationId,
       timestamp: new Date(),
     });
@@ -1291,6 +1298,7 @@ export const emitPayoutStatusChanged = async (io, payoutId, status, partnerId) =
     payoutId,
     status,
     partnerId,
+    amount,
     notificationId,
     timestamp: new Date(),
   });
@@ -1299,6 +1307,7 @@ export const emitPayoutStatusChanged = async (io, payoutId, status, partnerId) =
     payoutId,
     status,
     partnerId,
+    amount,
     notificationId,
     timestamp: new Date(),
   });

@@ -12,8 +12,223 @@ import { User } from "../models/User.js";
 import { Application } from "../models/Application.js";
 import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
+import { Payout } from "../models/Payout.js";
 
 const router = express.Router();
+
+// ==================== SHARED HELPERS (ALL ANALYTICS ENDPOINTS) ====================
+
+function parseDateRange(req) {
+  const { start, end } = req.query;
+  const startDate = start ? new Date(String(start)) : null;
+  const endDate = end ? new Date(String(end)) : null;
+
+  const hasStart = startDate instanceof Date && !Number.isNaN(startDate.getTime());
+  const hasEnd = endDate instanceof Date && !Number.isNaN(endDate.getTime());
+
+  // If only one side is provided, treat it as open-ended
+  return {
+    startDate: hasStart ? startDate : null,
+    endDate: hasEnd ? endDate : null,
+  };
+}
+
+function buildUpdatedAtRangeFilter(startDate, endDate) {
+  if (!startDate && !endDate) return {};
+  const range = {};
+  if (startDate) range.$gte = startDate;
+  if (endDate) range.$lt = endDate;
+  return { updatedAt: range };
+}
+
+function buildCreatedAtRangeFilter(startDate, endDate) {
+  if (!startDate && !endDate) return {};
+  const range = {};
+  if (startDate) range.$gte = startDate;
+  if (endDate) range.$lt = endDate;
+  return { createdAt: range };
+}
+
+function buildLoanTypeFilter(req) {
+  const { loanType } = req.query;
+  if (!loanType) return {};
+  return { loanType: String(loanType) };
+}
+
+async function enforceHierarchyAccess({ requesterId, requesterRole, targetUser }) {
+  // SUPER_ADMIN can view any user's analytics
+  if (requesterRole === ROLES.SUPER_ADMIN) return;
+
+  // ASM can only view RSM analytics under them
+  if (requesterRole === ROLES.ASM) {
+    if (targetUser.role !== ROLES.RSM) {
+      throw Object.assign(new Error("ASM can only view RSM analytics"), { statusCode: 403 });
+    }
+    if (targetUser.asmId && targetUser.asmId.toString() !== requesterId) {
+      throw Object.assign(new Error("RSM not found or not under this ASM"), { statusCode: 403 });
+    }
+    // Backward compatibility: auto-set asmId if missing
+    if (!targetUser.asmId) {
+      await User.findByIdAndUpdate(targetUser._id, { asmId: requesterId });
+    }
+    return;
+  }
+
+  // RSM can only view RM analytics under them
+  if (requesterRole === ROLES.RSM) {
+    if (targetUser.role !== ROLES.RM) {
+      throw Object.assign(new Error("RSM can only view RM analytics"), { statusCode: 403 });
+    }
+    const isUnderRSM =
+      (targetUser.personalRsmId && targetUser.personalRsmId.toString() === requesterId) ||
+      (targetUser.businessHomeRsmId && targetUser.businessHomeRsmId.toString() === requesterId);
+    if (!isUnderRSM) {
+      throw Object.assign(new Error("RM not found or not under this RSM"), { statusCode: 403 });
+    }
+    return;
+  }
+
+  // RM can only view Partner analytics under them
+  if (requesterRole === ROLES.RM) {
+    if (targetUser.role !== ROLES.PARTNER) {
+      throw Object.assign(new Error("RM can only view Partner analytics"), { statusCode: 403 });
+    }
+    if (!targetUser.rmId || targetUser.rmId.toString() !== requesterId) {
+      throw Object.assign(new Error("Partner not found or not under this RM"), { statusCode: 403 });
+    }
+    return;
+  }
+
+  // PARTNER can only view their own analytics
+  if (requesterRole === ROLES.PARTNER) {
+    if (targetUser._id.toString() !== requesterId) {
+      throw Object.assign(new Error("Partners can only view their own analytics"), { statusCode: 403 });
+    }
+    return;
+  }
+
+  throw Object.assign(new Error("Unauthorized role"), { statusCode: 403 });
+}
+
+/**
+ * Build the application match scope (hierarchy filter).
+ * Returns:
+ * - appMatchBase: filter to apply on Application queries
+ * - partnerIds: partner IDs included in this scope (needed for payouts/incentives)
+ */
+async function buildScopeMatch({ targetUserId, targetRole }) {
+  const id = String(targetUserId);
+
+  // Helper to ObjectId array
+  const toObjectIds = (arr) => arr.map((x) => new mongoose.Types.ObjectId(x));
+
+  // ASM scope: partners under RMs under RSMs under ASM
+  if (targetRole === ROLES.ASM) {
+    // 1) RSMs under ASM
+    const rsms = await User.find({
+      asmId: id,
+      role: ROLES.RSM,
+      status: "ACTIVE",
+    })
+      .select("_id")
+      .lean();
+    const rsmIds = rsms.map((x) => x._id);
+
+    // 2) RMs under those RSMs (personal + business/home)
+    const rms = await User.find({
+      role: ROLES.RM,
+      status: "ACTIVE",
+      ...(rsmIds.length
+        ? {
+            $or: [
+              { personalRsmId: { $in: rsmIds } },
+              { businessHomeRsmId: { $in: rsmIds } },
+            ],
+          }
+        : { _id: { $in: [] } }),
+    })
+      .select("_id")
+      .lean();
+    const rmIds = rms.map((x) => x._id);
+
+    const partners = await User.find({
+      rmId: { $in: rmIds },
+      role: ROLES.PARTNER,
+      status: "ACTIVE",
+    }).select("_id").lean();
+    const partnerIds = partners.map((x) => x._id);
+
+    return {
+      partnerIds,
+      appMatchBase: partnerIds.length ? { partnerId: { $in: toObjectIds(partnerIds) } } : {},
+    };
+  }
+
+  // RSM scope: partners under RMs under this RSM
+  if (targetRole === ROLES.RSM) {
+    const rms = await User.find({
+      role: ROLES.RM,
+      $or: [{ personalRsmId: id }, { businessHomeRsmId: id }],
+      status: "ACTIVE",
+    }).select("_id").lean();
+    const rmIds = rms.map((x) => x._id);
+
+    const partners = await User.find({
+      rmId: { $in: rmIds },
+      role: ROLES.PARTNER,
+      status: "ACTIVE",
+    }).select("_id").lean();
+    const partnerIds = partners.map((x) => x._id);
+
+    const or = [
+      { rsmId: new mongoose.Types.ObjectId(id) },
+      ...(rmIds.length ? [{ rmId: { $in: toObjectIds(rmIds) } }] : []),
+      ...(partnerIds.length ? [{ partnerId: { $in: toObjectIds(partnerIds) } }] : []),
+    ];
+
+    return {
+      partnerIds,
+      appMatchBase: or.length ? { $or: or } : {},
+    };
+  }
+
+  // RM scope: partners under RM
+  if (targetRole === ROLES.RM) {
+    const partners = await User.find({
+      rmId: id,
+      role: ROLES.PARTNER,
+      status: "ACTIVE",
+    }).select("_id").lean();
+    const partnerIds = partners.map((x) => x._id);
+
+    return {
+      partnerIds,
+      appMatchBase: partnerIds.length
+        ? { partnerId: { $in: toObjectIds(partnerIds) } }
+        : {},
+    };
+  }
+
+  // Partner scope: this partner only
+  if (targetRole === ROLES.PARTNER) {
+    return {
+      partnerIds: [new mongoose.Types.ObjectId(id)],
+      appMatchBase: { partnerId: new mongoose.Types.ObjectId(id) },
+    };
+  }
+
+  // Admin scope (SUPER_ADMIN viewing someone) is handled by passing targetUser.role above.
+  // CUSTOMER scope: this customer only
+  if (targetRole === ROLES.CUSTOMER) {
+    return {
+      partnerIds: [],
+      appMatchBase: { customerId: new mongoose.Types.ObjectId(id) },
+    };
+  }
+
+  // SUPER_ADMIN as a target doesn't have a meaningful application scope; return empty
+  return { partnerIds: [], appMatchBase: {} };
+}
 
 /**
  * Universal Analytics Endpoint
@@ -48,73 +263,10 @@ router.get(
       }
 
       // ==================== HIERARCHICAL ACCESS CONTROL ====================
-      // SUPER_ADMIN can view any user's analytics
-      if (requesterRole === ROLES.SUPER_ADMIN) {
-        // Allow access
-      }
-      // ASM can only view RSM analytics
-      else if (requesterRole === ROLES.ASM) {
-        if (targetUser.role !== ROLES.RSM) {
-          return res.status(403).json({ 
-            message: "ASM can only view RSM analytics" 
-          });
-        }
-        // Verify RSM is under this ASM
-        if (targetUser.asmId && targetUser.asmId.toString() !== requesterId) {
-          return res.status(403).json({ 
-            message: "RSM not found or not under this ASM" 
-          });
-        }
-        // Backward compatibility: Auto-set asmId if missing
-        if (!targetUser.asmId) {
-          await User.findByIdAndUpdate(id, { asmId: requesterId });
-        }
-      }
-      // RSM can only view RM analytics
-      else if (requesterRole === ROLES.RSM) {
-        if (targetUser.role !== ROLES.RM) {
-          return res.status(403).json({ 
-            message: "RSM can only view RM analytics" 
-          });
-        }
-        // Verify RM is under this RSM
-        const isUnderRSM = 
-          (targetUser.personalRsmId && targetUser.personalRsmId.toString() === requesterId) ||
-          (targetUser.businessHomeRsmId && targetUser.businessHomeRsmId.toString() === requesterId);
-        
-        if (!isUnderRSM) {
-          return res.status(403).json({ 
-            message: "RM not found or not under this RSM" 
-          });
-        }
-      }
-      // RM can only view Partner analytics
-      else if (requesterRole === ROLES.RM) {
-        if (targetUser.role !== ROLES.PARTNER) {
-          return res.status(403).json({ 
-            message: "RM can only view Partner analytics" 
-          });
-        }
-        // Verify Partner is under this RM
-        if (!targetUser.rmId || targetUser.rmId.toString() !== requesterId) {
-          return res.status(403).json({ 
-            message: "Partner not found or not under this RM" 
-          });
-        }
-      }
-      // PARTNER can only view their own analytics
-      else if (requesterRole === ROLES.PARTNER) {
-        if (targetUser._id.toString() !== requesterId) {
-          return res.status(403).json({ 
-            message: "Partners can only view their own analytics" 
-          });
-        }
-      }
-      // Unknown role
-      else {
-        return res.status(403).json({ 
-          message: "Unauthorized role" 
-        });
+      try {
+        await enforceHierarchyAccess({ requesterId, requesterRole, targetUser });
+      } catch (e) {
+        return res.status(e.statusCode || 403).json({ message: e.message || "Forbidden" });
       }
 
       // ⚠️ CRITICAL: If user is SUSPENDED, return zero targets and achievements
@@ -256,6 +408,7 @@ router.get(
       let assignedTargetValue = { targetValue: 0, achievedValue: 0 };
       const scope = targetUser.role;
       let appMatchBase = {};
+      let partnerIdsForScope = [];
 
       // ASM Analytics
       if (targetUser.role === ROLES.ASM) {
@@ -304,6 +457,7 @@ router.get(
         appMatchBase = partnerIds.length > 0
           ? { partnerId: { $in: partnerIds.map((pId) => new mongoose.Types.ObjectId(pId)) } }
           : {};
+        partnerIdsForScope = partnerIds.map((pId) => new mongoose.Types.ObjectId(pId));
 
         // Get assigned target
         assignedTargetValue = await getAssignedTarget(targetUser._id, ROLES.ASM, {
@@ -395,6 +549,7 @@ router.get(
               : []),
           ],
         };
+        partnerIdsForScope = partnerIds.map((pId) => new mongoose.Types.ObjectId(pId));
 
         // Get assigned target
         assignedTargetValue = await getAssignedTarget(targetUser._id, ROLES.RSM, {
@@ -460,6 +615,7 @@ router.get(
         appMatchBase = partnerIds.length > 0
           ? { partnerId: { $in: partnerIds.map((pId) => new mongoose.Types.ObjectId(pId)) } }
           : {};
+        partnerIdsForScope = partnerIds.map((pId) => new mongoose.Types.ObjectId(pId));
 
         // Get assigned target
         assignedTargetValue = await getAssignedTarget(targetUser._id, ROLES.RM, {
@@ -508,6 +664,7 @@ router.get(
         totalDisbursed = disbursedAgg.length > 0 ? Number(disbursedAgg[0].total || 0) : 0;
 
         appMatchBase = { partnerId: new mongoose.Types.ObjectId(id) };
+        partnerIdsForScope = [new mongoose.Types.ObjectId(id)];
 
         // Get assigned target
         assignedTargetValue = await getAssignedTarget(targetUser._id, ROLES.PARTNER, {
@@ -537,6 +694,7 @@ router.get(
         performance = undefined;
         totals = {};
         appMatchBase = { customerId: new mongoose.Types.ObjectId(id) };
+        partnerIdsForScope = [];
       }
 
       // ==================== Monthly History (12 months) ====================
@@ -626,6 +784,317 @@ router.get(
     }
   }
 );
+
+/**
+ * Proper analytics API: KPI summary + funnel + conversion + financials + SLA (basic).
+ * GET /api/analytics/:id/kpis?start=YYYY-MM-DD&end=YYYY-MM-DD&loanType=...
+ */
+router.get("/:id/kpis", auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const requesterId = req.user.sub;
+    const requesterRole = req.user.role;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid user ID" });
+    }
+
+    const targetUser = await User.findById(id).lean();
+    if (!targetUser) return res.status(404).json({ message: "User not found" });
+
+    try {
+      await enforceHierarchyAccess({ requesterId, requesterRole, targetUser });
+    } catch (e) {
+      return res.status(e.statusCode || 403).json({ message: e.message || "Forbidden" });
+    }
+
+    if (targetUser.status === "SUSPENDED") {
+      return res.json({
+        data: {
+          profile: {
+            userId: targetUser._id,
+            name: `${targetUser.firstName} ${targetUser.lastName}`,
+            role: targetUser.role,
+            status: targetUser.status,
+          },
+          kpis: {
+            funnel: {},
+            conversion: {},
+            statusDistribution: {},
+            financials: { payouts: {}, incentives: {} },
+            sla: {},
+          },
+        },
+      });
+    }
+
+    const { startDate, endDate } = parseDateRange(req);
+    const loanTypeFilter = buildLoanTypeFilter(req);
+
+    const { appMatchBase, partnerIds } = await buildScopeMatch({
+      targetUserId: targetUser._id,
+      targetRole: targetUser.role,
+    });
+
+    // -------------------- Funnel + status distribution --------------------
+    // For operational consistency, we time-slice statuses by updatedAt (same idea used in incentives routes).
+    const timeFilter = buildUpdatedAtRangeFilter(startDate, endDate);
+
+    const statusAgg = await Application.aggregate([
+      {
+        $match: {
+          ...appMatchBase,
+          ...loanTypeFilter,
+          ...timeFilter,
+        },
+      },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const statusDistribution = {};
+    statusAgg.forEach((row) => {
+      statusDistribution[row._id || "UNKNOWN"] = Number(row.count || 0);
+    });
+
+    // Funnel: map platform statuses into investor-friendly stages
+    const funnel = {
+      lead: 0, // not stored as a dedicated entity currently
+      application: 0,
+      approved: Number(statusDistribution.APPROVED || 0),
+      disbursed: Number(statusDistribution.DISBURSED || 0),
+      rejected: Number(statusDistribution.REJECTED || 0),
+    };
+    // "Application" stage includes everything that is not draft? Keep simple and transparent
+    const applicationLikeStatuses = [
+      "SUBMITTED",
+      "DOC_INCOMPLETE",
+      "DOC_COMPLETE",
+      "LOGIN",
+      "DOC_SUBMITTED",
+      "UNDER_REVIEW",
+      "APPROVED",
+      "AGREEMENT",
+      "DISBURSED",
+      "REJECTED",
+    ];
+    funnel.application = applicationLikeStatuses.reduce(
+      (sum, s) => sum + Number(statusDistribution[s] || 0),
+      0
+    );
+
+    // Conversion rates (stage-to-stage)
+    const safeRate = (num, den) => (den > 0 ? Number(((num / den) * 100).toFixed(2)) : 0);
+    const conversion = {
+      application_to_approved_pct: safeRate(funnel.approved, funnel.application),
+      approved_to_disbursed_pct: safeRate(funnel.disbursed, funnel.approved),
+      application_to_disbursed_pct: safeRate(funnel.disbursed, funnel.application),
+      application_to_rejected_pct: safeRate(funnel.rejected, funnel.application),
+    };
+
+    // -------------------- Financials: payouts + incentives --------------------
+    const partnerIdFilter = partnerIds.length ? { partnerId: { $in: partnerIds } } : {};
+
+    const payoutAgg = await Payout.aggregate([
+      {
+        $match: {
+          ...partnerIdFilter,
+          ...(startDate || endDate ? buildUpdatedAtRangeFilter(startDate, endDate) : {}),
+        },
+      },
+      {
+        $group: {
+          _id: "$payOutStatus",
+          totalAmount: { $sum: { $toDouble: { $ifNull: ["$amount", 0] } } },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const payouts = {};
+    payoutAgg.forEach((r) => {
+      payouts[r._id || "UNKNOWN"] = {
+        amount: Number(r.totalAmount || 0),
+        count: Number(r.count || 0),
+      };
+    });
+
+    // Incentives: time slice by month/year if provided, else by createdAt range if start/end passed
+    const incentiveMatch = {
+      ...partnerIdFilter,
+      ...(startDate || endDate ? buildCreatedAtRangeFilter(startDate, endDate) : {}),
+    };
+
+    const incentiveAgg = await Incentive.aggregate([
+      { $match: incentiveMatch },
+      {
+        $group: {
+          _id: "$status",
+          totalAmount: { $sum: { $toDouble: { $ifNull: ["$amount", 0] } } },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const incentives = {};
+    incentiveAgg.forEach((r) => {
+      incentives[r._id || "UNKNOWN"] = {
+        amount: Number(r.totalAmount || 0),
+        count: Number(r.count || 0),
+      };
+    });
+
+    const financials = {
+      payouts,
+      incentives,
+      totalOutflow: {
+        payouts: Object.values(payouts).reduce((s, x) => s + Number(x.amount || 0), 0),
+        incentives: Object.values(incentives).reduce((s, x) => s + Number(x.amount || 0), 0),
+      },
+    };
+
+    // -------------------- SLA (basic) --------------------
+    // Provide practical operational SLAs without heavy stageHistory parsing:
+    // - avg days from createdAt to DISBURSED (for disbursed apps in range)
+    // - aging buckets for open applications by status
+    const disbursedSlaAgg = await Application.aggregate([
+      {
+        $match: {
+          ...appMatchBase,
+          ...loanTypeFilter,
+          status: "DISBURSED",
+          ...(startDate || endDate ? buildUpdatedAtRangeFilter(startDate, endDate) : {}),
+        },
+      },
+      {
+        $project: {
+          days: {
+            $dateDiff: {
+              startDate: "$createdAt",
+              endDate: { $ifNull: ["$updatedAt", "$createdAt"] },
+              unit: "day",
+            },
+          },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          avgDays: { $avg: "$days" },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    const disbursedSla = disbursedSlaAgg[0]
+      ? {
+          count: Number(disbursedSlaAgg[0].count || 0),
+          avgDays: Number((disbursedSlaAgg[0].avgDays || 0).toFixed(2)),
+          // Median intentionally omitted for Mongo compatibility (avoid $percentile dependency).
+          // If you want median later, we can compute it using a snapshot table or offline rollups.
+          medianDays: null,
+        }
+      : { count: 0, avgDays: 0, medianDays: null };
+
+    // "Open" = anything not yet closed (DISBURSED/REJECTED).
+    // Include all in-flight statuses present in Application.APP_STATUSES.
+    const openStatuses = [
+      "DRAFT",
+      "SUBMITTED",
+      "DOC_INCOMPLETE",
+      "DOC_COMPLETE",
+      "LOGIN",
+      "DOC_SUBMITTED",
+      "UNDER_REVIEW",
+      "APPROVED",
+      "AGREEMENT",
+    ];
+    const agingAgg = await Application.aggregate([
+      {
+        $match: {
+          ...appMatchBase,
+          ...loanTypeFilter,
+          status: { $in: openStatuses },
+          // For "open aging", slicing by createdAt is more intuitive than updatedAt:
+          // it answers "how many open apps were created in this period, and how old are they now?"
+          ...(startDate || endDate ? buildCreatedAtRangeFilter(startDate, endDate) : {}),
+        },
+      },
+      {
+        $project: {
+          status: 1,
+          ageDays: {
+            // Age since application creation (more intuitive "pending for X days")
+            $dateDiff: { startDate: "$createdAt", endDate: "$$NOW", unit: "day" },
+          },
+        },
+      },
+      {
+        $group: {
+          _id: "$status",
+          lt3: { $sum: { $cond: [{ $lt: ["$ageDays", 3] }, 1, 0] } },
+          d3to7: {
+            $sum: { $cond: [{ $and: [{ $gte: ["$ageDays", 3] }, { $lt: ["$ageDays", 7] }] }, 1, 0] },
+          },
+          d7to14: {
+            $sum: { $cond: [{ $and: [{ $gte: ["$ageDays", 7] }, { $lt: ["$ageDays", 14] }] }, 1, 0] },
+          },
+          gte14: { $sum: { $cond: [{ $gte: ["$ageDays", 14] }, 1, 0] } },
+        },
+      },
+    ]);
+
+    const aging = {};
+    let openCount = 0;
+    agingAgg.forEach((r) => {
+      const row = {
+        lt3: Number(r.lt3 || 0),
+        d3to7: Number(r.d3to7 || 0),
+        d7to14: Number(r.d7to14 || 0),
+        gte14: Number(r.gte14 || 0),
+      };
+      aging[r._id] = row;
+      openCount += row.lt3 + row.d3to7 + row.d7to14 + row.gte14;
+    });
+
+    const sla = { disbursedSla, openCount, openStatuses, aging };
+
+    return res.json({
+      data: {
+        profile: {
+          userId: targetUser._id,
+          name: `${targetUser.firstName} ${targetUser.lastName}`,
+          role: targetUser.role,
+          status: targetUser.status,
+        },
+        kpis: {
+          scope: targetUser.role,
+          filters: {
+            start: startDate ? startDate.toISOString() : null,
+            end: endDate ? endDate.toISOString() : null,
+            loanType: req.query.loanType ? String(req.query.loanType) : null,
+          },
+          statusDistribution,
+          funnel,
+          conversion,
+          financials,
+          sla,
+          notes: {
+            lead: "Lead is not stored as a dedicated entity yet. Funnel starts from Application statuses.",
+            timeSlicing: "StatusDistribution/Funnel are time-sliced by Application.updatedAt (status change time).",
+          },
+        },
+      },
+    });
+  } catch (err) {
+    console.error("Analytics KPIs error:", err);
+    return res.status(500).json({ message: "Failed to fetch analytics KPIs" });
+  }
+});
 
 export default router;
 

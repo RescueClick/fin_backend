@@ -28,6 +28,7 @@ import {
   sendDocumentStatusEmail
 } from "../utils/emailService.js";
 import { sendPayoutEmail } from "../utils/emailService.js";
+import { sendIncentiveEmail } from "../utils/emailService.js";
 import { emitPayoutStatusChanged, emitIncentiveStatusChanged } from "../utils/socketEmitter.js";
 
 const router = Router();
@@ -107,6 +108,20 @@ const router = Router();
 
 // ==================== BANK MASTER (ADMIN) ====================
 
+// GET /api/admin/banks
+// List all banks (admin view)
+router.get("/banks", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const banks = await BankMaster.find({})
+      .sort({ createdAt: -1 })
+      .lean();
+    return res.json({ banks });
+  } catch (err) {
+    console.error("Error fetching banks (admin):", err);
+    return res.status(500).json({ message: "Error fetching banks" });
+  }
+});
+
 // POST /api/admin/banks
 // Create a new bank with logo upload to S3
 router.post(
@@ -124,6 +139,17 @@ router.post(
         portalLink,
         rsmTypes, // can be string or array from frontend
       } = req.body || {};
+
+      // Normalize incoming loanType to match Application LOAN_TYPES:
+      // PERSONAL_LOAN -> PERSONAL, BUSINESS_LOAN -> BUSINESS
+      const normalizeLoanType = (lt) => {
+        const raw = String(lt || "").trim().toUpperCase();
+        if (!raw) return "";
+        if (raw === "PERSONAL_LOAN") return "PERSONAL";
+        if (raw === "BUSINESS_LOAN") return "BUSINESS";
+        return raw;
+      };
+      const normalizedLoanType = normalizeLoanType(loanType);
 
       if (!bankName || !loanType || !portalLoginId || !portalPassword || !portalLink) {
         return res.status(400).json({
@@ -160,9 +186,38 @@ router.post(
         });
       }
 
+      // Enforce consistency between rsmTypes and loanType (aligned to Application.js LOAN_TYPES):
+      // - PERSONAL RSM: PERSONAL only
+      // - BUSINESS_HOME RSM: BUSINESS, HOME_LOAN_SALARIED, HOME_LOAN_SELF_EMPLOYED
+      const isPersonal = (lt) => normalizeLoanType(lt) === "PERSONAL";
+      const isBusiness = (lt) => normalizeLoanType(lt) === "BUSINESS";
+      const isHomeLoan = (lt) => normalizeLoanType(lt).startsWith("HOME_LOAN_");
+
+      if (normalizedRsmTypes.length) {
+        const hasPersonal = normalizedRsmTypes.includes(RSM_TYPES.PERSONAL);
+        const hasBusinessHome = normalizedRsmTypes.includes(RSM_TYPES.BUSINESS_HOME);
+
+        // If both are selected, admin explicitly wants both groups → allow any loanType.
+        if (hasPersonal && !hasBusinessHome && !isPersonal(normalizedLoanType)) {
+          return res.status(400).json({
+            message: `Invalid loanType for rsmTypes=PERSONAL. Expected PERSONAL but got "${loanType}".`,
+          });
+        }
+
+        if (
+          hasBusinessHome &&
+          !hasPersonal &&
+          !(isBusiness(normalizedLoanType) || isHomeLoan(normalizedLoanType))
+        ) {
+          return res.status(400).json({
+            message: `Invalid loanType for rsmTypes=BUSINESS_HOME. Expected BUSINESS or HOME_LOAN_* but got "${loanType}".`,
+          });
+        }
+      }
+
       const bank = await BankMaster.create({
         bankName,
-        loanType,
+        loanType: normalizedLoanType,
         bankLogoUrl: req.file.location,
         portalLoginId,
         portalPassword,
@@ -181,6 +236,28 @@ router.post(
     }
   }
 );
+
+// DELETE /api/admin/banks/:bankId
+// Soft delete a bank (set isActive=false)
+router.delete("/banks/:bankId", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const { bankId } = req.params || {};
+    const updated = await BankMaster.findByIdAndUpdate(
+      bankId,
+      { $set: { isActive: false, updatedBy: req.user.sub } },
+      { new: true }
+    ).lean();
+
+    if (!updated) {
+      return res.status(404).json({ message: "Bank not found" });
+    }
+
+    return res.json({ message: "Bank deleted successfully", bank: updated });
+  } catch (err) {
+    console.error("Error deleting bank (admin):", err);
+    return res.status(500).json({ message: "Error deleting bank" });
+  }
+});
 
 router.post(
   "/create-asm",
@@ -4077,7 +4154,7 @@ router.post("/set-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
       if (payout && payout.payOutStatus === "DONE" && previousStatus !== "DONE") {
         const io = global.io;
         if (io) {
-          await emitPayoutStatusChanged(io, payout._id, "DONE", payout.partnerId);
+          await emitPayoutStatusChanged(io, payout._id, "DONE", payout.partnerId, payout.amount);
         }
 
         // Fetch partner for email
@@ -4572,7 +4649,26 @@ router.post(
           await emitIncentiveStatusChanged(io, incentive, incentive.partnerId);
         }
 
-        // TODO: optional email for incentive can be added here if needed
+        // 📧 Send incentive paid email to partner (non-blocking)
+        setImmediate(async () => {
+          try {
+            const partner = await User.findById(incentive.partnerId)
+              .select("firstName lastName email")
+              .lean();
+            if (partner && partner.email) {
+              await sendIncentiveEmail(partner, {
+                _id: incentive._id,
+                amount: incentive.amount,
+                status: incentive.status,
+                month: incentive.month,
+                year: incentive.year,
+                paidAt: incentive.paidAt,
+              });
+            }
+          } catch (mailErr) {
+            console.error("❌ Failed to send incentive email:", mailErr.message);
+          }
+        });
       } catch (notifyErr) {
         console.error("❌ Error emitting incentive notifications:", notifyErr);
       }
