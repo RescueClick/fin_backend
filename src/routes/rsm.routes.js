@@ -7,6 +7,7 @@ import { ROLES, RSM_TYPES } from "../config/roles.js";
 import { User } from "../models/User.js";
 import { Application, APP_STATUSES } from "../models/Application.js";
 import { BankMaster } from "../models/BankMaster.js";
+import { Payout } from "../models/Payout.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { sendUserAccountEmail, sendApplicationStatusEmail } from "../utils/emailService.js";
 import { sendMail } from "../utils/sendMail.js";
@@ -611,7 +612,27 @@ router.get("/applications", auth, requireRole(ROLES.RSM), async (req, res) => {
       }
     }
 
-    res.json(applications);
+    // Attach payout info (only status + amount) to each application
+    const appIds = applications.map((app) => app._id);
+    const payouts = await Payout.find({ application: { $in: appIds } })
+      .select("application amount payOutStatus")
+      .lean();
+
+    const payoutMap = {};
+    payouts.forEach((p) => {
+      payoutMap[p.application.toString()] = p;
+    });
+
+    const result = applications.map((app) => {
+      const payout = payoutMap[app._id.toString()];
+      return {
+        ...app,
+        payoutAmount: payout?.amount || 0,
+        payOutStatus: payout?.payOutStatus || "PENDING",
+      };
+    });
+
+    res.json(result);
   } catch (err) {
     console.error("Error fetching RSM applications:", err);
     res.status(500).json({ message: "Error fetching applications" });

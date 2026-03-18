@@ -275,36 +275,55 @@ router.get("/get-partners", auth, requireRole(ROLES.ASM), async (req, res) => {
 
 router.get("/get-customers", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
-    const asmId = req.user.sub; // logged-in ASM userId
+    const asmId = req.user.sub;
 
-    const applications = await Application.find()
-      .populate({
-        path: "customerId", // populate User document for employeeId
-        select: "employeeId _id firstName lastName",
-      })
-      .populate({
-        path: "partnerId",
-        select: "firstName lastName employeeId",
-      })
-      .populate({
-        path: "rmId",
-        select: "firstName lastName employeeId asmId",
-        populate: {
-          path: "asmId",
-          select: "firstName lastName employeeId",
-        },
-      })
-      .select("appNo loanType approvedLoanAmount status createdAt customer") // include embedded customer
+    // Build hierarchy: ASM → RSMs → RMs → Partners
+    const rsms = await User.find({ asmId, role: ROLES.RSM }).select("_id").lean();
+    const rsmIds = rsms.map((r) => r._id);
+    const rms = await User.find({
+      role: ROLES.RM,
+      $or: [
+        { personalRsmId: { $in: rsmIds } },
+        { businessHomeRsmId: { $in: rsmIds } },
+      ],
+    }).select("_id").lean();
+    const rmIds = rms.map((r) => r._id);
+    const partnersList = await User.find({
+      rmId: { $in: rmIds },
+      role: ROLES.PARTNER,
+    }).select("_id firstName lastName employeeId").lean();
+    const partnerIds = partnersList.map((p) => p._id);
+
+    const applications = await Application.find({
+      $or: [
+        { asmId },
+        { rsmId: { $in: rsmIds } },
+        { rmId: { $in: rmIds } },
+        { partnerId: { $in: partnerIds } },
+      ],
+    })
+      .populate("customerId", "employeeId _id firstName lastName email phone")
+      .populate("partnerId", "firstName lastName employeeId")
+      .populate("rmId", "firstName lastName employeeId")
+      .select("appNo loanType approvedLoanAmount status createdAt customer")
+      .sort({ createdAt: -1 })
       .lean();
 
-    // Filter out applications where RM didn't match (other ASMs)
-    const filtered = applications.filter((app) => app.rmId);
+    // Attach payout info
+    const appIds = applications.map((a) => a._id);
+    const payouts = await Payout.find({ application: { $in: appIds } })
+      .select("application amount payOutStatus")
+      .lean();
+    const payoutMap = {};
+    payouts.forEach((p) => {
+      payoutMap[p.application.toString()] = p;
+    });
 
-    const formatted = filtered.map((app) => {
-      const customer = app.customerId || {}; // populated user document
+    const formatted = applications.map((app) => {
+      const customer = app.customerId || {};
       const partner = app.partnerId || {};
       const rm = app.rmId || {};
-      const asm = rm.asmId || {};
+      const payout = payoutMap[app._id.toString()];
 
       return {
         appNo: app.appNo,
@@ -313,8 +332,8 @@ router.get("/get-customers", auth, requireRole(ROLES.ASM), async (req, res) => {
         disburseAmount: app.approvedLoanAmount || 0,
         status: app.status,
         applicationDate: app.createdAt,
-
-        // ✅ Customer info
+        payOutStatus: payout?.payOutStatus || "PENDING",
+        payoutAmount: payout?.amount || 0,
         customerId: customer._id || null,
         userName: customer.firstName
           ? `${customer.firstName} ${customer.lastName}`
@@ -322,27 +341,19 @@ router.get("/get-customers", auth, requireRole(ROLES.ASM), async (req, res) => {
         employeeId: customer.employeeId || null,
         email: customer.email || null,
         phone: customer.phone || null,
-
-        // Partner info
         partnerName: partner.firstName
           ? `${partner.firstName} ${partner.lastName}`
           : null,
         partnerEmployeeId: partner.employeeId || null,
-
-        // RM info
         rmName: rm.firstName ? `${rm.firstName} ${rm.lastName}` : null,
         rmEmployeeId: rm.employeeId || null,
-
-        // ASM info
-        asmName: asm.firstName ? `${asm.firstName} ${asm.lastName}` : null,
-        asmEmployeeId: asm.employeeId || null,
       };
     });
 
     res.json(formatted);
   } catch (err) {
-    console.error("Error fetching ASM applications:", err);
-    res.status(500).json({ message: "Error fetching ASM applications" });
+    console.error("Error fetching ASM customers:", err);
+    res.status(500).json({ message: "Error fetching ASM customers" });
   }
 });
 
@@ -453,37 +464,53 @@ router.get(
   requireRole(ROLES.ASM),
   async (req, res) => {
     try {
-      const asmId = req.user.sub; // logged-in ASM
+      const asmId = req.user.sub;
 
-      const applications = await Application.find()
-        .populate({
-          path: "customerId",
-          select: "employeeId firstName lastName email phone",
-        })
-        .populate({
-          path: "partnerId",
-          select: "firstName lastName employeeId",
-        })
-        .populate({
-          path: "rmId",
-          select: "firstName lastName employeeId asmId",
-          populate: {
-            path: "asmId",
-            select: "firstName lastName employeeId",
-          },
-        })
+      // Build hierarchy: ASM → RSMs → RMs → Partners
+      const _rsms = await User.find({ asmId, role: ROLES.RSM }).select("_id").lean();
+      const _rsmIds = _rsms.map((r) => r._id);
+      const _rms = await User.find({
+        role: ROLES.RM,
+        $or: [
+          { personalRsmId: { $in: _rsmIds } },
+          { businessHomeRsmId: { $in: _rsmIds } },
+        ],
+      }).select("_id").lean();
+      const _rmIds = _rms.map((r) => r._id);
+      const _partners = await User.find({
+        rmId: { $in: _rmIds },
+        role: ROLES.PARTNER,
+      }).select("_id").lean();
+      const _partnerIds = _partners.map((p) => p._id);
+
+      const applications = await Application.find({
+        $or: [
+          { asmId },
+          { rsmId: { $in: _rsmIds } },
+          { rmId: { $in: _rmIds } },
+          { partnerId: { $in: _partnerIds } },
+        ],
+      })
+        .populate("customerId", "employeeId firstName lastName email phone")
+        .populate("partnerId", "firstName lastName employeeId")
         .select("appNo loanType approvedLoanAmount status createdAt customer")
+        .sort({ createdAt: -1 })
         .lean();
 
-      // Filter for ASM’s applications
-      const filtered = applications.filter(
-        (app) => app.rmId?.asmId?._id.toString() === asmId
-      );
+      // Attach payout info (status + amount only)
+      const _appIds = applications.map((a) => a._id);
+      const _payouts = await Payout.find({ application: { $in: _appIds } })
+        .select("application amount payOutStatus")
+        .lean();
+      const _payoutMap = {};
+      _payouts.forEach((p) => {
+        _payoutMap[p.application.toString()] = p;
+      });
 
-      // Format response for table
-      const formatted = filtered.map((app) => {
+      const formatted = applications.map((app) => {
         const customer = app.customer || {};
         const customerUser = app.customerId || {};
+        const payout = _payoutMap[app._id.toString()];
 
         return {
           username: customer.firstName
@@ -497,7 +524,9 @@ router.get(
           loanAmount: customer.loanAmount || 0,
           approvalAmount: app.approvedLoanAmount || 0,
           status: app.status,
-          actionId: app._id, // you can use this for "View/Edit"
+          payOutStatus: payout?.payOutStatus || "PENDING",
+          payoutAmount: payout?.amount || 0,
+          actionId: app._id,
         };
       });
 

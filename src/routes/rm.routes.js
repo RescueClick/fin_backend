@@ -1499,42 +1499,45 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
       .populate("partnerId", "firstName lastName email phone")
       .lean();
 
-    // Get all payouts for these applications
+    // Get payout status + amount for these applications
     const appIds = applications.map((app) => app._id);
     const payouts = await Payout.find({ application: { $in: appIds } })
-      .select("application payOutStatus")
+      .select("application amount payOutStatus")
       .lean();
 
     const payoutMap = {};
     payouts.forEach((p) => {
-      payoutMap[p.application.toString()] = p.payOutStatus;
+      payoutMap[p.application.toString()] = p;
     });
 
-    // Map customers list with application summary
-    const customers = applications.map((app) => ({
-      customerId: app.customerId?._id,
-      customerEmployeeId: app.customerId?.employeeId || null, // employeeId from User
-      customerName: `${app.customerId?.firstName ?? ""} ${
-        app.customerId?.lastName ?? ""
-      }`.trim(),
-      contact: app.customerId?.phone || null,
-      email: app.customerId?.email || null,
-      loanType: app.loanType,
-      requestedAmount: app.customer?.loanAmount || null,
-      approvedAmount: app.approvedLoanAmount || null,
-      status: app.status,
-      payOutStatus: payoutMap[app._id.toString()] || "PENDING",
-      partner: {
-        partnerId: app.partnerId?._id,
-        name: `${app.partnerId?.firstName ?? ""} ${
-          app.partnerId?.lastName ?? ""
+    const customers = applications.map((app) => {
+      const payout = payoutMap[app._id.toString()];
+      return {
+        customerId: app.customerId?._id,
+        customerEmployeeId: app.customerId?.employeeId || null,
+        customerName: `${app.customerId?.firstName ?? ""} ${
+          app.customerId?.lastName ?? ""
         }`.trim(),
-        email: app.partnerId?.email,
-        phone: app.partnerId?.phone,
-      },
-      applicationId: app._id,
-      createdAt: app.createdAt,
-    }));
+        contact: app.customerId?.phone || null,
+        email: app.customerId?.email || null,
+        loanType: app.loanType,
+        requestedAmount: app.customer?.loanAmount || null,
+        approvedAmount: app.approvedLoanAmount || null,
+        status: app.status,
+        payOutStatus: payout?.payOutStatus || "PENDING",
+        payoutAmount: payout?.amount || 0,
+        partner: {
+          partnerId: app.partnerId?._id,
+          name: `${app.partnerId?.firstName ?? ""} ${
+            app.partnerId?.lastName ?? ""
+          }`.trim(),
+          email: app.partnerId?.email,
+          phone: app.partnerId?.phone,
+        },
+        applicationId: app._id,
+        createdAt: app.createdAt,
+      };
+    });
 
     return res.json(customers);
   } catch (err) {
