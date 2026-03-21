@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { COMPANY_NAME } from "../config/branding.js";
 
 export const sendMail = async ({ to, subject, html }) => {
   // Validate required parameters
@@ -45,7 +46,7 @@ export const sendMail = async ({ to, subject, html }) => {
     const transporter = nodemailer.createTransport(primaryConfig);
 
     const info = await transporter.sendMail({
-      from: `"Trustline Fintech" <${process.env.EMAIL_USER}>`,
+      from: `"${COMPANY_NAME}" <${process.env.EMAIL_USER}>`,
       to,
       subject,
       html,
@@ -68,7 +69,7 @@ export const sendMail = async ({ to, subject, html }) => {
         const transporter = nodemailer.createTransport(fallbackConfig);
 
         const info = await transporter.sendMail({
-          from: `"Trustline Fintech" <${process.env.EMAIL_USER}>`,
+          from: `"${COMPANY_NAME}" <${process.env.EMAIL_USER}>`,
           to,
           subject,
           html,

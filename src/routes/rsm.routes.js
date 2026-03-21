@@ -1648,7 +1648,7 @@ router.post("/activate", auth, requireRole(ROLES.ASM), async (req, res) => {
           <b>RSM Type:</b> ${rsm.rsmType || "-"}</p>
           <p>You can now log in and start managing your RMs and applications as usual.</p>
           <br/>
-          <p>Regards,<br/>Trustline Fintech</p>
+          <p>Regards,<br/>DhanSource Capital</p>
         `,
       });
       console.log("📧 RSM activation mail sent to:", rsm.email);
@@ -1700,7 +1700,7 @@ router.post("/deactivate", auth, requireRole(ROLES.ASM), async (req, res) => {
           <b>RSM Type:</b> ${rsm.rsmType || "-"}</p>
           <p>If you believe this action was incorrect, please contact support.</p>
           <br/>
-          <p>Regards,<br/>Trustline Fintech</p>
+          <p>Regards,<br/>DhanSource Capital</p>
         `,
       });
       console.log("📧 RSM deactivation mail sent to:", rsm.email);
@@ -1762,7 +1762,7 @@ router.post("/rm/activate", auth, requireRole(ROLES.RSM), async (req, res) => {
           <b>RM Code:</b> ${updatedRm.rmCode || "-"}</p>
           <p>You can now log in and continue managing your Partners and their Customers as usual.</p>
           <br/>
-          <p>Regards,<br/>Trustline Fintech</p>
+          <p>Regards,<br/>DhanSource Capital</p>
         `,
       });
       console.log("📧 RM activation mail sent to:", updatedRm.email);
@@ -1885,7 +1885,7 @@ router.post("/rm/deactivate", auth, requireRole(ROLES.RSM), async (req, res) => 
           <b>RM Code:</b> ${deactivatedRm.rmCode || "-"}</p>
           <p>If you believe this action was incorrect, please contact support.</p>
           <br/>
-          <p>Regards,<br/>Trustline Fintech</p>
+          <p>Regards,<br/>DhanSource Capital</p>
         `,
       });
       console.log("📧 RM deactivation mail sent to:", deactivatedRm.email);
@@ -1905,7 +1905,7 @@ router.post("/rm/deactivate", auth, requireRole(ROLES.RSM), async (req, res) => 
           <b>RM Code:</b> ${newRm.rmCode || "-"}</p>
           <p>Please check your dashboard for details.</p>
           <br/>
-          <p>Regards,<br/>Trustline Fintech</p>
+          <p>Regards,<br/>DhanSource Capital</p>
         `,
       });
       console.log("📧 Assignment mail sent to:", newRm.email);

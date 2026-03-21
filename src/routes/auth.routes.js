@@ -5,6 +5,8 @@ import { signAccessToken } from "../utils/jwt.js";
 import { ROLES } from "../config/roles.js";
 import crypto from "crypto";
 import { sendMail } from "../utils/sendMail.js";
+import { createEmailChangeRequest } from "../utils/emailChangeService.js";
+import { getClientBaseUrl } from "../config/branding.js";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 
@@ -280,7 +282,7 @@ router.post("/reset-password/request", async (req, res) => {
     await user.save();
 
     // Reset link only needs token + email
-    const resetLink = `https://trustlinefintech.com/reset-password/confirm?token=${resetToken}&email=${user.email}`;
+    const resetLink = `${getClientBaseUrl()}/reset-password/confirm?token=${resetToken}&email=${user.email}`;
 
     // Ensure mailer is configured to prevent 500s on missing env
     if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
@@ -394,7 +396,7 @@ router.post("/change-password", auth, async (req, res) => {
           <p>This is a confirmation that your account password has been successfully changed.</p>
           <p>If you did not make this change, please reset your password immediately or contact our support.</p>
           <br/>
-          <p>Regards,<br/>Trustline Fintech Team</p>
+          <p>Regards,<br/>DhanSource Capital Team</p>
         `,
       });
     } catch (mailErr) {
@@ -410,6 +412,70 @@ router.post("/change-password", auth, async (req, res) => {
   } catch (err) {
     console.error("Change password error:", err);
     res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// POST /api/auth/email-change/confirm  (public — token from email link)
+router.post("/email-change/confirm", async (req, res) => {
+  try {
+    const { token } = req.body || {};
+    if (!token || typeof token !== "string") {
+      return res.status(400).json({ message: "Invalid or missing token" });
+    }
+
+    const user = await User.findOne({
+      emailChangeToken: token.trim(),
+      emailChangeTokenExpires: { $gt: new Date() },
+    });
+
+    if (!user || !user.pendingEmail) {
+      return res.status(400).json({ message: "Invalid or expired link. Request a new email change from settings." });
+    }
+
+    const newEmail = String(user.pendingEmail).toLowerCase();
+    const taken = await User.findOne({
+      email: newEmail,
+      _id: { $ne: user._id },
+    });
+    if (taken) {
+      return res.status(409).json({ message: "This email is already in use by another account." });
+    }
+
+    user.email = newEmail;
+    user.pendingEmail = undefined;
+    user.emailChangeToken = undefined;
+    user.emailChangeTokenExpires = undefined;
+    await user.save();
+
+    res.json({ message: "Email updated successfully. You can log in with your new email." });
+  } catch (err) {
+    console.error("email-change/confirm:", err);
+    res.status(500).json({ message: err.message || "Could not confirm email change" });
+  }
+});
+
+// POST /api/auth/email-change/resend  (authenticated — same session that requested change)
+router.post("/email-change/resend", auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.sub).select(
+      "email firstName pendingEmail emailChangeToken emailChangeTokenExpires"
+    );
+    if (!user?.pendingEmail) {
+      return res.status(400).json({ message: "No pending email change to resend." });
+    }
+
+    await createEmailChangeRequest({
+      user,
+      newEmail: user.pendingEmail,
+      clientUrl: process.env.CLIENT_URL,
+    });
+
+    res.json({
+      message: "Verification email resent. Please check your inbox.",
+    });
+  } catch (err) {
+    console.error("email-change/resend:", err);
+    res.status(500).json({ message: err.message || "Could not resend email" });
   }
 });
 

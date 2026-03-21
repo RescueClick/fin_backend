@@ -19,6 +19,7 @@ import { upload } from "../middleware/upload.js";
 import { FollowUp } from "../models/followUp.js";
 import dayjs from "dayjs";
 import { sendMail } from "../utils/sendMail.js";
+import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendApplicationStatusEmail, sendDocumentStatusEmail } from "../utils/emailService.js";
 import axios from "axios";
 import { emitDocumentStatusChanged, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
@@ -143,7 +144,7 @@ router.post(
                }</p>
             <p>Please log in and change your password immediately.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 Partner creation mail sent to:", partner.email);
@@ -945,7 +946,7 @@ router.post("/partner/activate", async (req, res) => {
           <p><b>Partner ID:</b> ${partner.partnerCode || "-"}</p>
           <p>You can now log in and continue managing your Customers as usual.</p>
           <br/>
-          <p>Regards,<br/>Trustline Fintech</p>
+          <p>Regards,<br/>DhanSource Capital</p>
         `,
       });
       console.log("📧 Activation mail sent to:", partner.email);
@@ -2168,7 +2169,7 @@ router.post(
               ${remarks ? `<p><b>Remarks from RM:</b> ${remarks}</p>` : ""}
               ${status === "REJECTED" ? `<p>Please re-upload this document through the application form.</p>` : ""}
               <br/>
-              <p>Thank you,<br/>Trustline Fintech</p>
+              <p>Thank you,<br/>DhanSource Capital</p>
             `,
           });
         }
@@ -2801,7 +2802,6 @@ router.patch(
       const updateData = {
         firstName,
         lastName,
-        email,
         phone,
         dob,
         address,
@@ -2826,7 +2826,43 @@ router.patch(
 
       if (!updatedRm) return res.status(404).json({ message: "RM not found" });
 
-      res.json({ message: "Profile updated successfully", profile: updatedRm });
+      let emailChangePending = false;
+      let emailChangeMessage = null;
+
+      if (
+        email &&
+        String(email).toLowerCase() !== String(updatedRm.email).toLowerCase()
+      ) {
+        const normalizedEmail = String(email).toLowerCase();
+        const exists = await User.findOne({
+          email: normalizedEmail,
+          _id: { $ne: rmId },
+        });
+        if (exists) {
+          return res.status(409).json({ message: "Email already in use" });
+        }
+        const current = await User.findById(rmId).select("email firstName");
+        await createEmailChangeRequest({
+          user: current,
+          newEmail: normalizedEmail,
+          clientUrl: process.env.CLIENT_URL,
+        });
+        emailChangePending = true;
+        emailChangeMessage =
+          "Email change link sent. Please confirm via the link in your inbox.";
+      }
+
+      const profileObj = updatedRm?.toObject ? updatedRm.toObject() : updatedRm;
+      if (emailChangePending) {
+        profileObj.emailChangePending = true;
+        profileObj.emailChangeMessage = emailChangeMessage;
+      }
+
+      res.json({
+        message: emailChangePending ? emailChangeMessage : "Profile updated successfully",
+        profile: profileObj,
+        emailChangePending,
+      });
     } catch (err) {
       console.error("Error updating RM profile:", err);
       res.status(500).json({ message: err.message });

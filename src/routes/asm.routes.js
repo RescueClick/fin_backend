@@ -13,6 +13,7 @@ import mongoose from "mongoose";
 import { Application } from "../models/Application.js";
 import { sendMail } from "../utils/sendMail.js";
 import { sendUserAccountEmail } from "../utils/emailService.js";
+import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 
 const router = Router();
 
@@ -2242,7 +2243,7 @@ router.post(
               <br/>
               <p>If you think this is a mistake, please contact support immediately.</p>
               <br/>
-              <p>Regards,<br/>Trustline Fintech</p>
+              <p>Regards,<br/>DhanSource Capital</p>
             `,
           });
           console.log("📧 Deactivation mail sent to:", oldRm.email);
@@ -2266,7 +2267,7 @@ router.post(
               <br/>
               <p>If you think this assignment is incorrect, please contact support immediately.</p>
               <br/>
-              <p>Regards,<br/>Trustline Fintech</p>
+              <p>Regards,<br/>DhanSource Capital</p>
             `,
           });
           console.log("📧 Assignment mail sent to:", newRm.email);
@@ -2519,7 +2520,7 @@ router.post("/rm/activate", auth, requireRole(ROLES.ASM), async (req, res) => {
           <b>RM Code:</b> ${updatedRm.rmCode || "-"}</p>
           <p>You can now log in and continue managing your Partners and their Customers as usual.</p>
           <br/>
-          <p>Regards,<br/>Trustline Fintech</p>
+          <p>Regards,<br/>DhanSource Capital</p>
         `,
       });
       console.log("📧 RM activation mail sent to:", updatedRm.email);
@@ -2657,7 +2658,7 @@ router.post("/rm/deactivate", auth, requireRole(ROLES.ASM), async (req, res) => 
           <b>RM Code:</b> ${deactivatedRm.rmCode || "-"}</p>
           <p>If you believe this action was incorrect, please contact support.</p>
           <br/>
-          <p>Regards,<br/>Trustline Fintech</p>
+          <p>Regards,<br/>DhanSource Capital</p>
         `,
       });
       console.log("📧 RM deactivation mail sent to:", deactivatedRm.email);
@@ -2677,7 +2678,7 @@ router.post("/rm/deactivate", auth, requireRole(ROLES.ASM), async (req, res) => 
           <b>RM Code:</b> ${newRm.rmCode || "-"}</p>
           <p>Please check your dashboard for details.</p>
           <br/>
-          <p>Regards,<br/>Trustline Fintech</p>
+          <p>Regards,<br/>DhanSource Capital</p>
         `,
       });
       console.log("📧 Assignment mail sent to:", newRm.email);
@@ -2739,7 +2740,7 @@ router.post(
                <b>Email:</b> ${partner.email}</p>
             <p>You can now log in and continue managing your Customers as usual.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 Partner activation mail sent to:", partner.email);
@@ -3178,7 +3179,6 @@ router.patch(
       const updateData = {
         firstName,
         lastName,
-        email,
         phone,
         dob,
         address,
@@ -3204,9 +3204,42 @@ router.patch(
       if (!updatedAsm)
         return res.status(404).json({ message: "ASM not found" });
 
+      let emailChangePending = false;
+      let emailChangeMessage = null;
+
+      if (
+        email &&
+        String(email).toLowerCase() !== String(updatedAsm.email).toLowerCase()
+      ) {
+        const normalizedEmail = String(email).toLowerCase();
+        const exists = await User.findOne({
+          email: normalizedEmail,
+          _id: { $ne: asmId },
+        });
+        if (exists) {
+          return res.status(409).json({ message: "Email already in use" });
+        }
+        const current = await User.findById(asmId).select("email firstName");
+        await createEmailChangeRequest({
+          user: current,
+          newEmail: normalizedEmail,
+          clientUrl: process.env.CLIENT_URL,
+        });
+        emailChangePending = true;
+        emailChangeMessage =
+          "Email change link sent. Please confirm via the link in your inbox.";
+      }
+
+      const profileObj = updatedAsm?.toObject ? updatedAsm.toObject() : updatedAsm;
+      if (emailChangePending) {
+        profileObj.emailChangePending = true;
+        profileObj.emailChangeMessage = emailChangeMessage;
+      }
+
       res.json({
-        message: "Profile updated successfully",
-        profile: updatedAsm,
+        message: emailChangePending ? emailChangeMessage : "Profile updated successfully",
+        profile: profileObj,
+        emailChangePending,
       });
     } catch (err) {
       console.error(err);

@@ -34,7 +34,7 @@ export const contactFunction = async (req, res) => {
     const finalSubject =
       subject && subject.trim().length > 0
         ? subject.trim()
-        : `[TrustlineFin] New Inquiry - ${name}`;
+        : `[DhanSource Capital] New Inquiry - ${name}`;
 
     const mailOptions = {
       from: `"${name}" <${process.env.EMAIL_USER}>`, // ✅ your domain email

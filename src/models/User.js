@@ -108,6 +108,11 @@ const userSchema = new mongoose.Schema(
 
     passwordHash: { type: String, required: true },
     deletedAt: { type: Date },
+
+    /** Pending email change (verified via link sent to new email) */
+    pendingEmail: { type: String, lowercase: true, sparse: true, trim: true },
+    emailChangeToken: { type: String, sparse: true },
+    emailChangeTokenExpires: { type: Date },
   },
   { timestamps: true }
 );

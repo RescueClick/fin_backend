@@ -82,7 +82,7 @@ const router = Router();
 //             <p><b>Temporary Password:</b> ${rawPassword}</p>
 //             <p>Please log in and change your password immediately.</p>
 //             <br/>
-//             <p>Regards,<br/>Trustline Fintech</p>
+//             <p>Regards,<br/>DhanSource Capital</p>
 //           `,
 //         });
 //       } catch (mailErr) {
@@ -1007,7 +1007,7 @@ router.post(
               </div>
               <p>Please review and manage this partner in your dashboard.</p>
               <br/>
-              <p>Thanks,<br/>Trustline Fintech Team</p>
+              <p>Thanks,<br/>DhanSource Capital Team</p>
             `,
           });
           rmEmailSent = true;
@@ -1692,7 +1692,7 @@ router.post(
               <p><b>ASM Code:</b> ${oldAsm.asmCode}</p>
               <p>If you believe this action was incorrect, please contact support immediately.</p>
               <br/>
-              <p>Regards,<br/>Trustline Fintech</p>
+              <p>Regards,<br/>DhanSource Capital</p>
             `,
           });
         } catch (mailErr) {
@@ -1713,7 +1713,7 @@ router.post(
               <p><b>ASM Code:</b> ${newAsm.asmCode}</p>
               <p>Please review your dashboard to manage your newly assigned team and customers.</p>
               <br/>
-              <p>Regards,<br/>Trustline Fintech</p>
+              <p>Regards,<br/>DhanSource Capital</p>
             `,
           });
           console.log("📧 Assignment mail sent to:", newAsm.email);
@@ -1768,7 +1768,7 @@ router.post(
             <b>ASM Code:</b> ${asm.asmCode || "-"}</p>
             <p>You can now log in and start managing your RSMs and their RMs as usual.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 ASM activation mail sent to:", asm.email);
@@ -1822,7 +1822,7 @@ router.post(
             <b>ASM Code:</b> ${asm.asmCode || "-"}</p>
             <p>If you believe this action was incorrect, please contact support.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 ASM deactivation mail sent to:", asm.email);
@@ -1940,7 +1940,7 @@ router.post(
               <p><b>RM Code:</b> ${oldRm.rmCode}</p>
               <p>If you believe this action was incorrect, please contact support immediately.</p>
               <br/>
-              <p>Regards,<br/>Trustline Fintech</p>
+              <p>Regards,<br/>DhanSource Capital</p>
             `,
           });
           console.log("📧 Deactivation mail sent to:", oldRm.email);
@@ -1964,7 +1964,7 @@ router.post(
               <p><b>RM Code:</b> ${newRm.rmCode}</p>
               <p>Please check your dashboard for details of the reassigned accounts.</p>
               <br/>
-              <p>Regards,<br/>Trustline Fintech</p>
+              <p>Regards,<br/>DhanSource Capital</p>
             `,
           });
           console.log("📧 Assignment mail sent to:", newRm.email);
@@ -2019,7 +2019,7 @@ router.post(
             <b>RM Code:</b> ${rm.rmCode || "-"}</p>
             <p>You can now log in and start managing your Partners and Customers as usual.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 RM activation mail sent to:", rm.email);
@@ -2154,7 +2154,7 @@ router.post(
             <b>RM Code:</b> ${deactivatedRm.rmCode || "-"}</p>
             <p>If you believe this action was incorrect, please contact support.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 RM deactivation mail sent to:", deactivatedRm.email);
@@ -2174,7 +2174,7 @@ router.post(
             <b>RM Code:</b> ${newRm.rmCode || "-"}</p>
             <p>Please check your dashboard for details.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 Assignment mail sent to:", newRm.email);
@@ -2237,7 +2237,7 @@ router.post(
             <b>RSM Type:</b> ${rsm.rsmType || "-"}</p>
             <p>You can now log in and start managing your RMs and applications as usual.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 RSM activation mail sent to:", rsm.email);
@@ -2291,7 +2291,7 @@ router.post(
             <b>RSM Type:</b> ${rsm.rsmType || "-"}</p>
             <p>If you believe this action was incorrect, please contact support.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 RSM deactivation mail sent to:", rsm.email);
@@ -2445,7 +2445,7 @@ router.post(
             <p><b>Partner ID:</b> ${partner.partnerCode || "-"}</p>
             <p>You can now log in and continue managing your Customers as usual.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 Activation mail sent to:", partner.email);
@@ -2512,7 +2512,7 @@ router.delete(
             <p>All associated documents and data have been removed from our system.</p>
             <p>If you believe this action was incorrect, please contact support immediately.</p>
             <br/>
-            <p>Regards,<br/>Trustline Fintech</p>
+            <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
         console.log("📧 Rejection mail sent to:", partner.email);

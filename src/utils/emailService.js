@@ -1,13 +1,15 @@
 // Comprehensive Email Service for all main workflows
 import { sendMail } from "./sendMail.js";
+import { COMPANY_NAME, COMPANY_NAME_LEGAL, getClientBaseUrl, SUPPORT_EMAIL } from "../config/branding.js";
 
 /**
  * Email templates and service functions for all main workflows
  */
 
 // Base email template wrapper with professional header and footer
-const getEmailTemplate = (title, content, footerText = "Trustline Fintech Team") => {
-  // Trustline Logo SVG (Teal T logo)
+const getEmailTemplate = (title, content, footerText = `${COMPANY_NAME} Team`) => {
+  const base = getClientBaseUrl();
+  // Brand header (teal mark; replace with hosted logo URL if needed)
   const logoSVG = `
     <svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
       <path d="M30 5 L50 5 L50 15 L40 15 L40 50 L35 50 L35 55 L25 55 L25 50 L20 50 L20 15 L10 15 L10 5 Z" 
@@ -188,7 +190,7 @@ const getEmailTemplate = (title, content, footerText = "Trustline Fintech Team")
       <div class="email-wrapper">
         <!-- Professional Header -->
         <div class="header">
-          <div class="company-name">Trustline Fintech</div>
+          <div class="company-name">${COMPANY_NAME}</div>
         </div>
 
         <!-- Content -->
@@ -199,31 +201,31 @@ const getEmailTemplate = (title, content, footerText = "Trustline Fintech Team")
 
         <!-- Professional Footer -->
         <div class="footer">
-          <div class="footer-company">Trustline Fintech</div>
+          <div class="footer-company">${COMPANY_NAME_LEGAL}</div>
           <div class="footer-tagline">Your Trusted Financial Partner</div>
           
           <div class="footer-links">
-            <a href="https://trustlinefintech.com">Website</a>
-            <a href="https://trustlinefintech.com/contact">Contact Us</a>
-            <a href="https://trustlinefintech.com/privacy">Privacy Policy</a>
-            <a href="https://trustlinefintech.com/terms">Terms & Conditions</a>
+            <a href="${base}">Website</a>
+            <a href="${base}/contact">Contact Us</a>
+            <a href="${base}/privacy">Privacy Policy</a>
+            <a href="${base}/terms">Terms & Conditions</a>
           </div>
 
           <div class="footer-contact">
             <div class="footer-contact-item">
-              <strong>Email:</strong> support@trustlinefintech.com
+              <strong>Email:</strong> ${SUPPORT_EMAIL}
             </div>
             <div class="footer-contact-item">
               <strong>Phone:</strong> +91-8766681450
             </div>
             <div class="footer-contact-item">
-              <strong>Address:</strong> Trustline Fintech, India
+              <strong>Address:</strong> ${COMPANY_NAME_LEGAL}, India
             </div>
           </div>
 
           <div class="footer-copyright">
             <p>This is an automated email. Please do not reply to this message.</p>
-            <p>&copy; ${new Date().getFullYear()} Trustline Fintech. All rights reserved.</p>
+            <p>&copy; ${new Date().getFullYear()} ${COMPANY_NAME_LEGAL}. All rights reserved.</p>
             <p style="margin-top: 12px; margin-bottom: 0;">Regards,<br/><strong>${footerText}</strong></p>
           </div>
         </div>
@@ -237,14 +239,14 @@ const getEmailTemplate = (title, content, footerText = "Trustline Fintech Team")
  * Send partner registration email
  */
 export const sendPartnerRegistrationEmail = async (partner, password = null) => {
-  const loginUrl = "https://trustlinefintech.com/login";
+  const loginUrl = `${getClientBaseUrl()}/login`;
   const activationMessage = partner.status === "ACTIVE" 
     ? "Your account has been activated and is ready to use!"
     : "Your account is pending approval. You will be notified once it's activated.";
   
   const content = `
     <h2>Dear ${partner.firstName} ${partner.lastName},</h2>
-    <p>Thank you for registering as a Partner with Trustline Fintech. ${activationMessage}</p>
+    <p>Thank you for registering as a Partner with ${COMPANY_NAME}. ${activationMessage}</p>
     
     <div class="info-box">
       <h3 style="margin-top: 0; color: #12B99C;">Your Account Details</h3>
@@ -285,8 +287,8 @@ export const sendPartnerRegistrationEmail = async (partner, password = null) => 
   try {
     await sendMail({
       to: partner.email,
-      subject: "Welcome to Trustline Fintech - Partner Registration Successful",
-      html: getEmailTemplate("Welcome to Trustline Fintech!", content),
+      subject: `Welcome to ${COMPANY_NAME} - Partner Registration Successful`,
+      html: getEmailTemplate(`Welcome to ${COMPANY_NAME}!`, content),
     });
     console.log("✅ Partner registration email sent to:", partner.email);
     return true;
@@ -300,7 +302,7 @@ export const sendPartnerRegistrationEmail = async (partner, password = null) => 
  * Send loan application created email to customer
  */
 export const sendLoanApplicationEmail = async (customer, application, tempPassword = null) => {
-  const loginUrl = "https://trustlinefintech.com/login";
+  const loginUrl = `${getClientBaseUrl()}/login`;
   
   const content = `
     <h2>Dear ${customer.firstName},</h2>
@@ -426,7 +428,7 @@ export const sendApplicationStatusEmail = async (customer, application, oldStatu
     </div>
     
     <div style="text-align: center;">
-      <a href="https://trustlinefintech.com/login" class="button">View Application Details</a>
+      <a href="${getClientBaseUrl()}/login" class="button">View Application Details</a>
     </div>
   `;
 
@@ -482,7 +484,7 @@ export const sendDocumentStatusEmail = async (customer, application, docType, st
     
     ${status === "REJECTED" || status === "UPDATED" ? `
     <div style="text-align: center;">
-      <a href="https://trustlinefintech.com/login" class="button">Upload New Document</a>
+      <a href="${getClientBaseUrl()}/login" class="button">Upload New Document</a>
     </div>
     ` : ""}
   `;
@@ -560,7 +562,7 @@ export const sendUserAccountEmail = async (user, role, password, createdBy = nul
     </div>
     
     <div style="text-align: center;">
-      <a href="https://trustlinefintech.com/login" class="button">Login to Your Account</a>
+      <a href="${getClientBaseUrl()}/login" class="button">Login to Your Account</a>
     </div>
   `;
 
@@ -609,7 +611,7 @@ export const sendPayoutEmail = async (partner, payout) => {
     </div>
     
     <div style="text-align: center;">
-      <a href="https://trustlinefintech.com/login" class="button">View Payout Details</a>
+      <a href="${getClientBaseUrl()}/login" class="button">View Payout Details</a>
     </div>
   `;
 
@@ -670,7 +672,7 @@ export const sendIncentiveEmail = async (partner, incentive) => {
     </div>
     
     <div style="text-align: center;">
-      <a href="https://trustlinefintech.com/login" class="button">View Incentive Details</a>
+      <a href="${getClientBaseUrl()}/login" class="button">View Incentive Details</a>
     </div>
   `;
 
@@ -712,7 +714,7 @@ export const sendPasswordResetEmail = async (user, resetToken, resetUrl) => {
   try {
     await sendMail({
       to: user.email,
-      subject: "Password Reset Request - Trustline Fintech",
+      subject: `Password Reset Request - ${COMPANY_NAME}`,
       html: getEmailTemplate("Password Reset", content),
     });
     console.log("✅ Password reset email sent to:", user.email);
@@ -731,7 +733,7 @@ export const sendDeleteAccountRequestEmail = async (user, reason = "", source = 
     process.env.SUPPORT_EMAIL ||
     process.env.ADMIN_EMAIL ||
     process.env.EMAIL_USER ||
-    "support@trustlinefintech.com";
+    SUPPORT_EMAIL;
 
   const content = `
     <h2>New Delete Account Request</h2>
@@ -786,7 +788,7 @@ export const sendDeleteAccountRequestEmail = async (user, reason = "", source = 
     await sendMail({
       to: adminEmail,
       subject: `Delete Account Request - ${user.email}`,
-      html: getEmailTemplate("Delete Account Request", content, "Trustline Fintech Admin"),
+      html: getEmailTemplate("Delete Account Request", content, `${COMPANY_NAME} Admin`),
     });
     console.log("✅ Delete account request email sent for:", user.email);
     return true;
@@ -802,7 +804,7 @@ export const sendDeleteAccountRequestEmail = async (user, reason = "", source = 
 export const sendDeleteAccountConfirmationEmail = async (user) => {
   const content = `
     <h2>Dear ${user.firstName || ""} ${user.lastName || ""},</h2>
-    <p>Your request to delete your Trustline Fintech account has been processed.</p>
+    <p>Your request to delete your ${COMPANY_NAME} account has been processed.</p>
 
     <div class="info-box">
       <h3 style="margin-top: 0; color: #12B99C;">Account Details</h3>
@@ -832,7 +834,7 @@ export const sendDeleteAccountConfirmationEmail = async (user) => {
   try {
     await sendMail({
       to: user.email,
-      subject: "Your Trustline Fintech Account Has Been Deleted",
+      subject: `Your ${COMPANY_NAME} Account Has Been Deleted`,
       html: getEmailTemplate("Account Deletion Confirmation", content),
     });
     console.log("✅ Delete account confirmation email sent to:", user.email);

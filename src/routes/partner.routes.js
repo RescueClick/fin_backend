@@ -13,6 +13,7 @@ import { partnerUpload } from "../middleware/profileUpload.js";
 import mongoose from "mongoose";
 import { makePartnerCode } from "../utils/codes.js";
 import { sendMail } from "../utils/sendMail.js";
+import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendPartnerRegistrationEmail, sendLoanApplicationEmail, sendDeleteAccountRequestEmail } from "../utils/emailService.js";
 import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
@@ -2666,15 +2667,16 @@ router.patch(
         accountHolderName,
       } = req.body;
 
+      const partnerId = req.user.sub;
+
       const updatedPartner = await User.findOneAndUpdate(
-        { _id: req.user.sub, role: ROLES.PARTNER },
+        { _id: partnerId, role: ROLES.PARTNER },
         {
           $set: {
             firstName,
             middleName,
             lastName,
             phone,
-            email,
             dob,
             address,
             experience,
@@ -2692,9 +2694,47 @@ router.patch(
         return res.status(404).json({ message: "Partner not found" });
       }
 
+      let emailChangePending = false;
+      let emailChangeMessage = null;
+
+      if (
+        email &&
+        String(email).toLowerCase() !== String(updatedPartner.email).toLowerCase()
+      ) {
+        const normalizedEmail = String(email).toLowerCase();
+        const exists = await User.findOne({
+          email: normalizedEmail,
+          _id: { $ne: partnerId },
+        });
+        if (exists) {
+          return res.status(409).json({ message: "Email already in use" });
+        }
+        const current = await User.findById(partnerId).select("email firstName");
+        await createEmailChangeRequest({
+          user: current,
+          newEmail: normalizedEmail,
+          clientUrl: process.env.CLIENT_URL,
+        });
+        emailChangePending = true;
+        emailChangeMessage =
+          "Email change link sent. Please confirm via the link in your inbox.";
+      }
+
+      const profileObj = updatedPartner?.toObject
+        ? updatedPartner.toObject()
+        : updatedPartner;
+      if (emailChangePending) {
+        profileObj.emailChangePending = true;
+        profileObj.emailChangeMessage = emailChangeMessage;
+      }
+
       res.json({
-        message: "Partner profile updated successfully",
-        partner: updatedPartner,
+        message: emailChangePending
+          ? emailChangeMessage
+          : "Partner profile updated successfully",
+        partner: profileObj,
+        profile: profileObj,
+        emailChangePending,
       });
     } catch (err) {
       console.error(err);
@@ -3292,7 +3332,7 @@ router.post(
                 ${isUpdate && previousStatus === "REJECTED" ? `<p><b>Note:</b> This document was previously rejected and has been re-uploaded. Please review.</p>` : ''}
                 <p>Please review and verify the document in the application management system.</p>
                 <br/>
-                <p>Thank you,<br/>Trustline Fintech</p>
+                <p>Thank you,<br/>DhanSource Capital</p>
               `,
             });
           }
