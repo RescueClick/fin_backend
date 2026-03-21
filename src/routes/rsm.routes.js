@@ -11,6 +11,7 @@ import { Payout } from "../models/Payout.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { sendUserAccountEmail, sendApplicationStatusEmail } from "../utils/emailService.js";
 import { sendMail } from "../utils/sendMail.js";
+import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { emitApplicationStatusChanged } from "../utils/socketEmitter.js";
 import { makeRmCode } from "../utils/codes.js";
 import { Target } from "../models/Target.js";
@@ -1136,7 +1137,7 @@ router.get("/profile", auth, requireRole(ROLES.RSM), async (req, res) => {
       .select("-passwordHash")
       .populate({
         path: "asmId",
-        select: "firstName lastName employeeId region phone",
+        select: "firstName lastName employeeId region phone email",
       })
       .lean();
 
@@ -1153,6 +1154,7 @@ router.get("/profile", auth, requireRole(ROLES.RSM), async (req, res) => {
       dob: rsm.dob,
       address: rsm.address,
       region: rsm.region,
+      experience: rsm.experience,
       status: rsm.status,
       rsmType: rsm.rsmType,
       JoiningDate: rsm.createdAt,
@@ -1162,9 +1164,95 @@ router.get("/profile", auth, requireRole(ROLES.RSM), async (req, res) => {
       asmEmployeeId: rsm.asmId?.employeeId || null,
       asmRegion: rsm.asmId?.region || null,
       asmPhone: rsm.asmId?.phone || null,
+      asmEmail: rsm.asmId?.email || null,
     });
   } catch (err) {
     console.error("Error fetching RSM profile:", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// PATCH /api/rsm/profile/update
+router.patch("/profile/update", auth, requireRole(ROLES.RSM), async (req, res) => {
+  try {
+    const rsmId = req.user.sub;
+    const {
+      firstName,
+      lastName,
+      email,
+      phone,
+      dob,
+      address,
+      region,
+      experience,
+    } = req.body || {};
+
+    const updateData = {
+      firstName,
+      lastName,
+      phone,
+      dob,
+      address,
+      region,
+      experience,
+    };
+
+    Object.keys(updateData).forEach(
+      (key) => updateData[key] === undefined && delete updateData[key]
+    );
+
+    const updatedRsm = await User.findOneAndUpdate(
+      { _id: rsmId, role: ROLES.RSM },
+      { $set: updateData },
+      { new: true, runValidators: true, projection: "-passwordHash" }
+    );
+
+    if (!updatedRsm) return res.status(404).json({ message: "RSM not found" });
+
+    let emailChangePending = false;
+    let emailChangeMessage = null;
+
+    if (
+      email &&
+      String(email).toLowerCase() !== String(updatedRsm.email).toLowerCase()
+    ) {
+      const normalizedEmail = String(email).toLowerCase();
+
+      const exists = await User.findOne({
+        email: normalizedEmail,
+        _id: { $ne: rsmId },
+      });
+
+      if (exists) return res.status(409).json({ message: "Email already in use" });
+
+      const currentRsm = await User.findById(rsmId).select("email firstName");
+
+      await createEmailChangeRequest({
+        user: currentRsm,
+        newEmail: normalizedEmail,
+        clientUrl: process.env.CLIENT_URL,
+      });
+
+      emailChangePending = true;
+      emailChangeMessage =
+        "Email change link sent. Please confirm via the link in your inbox.";
+    }
+
+    const profileObj = updatedRsm?.toObject ? updatedRsm.toObject() : updatedRsm;
+    if (emailChangePending) {
+      profileObj.emailChangePending = true;
+      profileObj.emailChangeMessage = emailChangeMessage;
+    }
+
+    res.json({
+      message: emailChangePending
+        ? emailChangeMessage
+        : "Profile updated successfully",
+      profile: profileObj,
+      emailChangePending,
+    });
+  } catch (err) {
+    console.error("Error updating RSM profile:", err);
     res.status(500).json({ message: err.message });
   }
 });

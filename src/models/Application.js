@@ -207,7 +207,8 @@ const ApplicationSchema = new mongoose.Schema(
     remarks: {type:String},
     requestedAmount:{type: Number},
     // Workflow
-    status: { type: String, enum: APP_STATUSES, default: "DRAFT" },
+    // Option A: new applications should not start in DRAFT
+    status: { type: String, enum: APP_STATUSES, default: "SUBMITTED" },
     stageHistory: [StageSchema],
     deletedAt: { type: Date }
   },

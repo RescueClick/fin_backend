@@ -28,6 +28,31 @@ const validateApplicationPayload = ({
 }) => {
   const errors = [];
 
+  const normalizePhone = (value) => {
+    const digits = String(value ?? "").replace(/\D/g, "");
+    if (!digits) return "";
+    // If user provides +91 / spaced numbers / extra digits, take last 10.
+    if (digits.length >= 10) return digits.slice(-10);
+    return digits; // let validations fail below if too short
+  };
+
+  const normalizeEmail = (value) => {
+    return String(value ?? "").trim().replace(/\s+/g, "");
+  };
+
+  // Normalize for consistent validation.
+  customer.email = normalizeEmail(customer.email);
+  customer.phone = normalizePhone(customer.phone);
+  if (Array.isArray(references)) {
+    references = references.map((r) => ({
+      ...r,
+      phone: normalizePhone(r?.phone),
+    }));
+  }
+  if (coApplicant && typeof coApplicant === "object") {
+    coApplicant.phone = normalizePhone(coApplicant.phone);
+  }
+
   if (!customer.firstName) errors.push("Customer first name is required");
   if (!customer.email) errors.push("Customer email is required");
   if (customer.email && !/^\S+@\S+\.\S+$/.test(customer.email)) {
@@ -90,6 +115,43 @@ const validateApplicationPayload = ({
 };
 
 const router = Router();
+
+// Dummy eligibility check (PAN-only) for fast prototype.
+// Later you can replace this logic with real CIBIL logic.
+router.post("/eligibility/check", async (req, res) => {
+  try {
+    const pan = String(req.body?.pan || "").trim().toUpperCase();
+
+    // Basic PAN format: 5 letters, 4 digits, 1 letter
+    const panRegex = /^[A-Z]{5}[0-9]{4}[A-Z]{1}$/;
+    if (!pan || !panRegex.test(pan)) {
+      return res.status(400).json({ message: "Invalid PAN format" });
+    }
+
+    // Deterministic dummy score generation for repeatable UI tests.
+    let sum = 0;
+    for (const ch of pan) sum += ch.charCodeAt(0);
+    // Score range: 500-800
+    const score = (sum % 301) + 500;
+
+    const eligible = score >= 700;
+
+    let band = "C";
+    if (score >= 750) band = "A";
+    else if (score >= 700) band = "B";
+    else if (score >= 650) band = "C";
+    else band = "D";
+
+    return res.json({
+      eligible,
+      score,
+      cibilBand: band,
+      reason: eligible ? null : "Not eligible in dummy check. Please try again later.",
+    });
+  } catch (err) {
+    return res.status(500).json({ message: "Eligibility check failed", error: err.message });
+  }
+});
 
 // Pre-generate partnerId so the upload middleware can place files under a stable key
 const assignPartnerId = (req, _res, next) => {
@@ -731,9 +793,10 @@ router.post(
         existingApp.references = refs;
         existingApp.partnerId = assignedPartnerId;
         existingApp.rmId = assignedRmId;
-        // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to DRAFT
+        // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to SUBMITTED
+        // (Option A: new applications should not start in DRAFT)
         if (existingApp.status !== "DOC_INCOMPLETE") {
-          existingApp.status = "DRAFT";
+          existingApp.status = "SUBMITTED";
         }
 
         await existingApp.save();
@@ -770,7 +833,7 @@ router.post(
             businessInfo,
             propertyInfo,
             coApplicant,
-            status: "DRAFT",
+            status: "SUBMITTED",
             stageHistory: [],
           });
           appCreated = true;
@@ -1117,9 +1180,10 @@ router.post(
         existingApp.references = refs;
         existingApp.partnerId = assignedPartnerId;
         existingApp.rmId = assignedRmId;
-        // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to DRAFT
+        // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to SUBMITTED
+        // (Option A: new applications should not start in DRAFT)
         if (existingApp.status !== "DOC_INCOMPLETE") {
-          existingApp.status = "DRAFT";
+          existingApp.status = "SUBMITTED";
         }
 
         await existingApp.save();
@@ -1156,7 +1220,7 @@ router.post(
             businessInfo,
             propertyInfo,
             coApplicant,
-            status: "DRAFT",
+            status: "SUBMITTED",
             stageHistory: [],
           });
           appCreated = true;
@@ -1225,7 +1289,245 @@ router.post(
   }
 );
 
-/** Partner submits application => DRAFT -> SUBMITTED */
+/**
+ * Wizard init: create application + customer early (no docs/references validation).
+ * Frontend stepper uses this to autosave step-by-step before documents are uploaded.
+ */
+router.post(
+  "/applications/init",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const { loanType = "PERSONAL", customer = {} } = req.body || {};
+
+      if (
+        !loanType ||
+        !Application.schema.path("loanType").enumValues.includes(loanType)
+      ) {
+        return res.status(400).json({ message: "A valid loanType is required" });
+      }
+
+      const normalizePhone = (value) => {
+        const digits = String(value ?? "").replace(/\D/g, "");
+        if (!digits) return "";
+        if (digits.length >= 10) return digits.slice(-10);
+        return digits;
+      };
+
+      const normalizeEmail = (value) => {
+        return String(value ?? "").trim().replace(/\s+/g, "");
+      };
+
+      const normalizedEmail = normalizeEmail(customer.email).toLowerCase();
+      const normalizedPhone = normalizePhone(customer.phone);
+
+      if (!customer.firstName || !customer.lastName) {
+        return res
+          .status(400)
+          .json({ message: "Customer firstName and lastName are required" });
+      }
+      if (!normalizedEmail || !/^\S+@\S+\.\S+$/.test(normalizedEmail)) {
+        return res.status(400).json({ message: "Valid customer email is required" });
+      }
+      if (!normalizedPhone || !/^\d{10}$/.test(normalizedPhone)) {
+        return res.status(400).json({ message: "Valid 10-digit customer phone is required" });
+      }
+
+      const partner = await User.findOne({ _id: partnerId, role: ROLES.PARTNER });
+      if (!partner?.rmId) {
+        return res.status(400).json({ message: "Partner is not mapped to an RM" });
+      }
+
+      const rm = await User.findById(partner.rmId);
+      const assignedRmId = partner.rmId;
+      const assignedAsmId = rm?.asmId || null;
+
+      // Create or reuse customer user
+      const tempPassword =
+        customer.password || `Temp@${Math.random().toString(36).slice(2, 10)}`;
+
+      let customerUser = await User.findOne({
+        $or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
+        role: ROLES.CUSTOMER,
+      });
+
+      if (!customerUser) {
+        const employeeId = await generateEmployeeId("CUSTOMER");
+        customerUser = await User.create({
+          employeeId,
+          firstName: customer.firstName,
+          middleName: customer.middleName || "",
+          lastName: customer.lastName,
+          email: normalizedEmail,
+          phone: normalizedPhone,
+          passwordHash: await argon2.hash(tempPassword),
+          role: ROLES.CUSTOMER,
+          status: "ACTIVE",
+        });
+      }
+
+      // Create application skeleton
+      let app = null;
+      let appCreated = false;
+      let appRetries = 0;
+      const maxAppRetries = 5;
+
+      while (!appCreated && appRetries < maxAppRetries) {
+        try {
+          const appNo = await generateEmployeeId("APPLICATION");
+          app = await Application.create({
+            appNo,
+            partnerId,
+            rmId: assignedRmId,
+            asmId: assignedAsmId,
+            customerId: customerUser._id,
+            loanType,
+            customer: {
+              firstName: customer.firstName,
+              middleName: customer.middleName || "",
+              lastName: customer.lastName || "",
+              email: normalizedEmail,
+              officialEmail: customer.officialEmail,
+              phone: normalizedPhone,
+              mothersName: customer.mothersName,
+              panNumber: customer.panNumber,
+              dateOfBirth: customer.dateOfBirth,
+              gender: customer.gender,
+              maritalStatus: customer.maritalStatus,
+              spouseName: customer.spouseName,
+            },
+            references: [],
+            docs: [],
+            employmentInfo: null,
+            businessInfo: null,
+            propertyInfo: null,
+            status: "SUBMITTED",
+            stageHistory: [],
+          });
+          appCreated = true;
+        } catch (createError) {
+          if (createError.code === 11000 && createError.keyPattern?.appNo) {
+            appRetries++;
+            if (appRetries >= maxAppRetries) {
+              throw new Error(
+                `Failed to create application after ${maxAppRetries} attempts due to duplicate appNo.`
+              );
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100 * appRetries));
+          } else {
+            throw createError;
+          }
+        }
+      }
+
+      if (!app) {
+        return res.status(500).json({ message: "Failed to initialize application" });
+      }
+
+      return res.status(201).json({
+        message: "Application initialized successfully",
+        id: app._id,
+        appNo: app.appNo,
+        status: app.status,
+        customerLogin: {
+          email: customerUser.email,
+          password: tempPassword,
+        },
+      });
+    } catch (err) {
+      console.error("Wizard init error:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+/**
+ * Wizard save-step: update application partially for stepper autosave.
+ * Note: this endpoint intentionally does NOT require docs/references.
+ */
+router.patch(
+  "/applications/:id/save-step",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const { id } = req.params;
+      const { step, customer, employmentInfo, references, password } = req.body || {};
+
+      if (!step) {
+        return res.status(400).json({ message: "step is required" });
+      }
+
+      const application = await Application.findOne({
+        _id: id,
+        partnerId,
+      });
+
+      if (!application) {
+        return res.status(404).json({ message: "Application not found" });
+      }
+
+      const normalizePhone = (value) => {
+        const digits = String(value ?? "").replace(/\D/g, "");
+        if (!digits) return "";
+        if (digits.length >= 10) return digits.slice(-10);
+        return digits;
+      };
+
+      if (step === "address") {
+        application.customer = {
+          ...application.customer,
+          ...(customer || {}),
+        };
+      } else if (step === "loan") {
+        if (customer?.loanAmount !== undefined) {
+          application.customer.loanAmount = Number(customer.loanAmount) || 0;
+          application.requestedAmount = application.customer.loanAmount;
+        }
+      } else if (step === "employment") {
+        application.employmentInfo = {
+          ...(application.employmentInfo || {}),
+          ...(employmentInfo || {}),
+        };
+      } else if (step === "review") {
+        if (Array.isArray(references)) {
+          application.references = references
+            .filter(Boolean)
+            .map((r) => ({
+              name: r.name,
+              phone: normalizePhone(r.phone),
+            }));
+        }
+
+        if (password) {
+          application.customer.password = password;
+          const customerUser = await User.findById(application.customerId);
+          if (customerUser) {
+            customerUser.passwordHash = await argon2.hash(password);
+            await customerUser.save();
+          }
+        }
+      } else {
+        return res.status(400).json({ message: `Unknown step: ${step}` });
+      }
+
+      await application.save();
+      return res.json({
+        message: "Step saved successfully",
+        id: application._id,
+        status: application.status,
+      });
+    } catch (err) {
+      console.error("Wizard save-step error:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+/** Partner submits application => (no-op if already SUBMITTED) */
 router.post(
   "/applications/:id/submit",
   auth,
@@ -1239,35 +1541,143 @@ router.post(
 
     try {
       const oldStatus = app.status;
-      app.transition("SUBMITTED", req.user.sub, "Partner submitted");
-      await app.save();
 
-      // Send email notification to customer about submission
-      setImmediate(async () => {
-        try {
-          if (app.customerId && app.customerId.email) {
-            const { sendApplicationStatusEmail } = await import("../utils/emailService.js");
-            await sendApplicationStatusEmail(
-              {
-                firstName: app.customer?.firstName || app.customerId.firstName || "Customer",
-                email: app.customerId.email,
-              },
-              {
-                appNo: app.appNo,
-                loanType: app.loanType,
-                status: app.status,
-              },
-              oldStatus,
-              "SUBMITTED"
-            );
-          }
-        } catch (mailErr) {
-          console.error("❌ Failed to send submission email:", mailErr.message);
-          // Don't fail the request if email fails
+      // Option A: new apps are created directly as SUBMITTED,
+      // so this endpoint should be safe to call multiple times.
+      if (oldStatus === "SUBMITTED") {
+        const alreadyLogged =
+          Array.isArray(app.stageHistory) &&
+          app.stageHistory.some(
+            (s) => s?.from === "SUBMITTED" && s?.to === "SUBMITTED" && s?.note === "Partner submitted"
+          );
+
+        if (!alreadyLogged) {
+          app.stageHistory.push({
+            from: "SUBMITTED",
+            to: "SUBMITTED",
+            by: req.user.sub,
+            note: "Partner submitted",
+          });
+          await app.save();
+
+          // Send email notification to customer about submission
+          setImmediate(async () => {
+            try {
+              if (app.customerId && app.customerId.email) {
+                const { sendApplicationStatusEmail } = await import("../utils/emailService.js");
+                await sendApplicationStatusEmail(
+                  {
+                    firstName:
+                      app.customer?.firstName || app.customerId.firstName || "Customer",
+                    email: app.customerId.email,
+                  },
+                  {
+                    appNo: app.appNo,
+                    loanType: app.loanType,
+                    status: app.status,
+                  },
+                  oldStatus,
+                  "SUBMITTED"
+                );
+              }
+            } catch (mailErr) {
+              console.error("❌ Failed to send submission email:", mailErr.message);
+              // Don't fail the request if email fails
+            }
+          });
         }
-      });
 
-      res.json({ message: "Submitted", status: app.status });
+        return res.json({ message: "Submitted", status: app.status });
+      }
+
+      if (oldStatus === "DOC_INCOMPLETE") {
+        const alreadyLogged =
+          Array.isArray(app.stageHistory) &&
+          app.stageHistory.some(
+            (s) =>
+              s?.from === "DOC_INCOMPLETE" &&
+              s?.to === "DOC_INCOMPLETE" &&
+              s?.note === "Partner submitted"
+          );
+
+        if (!alreadyLogged) {
+          app.stageHistory.push({
+            from: "DOC_INCOMPLETE",
+            to: "DOC_INCOMPLETE",
+            by: req.user.sub,
+            note: "Partner submitted",
+          });
+          await app.save();
+
+          setImmediate(async () => {
+            try {
+              if (app.customerId && app.customerId.email) {
+                const { sendApplicationStatusEmail } = await import(
+                  "../utils/emailService.js"
+                );
+                await sendApplicationStatusEmail(
+                  {
+                    firstName:
+                      app.customer?.firstName ||
+                      app.customerId.firstName ||
+                      "Customer",
+                    email: app.customerId.email,
+                  },
+                  {
+                    appNo: app.appNo,
+                    loanType: app.loanType,
+                    status: app.status,
+                  },
+                  oldStatus,
+                  "DOC_INCOMPLETE"
+                );
+              }
+            } catch (mailErr) {
+              console.error("❌ Failed to send submission email:", mailErr.message);
+            }
+          });
+        }
+
+        return res.json({ message: "Submitted", status: app.status });
+      }
+
+      // For older records, allow DRAFT -> SUBMITTED.
+      if (oldStatus === "DRAFT") {
+        app.transition("SUBMITTED", req.user.sub, "Partner submitted");
+        await app.save();
+
+        // Send email notification to customer about submission
+        setImmediate(async () => {
+          try {
+            if (app.customerId && app.customerId.email) {
+              const { sendApplicationStatusEmail } = await import("../utils/emailService.js");
+              await sendApplicationStatusEmail(
+                {
+                  firstName:
+                    app.customer?.firstName || app.customerId.firstName || "Customer",
+                  email: app.customerId.email,
+                },
+                {
+                  appNo: app.appNo,
+                  loanType: app.loanType,
+                  status: app.status,
+                },
+                oldStatus,
+                "SUBMITTED"
+              );
+            }
+          } catch (mailErr) {
+            console.error("❌ Failed to send submission email:", mailErr.message);
+            // Don't fail the request if email fails
+          }
+        });
+
+        return res.json({ message: "Submitted", status: app.status });
+      }
+
+      return res.status(400).json({
+        message: `Cannot submit application from status ${oldStatus}`,
+      });
     } catch (e) {
       res.status(400).json({ message: e.message });
     }
@@ -2070,17 +2480,66 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       .select("-passwordHash")
       .populate({
         path: "rmId",
-        select: "firstName lastName employeeId email phone asmId",
-        populate: {
-          path: "asmId",
-          select: "firstName lastName employeeId email phone",
-        },
+        select:
+          "firstName lastName employeeId email phone asmId personalRsmId businessHomeRsmId",
+        populate: [
+          {
+            path: "asmId",
+            select: "firstName lastName employeeId email phone",
+          },
+          {
+            path: "personalRsmId",
+            select: "firstName lastName employeeId email phone asmId",
+            populate: {
+              path: "asmId",
+              select: "firstName lastName employeeId email phone",
+            },
+          },
+          {
+            path: "businessHomeRsmId",
+            select: "firstName lastName employeeId email phone asmId",
+            populate: {
+              path: "asmId",
+              select: "firstName lastName employeeId email phone",
+            },
+          },
+        ],
       })
       .lean();
 
     if (!partner) {
       return res.status(404).json({ message: "Partner not found" });
     }
+
+    const pr = partner.rmId;
+    const asmFromDoc = (a) => {
+      if (!a) return null;
+      return {
+        id: a._id,
+        employeeId: a.employeeId || null,
+        name: `${a.firstName} ${a.lastName}`.trim(),
+        email: a.email || null,
+        phone: a.phone || null,
+      };
+    };
+    const formatRsm = (rsm) => {
+      if (!rsm) return null;
+      return {
+        id: rsm._id,
+        employeeId: rsm.employeeId || null,
+        name: `${rsm.firstName} ${rsm.lastName}`.trim(),
+        email: rsm.email || null,
+        phone: rsm.phone || null,
+        asm: asmFromDoc(rsm.asmId),
+      };
+    };
+    const personalRsmFmt = formatRsm(pr?.personalRsmId);
+    const businessRsmFmt = formatRsm(pr?.businessHomeRsmId);
+    const asmDirect = asmFromDoc(pr?.asmId);
+    const resolvedAsm =
+      personalRsmFmt?.asm ||
+      businessRsmFmt?.asm ||
+      asmDirect;
 
     // Do NOT modify URLs — they are already full AWS S3 URLs
     const docs = (partner.docs || []).map((doc) => ({
@@ -2120,20 +2579,61 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       ifscCode: partner.ifscCode || null,
       registeredMobile: partner.registeredMobile || null,
 
-      rmId: partner.rmId?._id || null,
-      rmName: partner.rmId
-        ? `${partner.rmId.firstName} ${partner.rmId.lastName}`
-        : null,
-      rmEmployeeId: partner.rmId?.employeeId || null,
-      rmEmail: partner.rmId?.email || null,
-      rmPhone: partner.rmId?.phone || null,
-      asmId: partner.rmId?.asmId?._id || null,
-      asmName: partner.rmId?.asmId
-        ? `${partner.rmId.asmId.firstName} ${partner.rmId.asmId.lastName}`
-        : null,
-      asmEmployeeId: partner.rmId?.asmId?.employeeId || null,
-      asmEmail: partner.rmId?.asmId?.email || null,
-      asmPhone: partner.rmId?.asmId?.phone || null,
+      rmId: pr?._id || null,
+      rmName: pr ? `${pr.firstName} ${pr.lastName}` : null,
+      rmEmployeeId: pr?.employeeId || null,
+      rmEmail: pr?.email || null,
+      rmPhone: pr?.phone || null,
+
+      // RSM lines (same shape as /rm/profile) — RSM is RM’s manager; ASM is RSM’s manager
+      personalRsmId: personalRsmFmt?.id || null,
+      personalRsmName: personalRsmFmt?.name || null,
+      personalRsmEmployeeId: personalRsmFmt?.employeeId || null,
+      personalRsmPhone: personalRsmFmt?.phone || null,
+      personalRsmEmail: personalRsmFmt?.email || null,
+      personalRsmAsmId: personalRsmFmt?.asm?.id || null,
+      personalRsmAsmName: personalRsmFmt?.asm?.name || null,
+      personalRsmAsmEmployeeId: personalRsmFmt?.asm?.employeeId || null,
+      personalRsmAsmEmail: personalRsmFmt?.asm?.email || null,
+      personalRsmAsmPhone: personalRsmFmt?.asm?.phone || null,
+
+      businessHomeRsmId: businessRsmFmt?.id || null,
+      businessHomeRsmName: businessRsmFmt?.name || null,
+      businessHomeRsmEmployeeId: businessRsmFmt?.employeeId || null,
+      businessHomeRsmPhone: businessRsmFmt?.phone || null,
+      businessHomeRsmEmail: businessRsmFmt?.email || null,
+      businessHomeRsmAsmId: businessRsmFmt?.asm?.id || null,
+      businessHomeRsmAsmName: businessRsmFmt?.asm?.name || null,
+      businessHomeRsmAsmEmployeeId: businessRsmFmt?.asm?.employeeId || null,
+      businessHomeRsmAsmEmail: businessRsmFmt?.asm?.email || null,
+      businessHomeRsmAsmPhone: businessRsmFmt?.asm?.phone || null,
+
+      // Canonical ASM (first available from RSM chain, else RM’s asmId)
+      asmId: resolvedAsm?.id || null,
+      asmName: resolvedAsm?.name || null,
+      asmEmployeeId: resolvedAsm?.employeeId || null,
+      asmEmail: resolvedAsm?.email || null,
+      asmPhone: resolvedAsm?.phone || null,
+
+      reportingHierarchy: {
+        partner: {
+          id: partner._id,
+          employeeId: partner.employeeId || null,
+          name: `${partner.firstName} ${partner.lastName}`.trim(),
+        },
+        rm: pr
+          ? {
+              id: pr._id,
+              employeeId: pr.employeeId || null,
+              name: `${pr.firstName} ${pr.lastName}`.trim(),
+              email: pr.email || null,
+              phone: pr.phone || null,
+            }
+          : null,
+        personalRsm: personalRsmFmt,
+        businessHomeRsm: businessRsmFmt,
+        asm: resolvedAsm,
+      },
 
       docs,
       profilePic,
@@ -2152,6 +2652,7 @@ router.patch(
     try {
       const {
         firstName,
+        middleName,
         lastName,
         phone,
         email,
@@ -2170,6 +2671,7 @@ router.patch(
         {
           $set: {
             firstName,
+            middleName,
             lastName,
             phone,
             email,
@@ -2734,6 +3236,25 @@ router.post(
         application.docs[docIndex] = newDoc;
       } else {
         application.docs.push(newDoc);
+      }
+
+      // If partner is uploading documents for the first time, move workflow to DOC_INCOMPLETE.
+      // This is required so that RM can transition to DOC_COMPLETE after verifying docs.
+      if (application.status === "SUBMITTED") {
+        try {
+          application.transition(
+            "DOC_INCOMPLETE",
+            partnerId,
+            "Documents uploaded - verification pending"
+          );
+        } catch (transitionErr) {
+          console.error(
+            "Status transition DOC_INCOMPLETE failed:",
+            transitionErr.message
+          );
+          // Fallback: keep status consistent
+          application.status = "DOC_INCOMPLETE";
+        }
       }
 
       // If application was DOC_INCOMPLETE and partner is re-uploading, keep status as DOC_INCOMPLETE

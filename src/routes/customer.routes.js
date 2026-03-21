@@ -230,7 +230,7 @@ router.post(
             employmentInfo,
             businessInfo,
             propertyInfo,
-            status: "DRAFT",
+            status: "SUBMITTED",
             stageHistory: [],
           });
           appCreated = true;
