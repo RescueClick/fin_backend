@@ -1180,6 +1180,7 @@ router.patch("/profile/update", auth, requireRole(ROLES.RSM), async (req, res) =
       firstName,
       lastName,
       currentEmail,
+      currentPassword,
       email,
       phone,
       dob,
@@ -1226,7 +1227,14 @@ router.patch("/profile/update", auth, requireRole(ROLES.RSM), async (req, res) =
 
       if (exists) return res.status(409).json({ message: "Email already in use" });
 
-      const currentRsm = await User.findById(rsmId).select("email firstName");
+      const currentRsm = await User.findById(rsmId).select("email firstName passwordHash");
+      if (!currentPassword) {
+        return res.status(400).json({ message: "Current password is required for email change." });
+      }
+      const passOk = await argon2.verify(currentRsm.passwordHash, String(currentPassword));
+      if (!passOk) {
+        return res.status(400).json({ message: "Current password is incorrect." });
+      }
       if (
         currentEmail &&
         String(currentEmail).toLowerCase().trim() !== String(currentRsm.email).toLowerCase().trim()

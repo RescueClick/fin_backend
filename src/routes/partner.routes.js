@@ -2661,6 +2661,7 @@ router.patch(
         middleName,
         lastName,
         currentEmail,
+        currentPassword,
         phone,
         email,
         dob,
@@ -2715,7 +2716,14 @@ router.patch(
         if (exists) {
           return res.status(409).json({ message: "Email already in use" });
         }
-        const current = await User.findById(partnerId).select("email firstName");
+        const current = await User.findById(partnerId).select("email firstName passwordHash");
+        if (!currentPassword) {
+          return res.status(400).json({ message: "Current password is required for email change." });
+        }
+        const passOk = await argon2.verify(current.passwordHash, String(currentPassword));
+        if (!passOk) {
+          return res.status(400).json({ message: "Current password is incorrect." });
+        }
         if (
           currentEmail &&
           String(currentEmail).toLowerCase().trim() !== String(current.email).toLowerCase().trim()
