@@ -26,5 +26,5 @@ const fileFilter = (req, file, cb) => {
 export const bannerUpload = multer({
   storage: bannerStorage,
   fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024 },
 });

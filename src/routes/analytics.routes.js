@@ -231,6 +231,130 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
 }
 
 /**
+ * Ordered reporting chain from organization → user (ASM → RSM → RM → Partner).
+ * Each node includes role, display name, ids, and contact for managers ("boss" info).
+ */
+async function buildReportingChain(targetUser) {
+  const select =
+    "firstName lastName employeeId phone email role asmId personalRsmId businessHomeRsmId rsmType adminId";
+  const chain = [];
+
+  const pushNode = (u, segmentLabel, isSelf = false) => {
+    if (!u) return;
+    chain.push({
+      segmentLabel: segmentLabel || null,
+      role: u.role,
+      name: `${u.firstName || ""} ${u.lastName || ""}`.trim() || "—",
+      employeeId: u.employeeId || null,
+      phone: u.phone || null,
+      email: u.email || null,
+      rsmType: u.rsmType || null,
+      isSelf,
+    });
+  };
+
+  const role = targetUser.role;
+
+  if (role === ROLES.PARTNER) {
+    if (!targetUser.rmId) {
+      pushNode(targetUser, "Partner", true);
+      return chain;
+    }
+    const rm = await User.findById(targetUser.rmId).select(select).lean();
+    const rsmOrdered = [];
+    const pairs = [
+      [rm?.personalRsmId, "RSM (Personal loans)"],
+      [rm?.businessHomeRsmId, "RSM (Business/Home loans)"],
+    ];
+    const seenRsm = new Set();
+    for (const [rid, label] of pairs) {
+      if (!rid) continue;
+      const idstr = rid.toString();
+      if (seenRsm.has(idstr)) continue;
+      seenRsm.add(idstr);
+      const rsm = await User.findById(rid).select(select).lean();
+      if (rsm) rsmOrdered.push({ rsm, label });
+    }
+    const asmSeen = new Set();
+    const asmOrdered = [];
+    for (const { rsm } of rsmOrdered) {
+      if (rsm.asmId) {
+        const asid = rsm.asmId.toString();
+        if (!asmSeen.has(asid)) {
+          asmSeen.add(asid);
+          const asm = await User.findById(rsm.asmId).select(select).lean();
+          if (asm) asmOrdered.push(asm);
+        }
+      }
+    }
+    asmOrdered.forEach((asm) => pushNode(asm, "Area Sales Manager"));
+    rsmOrdered.forEach(({ rsm, label }) => pushNode(rsm, label));
+    if (rm) pushNode(rm, "Relationship Manager");
+    pushNode(targetUser, "Partner", true);
+    return chain;
+  }
+
+  if (role === ROLES.RM) {
+    const rsmOrdered = [];
+    const pairs = [
+      [targetUser.personalRsmId, "RSM (Personal loans)"],
+      [targetUser.businessHomeRsmId, "RSM (Business/Home loans)"],
+    ];
+    const seenRsm = new Set();
+    for (const [rid, label] of pairs) {
+      if (!rid) continue;
+      const idstr = rid.toString();
+      if (seenRsm.has(idstr)) continue;
+      seenRsm.add(idstr);
+      const rsm = await User.findById(rid).select(select).lean();
+      if (rsm) rsmOrdered.push({ rsm, label });
+    }
+    const asmSeen = new Set();
+    const asmOrdered = [];
+    for (const { rsm } of rsmOrdered) {
+      if (rsm.asmId) {
+        const asid = rsm.asmId.toString();
+        if (!asmSeen.has(asid)) {
+          asmSeen.add(asid);
+          const asm = await User.findById(rsm.asmId).select(select).lean();
+          if (asm) asmOrdered.push(asm);
+        }
+      }
+    }
+    asmOrdered.forEach((asm) => pushNode(asm, "Area Sales Manager"));
+    rsmOrdered.forEach(({ rsm, label }) => pushNode(rsm, label));
+    pushNode(targetUser, "Relationship Manager", true);
+    return chain;
+  }
+
+  if (role === ROLES.RSM) {
+    if (targetUser.asmId) {
+      const asm = await User.findById(targetUser.asmId).select(select).lean();
+      if (asm) pushNode(asm, "Area Sales Manager");
+    }
+    pushNode(targetUser, "Regional Sales Manager", true);
+    return chain;
+  }
+
+  if (role === ROLES.ASM) {
+    if (targetUser.adminId) {
+      const admin = await User.findById(targetUser.adminId).select(select).lean();
+      if (admin) pushNode(admin, "Super Admin");
+    }
+    pushNode(targetUser, "Area Sales Manager", true);
+    return chain;
+  }
+
+  if (role === ROLES.SUPER_ADMIN) {
+    pushNode(targetUser, "Super Admin", true);
+    return chain;
+  }
+
+  pushNode(targetUser, targetUser.role || "User", true);
+  return chain;
+}
+
+/**
  * Universal Analytics Endpoint
  * GET /api/analytics/:id
  * 
@@ -271,6 +395,7 @@ router.get(
 
       // ⚠️ CRITICAL: If user is SUSPENDED, return zero targets and achievements
       if (targetUser.status === "SUSPENDED") {
+        const reportingChainSuspended = await buildReportingChain(targetUser);
         return res.json({
           data: {
             profile: {
@@ -281,6 +406,7 @@ router.get(
               phone: targetUser.phone || "N/A",
               employeeId: targetUser.employeeId || "N/A",
               status: targetUser.status,
+              reportingChain: reportingChainSuspended,
             },
             analytics: {
               scope: targetUser.role,
@@ -390,6 +516,7 @@ router.get(
       };
 
       // ==================== BASE PROFILE ====================
+      const reportingChain = await buildReportingChain(targetUser);
       const base = {
         userId: targetUser._id,
         name: `${targetUser.firstName} ${targetUser.lastName}`,
@@ -398,6 +525,7 @@ router.get(
         phone: targetUser.phone || "N/A",
         employeeId: targetUser.employeeId || "N/A",
         status: targetUser.status,
+        reportingChain,
       };
 
       // ==================== ROLE-SPECIFIC CALCULATIONS ====================

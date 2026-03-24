@@ -72,6 +72,11 @@ const validateApplicationPayload = ({
     errors.push("A valid loanType is required");
   }
 
+  const loanAmt = Number(customer?.loanAmount ?? 0);
+  if (!loanAmt || loanAmt <= 0) {
+    errors.push("Loan amount must be greater than zero");
+  }
+
   if (["PERSONAL", "HOME_LOAN_SALARIED"].includes(loanType || "")) {
     if (!product.companyName) errors.push("Company name is required");
     if (!product.designation) errors.push("Designation is required");

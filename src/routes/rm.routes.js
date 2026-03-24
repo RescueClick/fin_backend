@@ -12,6 +12,7 @@ import path from "path";
 import archiver from "archiver";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { Target } from "../models/Target.js";
+import { Incentive } from "../models/Incentive.js";
 import mongoose from "mongoose";
 import mime from "mime-types";
 import { partnerUpload } from "../middleware/profileUpload.js";
@@ -225,119 +226,272 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
     const rmId = req.user.sub;
 
-    // Fetch all partners under this RM
     const partners = await User.find({ role: ROLES.PARTNER, rmId })
       .select("-passwordHash")
       .lean();
 
+    if (partners.length === 0) {
+      return res.json([]);
+    }
+
     const now = new Date();
     const currentMonth = now.getMonth() + 1;
     const currentYear = now.getFullYear();
+    const monthStart = new Date(currentYear, currentMonth - 1, 1);
+    const monthEnd = new Date(currentYear, currentMonth, 1);
 
     const BASE_URL = process.env.BACKEND_URL || "http://localhost:5000";
+    const partnerIds = partners.map((p) => p._id);
 
-    const partnerData = await Promise.all(
-      partners.map(async (partner) => {
-        // Get RM info to fetch ASM
-        const rm = await User.findById(partner.rmId)
-          .select("firstName lastName asmId")
-          .lean();
+    const rm = await User.findById(rmId).select("firstName lastName asmId").lean();
+    const asm = rm?.asmId
+      ? await User.findById(rm.asmId).select("firstName lastName").lean()
+      : null;
 
-        // Get ASM info from RM
-        const asm = rm?.asmId
-          ? await User.findById(rm.asmId).select("firstName lastName").lean()
-          : null;
-
-        // ===== Revenue (from Payouts) =====
-        const revenueAgg = await Payout.aggregate([
-          { $match: { partnerId: partner._id } },
-          { $group: { _id: null, total: { $sum: "$amount" } } },
-        ]);
-        const revenueGenerated = revenueAgg[0]?.total || 0;
-
-        // ===== Disbursed Loans =====
-        const disbursedAgg = await Application.aggregate([
-          { $match: { partnerId: partner._id, status: "DISBURSED" } },
-          {
-            $group: {
-              _id: null,
-              total: { $sum: { $toDouble: "$approvedLoanAmount" } },
+    const [
+      payoutByPartner,
+      incentiveByPartner,
+      disbursedLifetimeByPartner,
+      disbursedThisMonthByPartner,
+      appTotalsByPartner,
+      approvedCountByPartner,
+      monthlyTargets,
+    ] = await Promise.all([
+      Payout.aggregate([
+        { $match: { partnerId: { $in: partnerIds } } },
+        {
+          $group: {
+            _id: "$partnerId",
+            totalAll: { $sum: "$amount" },
+            payoutDone: {
+              $sum: {
+                $cond: [{ $eq: ["$payOutStatus", "DONE"] }, "$amount", 0],
+              },
+            },
+            payoutPending: {
+              $sum: {
+                $cond: [{ $eq: ["$payOutStatus", "PENDING"] }, "$amount", 0],
+              },
             },
           },
-        ]);
-        const totalDisbursed = disbursedAgg[0]?.total || 0;
+        },
+      ]),
+      Incentive.aggregate([
+        { $match: { partnerId: { $in: partnerIds } } },
+        {
+          $group: {
+            _id: "$partnerId",
+            incentiveTotal: { $sum: "$amount" },
+            incentivePaid: {
+              $sum: { $cond: [{ $eq: ["$status", "PAID"] }, "$amount", 0] },
+            },
+            incentivePending: {
+              $sum: { $cond: [{ $eq: ["$status", "PENDING"] }, "$amount", 0] },
+            },
+          },
+        },
+      ]),
+      Application.aggregate([
+        {
+          $match: {
+            partnerId: { $in: partnerIds },
+            status: "DISBURSED",
+          },
+        },
+        {
+          $group: {
+            _id: "$partnerId",
+            totalDisbursed: { $sum: { $toDouble: "$approvedLoanAmount" } },
+            disbursedFiles: { $sum: 1 },
+          },
+        },
+      ]),
+      Application.aggregate([
+        {
+          $match: {
+            partnerId: { $in: partnerIds },
+            status: "DISBURSED",
+            updatedAt: { $gte: monthStart, $lt: monthEnd },
+          },
+        },
+        {
+          $group: {
+            _id: "$partnerId",
+            achievedDisbursementMonth: {
+              $sum: { $toDouble: "$approvedLoanAmount" },
+            },
+            achievedFileCountMonth: { $sum: 1 },
+          },
+        },
+      ]),
+      Application.aggregate([
+        { $match: { partnerId: { $in: partnerIds } } },
+        { $group: { _id: "$partnerId", total: { $sum: 1 } } },
+      ]),
+      Application.aggregate([
+        {
+          $match: {
+            partnerId: { $in: partnerIds },
+            status: "APPROVED",
+          },
+        },
+        { $group: { _id: "$partnerId", total: { $sum: 1 } } },
+      ]),
+      Target.find({
+        assignedTo: { $in: partnerIds },
+        role: ROLES.PARTNER,
+        month: currentMonth,
+        year: currentYear,
+      }).lean(),
+    ]);
 
-        // ===== Assigned Target =====
-        const targetDoc = await Target.findOne({
-          assignedTo: partner._id,
-          role: ROLES.PARTNER,
-          month: currentMonth,
-          year: currentYear,
-        });
-        const assignedTarget = targetDoc ? Number(targetDoc.targetValue) : 0;
-
-        // ===== Performance % =====
-        const performance =
-          assignedTarget > 0
-            ? ((totalDisbursed / assignedTarget) * 100).toFixed(2)
-            : "0.00";
-
-        // ===== Deals & Success =====
-        const dealsCount = await Application.countDocuments({
-          partnerId: partner._id,
-        });
-        const successCount = await Application.countDocuments({
-          partnerId: partner._id,
-          status: "APPROVED",
-        });
-        const successRate =
-          dealsCount > 0 ? Math.round((successCount / dealsCount) * 100) : 0;
-
-        // ===== Profile Pic =====
-        const selfieDoc = (partner.docs || [])
-          .find((doc) => doc.docType === "SELFIE");
-        
-        let profilePicUrl = null;
-        if (selfieDoc?.url) {
-          // Check if URL already starts with http/https (absolute URL)
-          if (selfieDoc.url.startsWith("http://") || selfieDoc.url.startsWith("https://")) {
-            profilePicUrl = selfieDoc.url;
-          } else {
-            // Relative URL - prepend BASE_URL
-            const cleanPath = selfieDoc.url
-              .replace(/\\/g, "/")
-              .replace(/^\/+/, "");
-            profilePicUrl = `${BASE_URL.replace(/\/$/, "")}/${cleanPath}`;
-          }
-        }
-
-        return {
-          id: partner._id,
-          rmId: partner.rmId,
-          rmName: rm ? `${rm.firstName} ${rm.lastName}` : null,
-          asmId: asm?._id || null,
-          asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
-          name: `${partner.firstName} ${partner.lastName}`,
-          email: partner.email,
-          phone: partner.phone,
-          status: partner.status,
-          rating: partner.rating || 0,
-
-          // Existing
-          dealsThisMonth: dealsCount,
-          revenueGenerated,
-          successRate,
-
-          // Added analytics
-          totalDisbursed,
-          assignedTarget,
-          performance: `${performance}%`,
-
-          lastActive: partner.lastLoginAt,
-          profilePic: profilePicUrl,
-        };
-      })
+    const payoutMap = Object.fromEntries(
+      payoutByPartner.map((r) => [String(r._id), r])
     );
+    const incentiveMap = Object.fromEntries(
+      incentiveByPartner.map((r) => [String(r._id), r])
+    );
+    const lifetimeMap = Object.fromEntries(
+      disbursedLifetimeByPartner.map((r) => [String(r._id), r])
+    );
+    const monthAchMap = Object.fromEntries(
+      disbursedThisMonthByPartner.map((r) => [String(r._id), r])
+    );
+    const totalAppsMap = Object.fromEntries(
+      appTotalsByPartner.map((r) => [String(r._id), r.total])
+    );
+    const approvedMap = Object.fromEntries(
+      approvedCountByPartner.map((r) => [String(r._id), r.total])
+    );
+    const targetByPartnerId = Object.fromEntries(
+      monthlyTargets.map((t) => [String(t.assignedTo), t])
+    );
+
+    const partnerData = partners.map((partner) => {
+      const pid = String(partner._id);
+      const pPay = payoutMap[pid] || {};
+      const pInc = incentiveMap[pid] || {};
+      const life = lifetimeMap[pid] || {};
+      const monthAch = monthAchMap[pid] || {};
+      const targetDoc = targetByPartnerId[pid];
+
+      const totalDisbursed = life.totalDisbursed || 0;
+      const totalApplications = totalAppsMap[pid] || 0;
+      const approvedCount = approvedMap[pid] || 0;
+      const successRate =
+        totalApplications > 0
+          ? Math.round((approvedCount / totalApplications) * 100)
+          : 0;
+
+      const fileCountTarget = targetDoc?.fileCountTarget ?? 4;
+      const disbursementTarget =
+        targetDoc?.disbursementTarget ??
+        targetDoc?.targetValue ??
+        2000000;
+      const assignedTarget = targetDoc
+        ? Number(targetDoc.targetValue ?? disbursementTarget)
+        : 0;
+
+      const achievedFileCountMonth = monthAch.achievedFileCountMonth || 0;
+      const achievedDisbursementMonth =
+        monthAch.achievedDisbursementMonth || 0;
+
+      const disbursementPerfPct =
+        disbursementTarget > 0
+          ? Math.min(
+              100,
+              (achievedDisbursementMonth / disbursementTarget) * 100
+            ).toFixed(2)
+          : "0.00";
+      const filePerfPct =
+        fileCountTarget > 0
+          ? Math.min(
+              100,
+              (achievedFileCountMonth / fileCountTarget) * 100
+            ).toFixed(2)
+          : "0.00";
+      const performanceAvg = (
+        (parseFloat(disbursementPerfPct) + parseFloat(filePerfPct)) /
+        2
+      ).toFixed(2);
+
+      const selfieDoc = (partner.docs || []).find(
+        (doc) => doc.docType === "SELFIE"
+      );
+      let profilePicUrl = null;
+      if (selfieDoc?.url) {
+        if (
+          selfieDoc.url.startsWith("http://") ||
+          selfieDoc.url.startsWith("https://")
+        ) {
+          profilePicUrl = selfieDoc.url;
+        } else {
+          const cleanPath = selfieDoc.url
+            .replace(/\\/g, "/")
+            .replace(/^\/+/, "");
+          profilePicUrl = `${BASE_URL.replace(/\/$/, "")}/${cleanPath}`;
+        }
+      }
+
+      const payoutDone = pPay.payoutDone || 0;
+      const payoutPendingAmount = pPay.payoutPending || 0;
+      const revenueGenerated = pPay.totalAll || 0;
+
+      return {
+        id: partner._id,
+        rmId: partner.rmId,
+        rmName: rm ? `${rm.firstName} ${rm.lastName}` : null,
+        asmId: asm?._id || null,
+        asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
+        name: `${partner.firstName} ${partner.lastName}`,
+        email: partner.email,
+        phone: partner.phone,
+        status: partner.status,
+        rating: partner.rating || 0,
+
+        // Payout (loan partner commission)
+        totalPayout: payoutDone,
+        payoutDone,
+        payoutPending: payoutPendingAmount,
+        payoutTotalRecorded: revenueGenerated,
+
+        // Incentive (monthly target–based bonus — see Incentive model)
+        incentivePaid: pInc.incentivePaid || 0,
+        incentivePending: pInc.incentivePending || 0,
+        incentiveTotal: pInc.incentiveTotal || 0,
+
+        // Lifetime disbursed book
+        totalDisbursed,
+        disbursedFilesLifetime: life.disbursedFiles || 0,
+
+        // Current month achievement vs Target (same rules as GET /partners/targets)
+        period: { month: currentMonth, year: currentYear },
+        fileCountTarget,
+        disbursementTarget,
+        achievedFileCountMonth,
+        achievedDisbursementMonth,
+        fileTargetMet: achievedFileCountMonth >= fileCountTarget,
+        disbursementTargetMet:
+          achievedDisbursementMonth >= disbursementTarget,
+        targetAchieved:
+          achievedFileCountMonth >= fileCountTarget &&
+          achievedDisbursementMonth >= disbursementTarget,
+
+        performance: `${performanceAvg}%`,
+        performanceDisbursement: `${disbursementPerfPct}%`,
+        performanceFiles: `${filePerfPct}%`,
+
+        // Legacy / UI aliases
+        assignedTarget,
+        dealsThisMonth: achievedFileCountMonth,
+        dealsClosedThisMonth: achievedFileCountMonth,
+        revenueGenerated,
+        successRate,
+
+        lastActive: partner.lastLoginAt,
+        profilePic: profilePicUrl,
+      };
+    });
 
     res.json(partnerData);
   } catch (err) {
@@ -1430,6 +1584,88 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       }
     ]);
 
+    const monthStartDash = new Date(currentYear, currentMonth - 1, 1);
+    const monthEndDash = new Date(currentYear, currentMonth, 1);
+
+    const [disbursedByPartner, payoutByPartner, dealsMonthByPartner] =
+      partnerIds.length === 0
+        ? [[], [], []]
+        : await Promise.all([
+            Application.aggregate([
+              {
+                $match: {
+                  partnerId: { $in: partnerIds },
+                  status: "DISBURSED",
+                },
+              },
+              {
+                $group: {
+                  _id: "$partnerId",
+                  totalDisbursed: { $sum: { $toDouble: "$approvedLoanAmount" } },
+                },
+              },
+            ]),
+            Payout.aggregate([
+              {
+                $match: {
+                  partnerId: { $in: partnerIds },
+                  payOutStatus: "DONE",
+                },
+              },
+              {
+                $group: {
+                  _id: "$partnerId",
+                  totalPayout: { $sum: "$amount" },
+                },
+              },
+            ]),
+            Application.aggregate([
+              {
+                $match: {
+                  partnerId: { $in: partnerIds },
+                  status: "DISBURSED",
+                  updatedAt: { $gte: monthStartDash, $lt: monthEndDash },
+                },
+              },
+              {
+                $group: {
+                  _id: "$partnerId",
+                  deals: { $sum: 1 },
+                },
+              },
+            ]),
+          ]);
+
+    const disbursedMap = Object.fromEntries(
+      disbursedByPartner.map((d) => [d._id.toString(), d.totalDisbursed])
+    );
+    const payoutMap = Object.fromEntries(
+      payoutByPartner.map((d) => [d._id.toString(), d.totalPayout])
+    );
+    const dealsMonthMap = Object.fromEntries(
+      dealsMonthByPartner.map((d) => [d._id.toString(), d.deals])
+    );
+
+    const partnerPayoutSummary = partners
+      .map((p) => {
+        const id = p._id.toString();
+        return {
+          id,
+          name: `${p.firstName || ""} ${p.lastName || ""}`.trim() || "Partner",
+          status: p.status,
+          totalDisbursed: disbursedMap[id] || 0,
+          totalPayout: payoutMap[id] || 0,
+          dealsThisMonth: dealsMonthMap[id] || 0,
+        };
+      })
+      .sort(
+        (a, b) =>
+          b.totalPayout +
+          b.totalDisbursed -
+          (a.totalPayout + a.totalDisbursed)
+      )
+      .slice(0, 8);
+
     // Response with RSM details
     res.json({
       totals: {
@@ -1454,6 +1690,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       targets, // RM monthly targets & achieved (12-month breakdown)
       highValueCustomers,
       salesPipeline,
+      partnerPayoutSummary,
       // RSM details
       personalRsm: rm.personalRsmId ? {
         id: rm.personalRsmId._id,
