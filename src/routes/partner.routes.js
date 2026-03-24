@@ -120,6 +120,156 @@ const validateApplicationPayload = ({
   return errors;
 };
 
+const normalizeDocTypeKey = (docType) => String(docType || "").trim().toUpperCase();
+
+const normalizeIncomingDocType = (docType) => {
+  const key = normalizeDocTypeKey(docType);
+  const aliases = {
+    AADHAAR_FRONT: "AADHAR_FRONT",
+    AADHAAR_BACK: "AADHAR_BACK",
+    PASSPORT_PHOTO: "PHOTO",
+    OTHER_DOC: "OTHER_DOCS",
+    FORM16: "FORM_16_26AS",
+    FORM_16: "FORM_16_26AS",
+    FORM16_26AS: "FORM_16_26AS",
+    "26AS": "FORM_16_26AS",
+    COMPANY_ID: "COMPANY_ID_CARD",
+    COMPANY_IDCARD: "COMPANY_ID_CARD",
+    GST: "GST_DOCUMENT",
+    GST_DOC: "GST_DOCUMENT",
+    GST_CERTIFICATE: "GST_DOCUMENT",
+    BANK_STATEMENT: "BANK_STATEMENT_1",
+    CO_APPLICANT_PASSPORT_PHOTO: "CO_APPLICANT_SELFIE",
+  };
+  return aliases[key] || key;
+};
+
+const getMandatoryDocRules = (loanType, customer = {}) => {
+  const isFemale = String(customer?.gender || "").toLowerCase() === "female";
+
+  if (loanType === "PERSONAL") {
+    return [
+      "AADHAR_FRONT",
+      "AADHAR_BACK",
+      "PAN",
+      { anyOf: ["PHOTO", "SELFIE"], label: "PHOTO_OR_SELFIE" },
+      "OTHER_DOCS",
+      { anyOf: ["ADDRESS_PROOF", "LIGHT_BILL", "UTILITY_BILL", "RENT_AGREEMENT"], label: "ADDRESS_PROOF" },
+      "COMPANY_ID_CARD",
+      "SALARY_SLIP_1",
+      "SALARY_SLIP_2",
+      "SALARY_SLIP_3",
+      "FORM_16_26AS",
+      "BANK_STATEMENT_1",
+      "BANK_STATEMENT_2",
+    ];
+  }
+
+  if (loanType === "HOME_LOAN_SALARIED") {
+    return [
+      "AADHAR_FRONT",
+      "AADHAR_BACK",
+      "PAN",
+      { anyOf: ["PHOTO", "SELFIE"], label: "PHOTO_OR_SELFIE" },
+      "OTHER_DOCS",
+      { anyOf: ["ADDRESS_PROOF", "LIGHT_BILL", "UTILITY_BILL", "RENT_AGREEMENT"], label: "ADDRESS_PROOF" },
+      "COMPANY_ID_CARD",
+      "SALARY_SLIP_1",
+      "SALARY_SLIP_2",
+      "SALARY_SLIP_3",
+      "FORM_16_26AS",
+      "BANK_STATEMENT_1",
+      "BANK_STATEMENT_2",
+    ];
+  }
+
+  const rules = [
+    { anyOf: ["ADDRESS_PROOF", "LIGHT_BILL", "UTILITY_BILL", "RENT_AGREEMENT"], label: "ADDRESS_PROOF" },
+    "AADHAR_FRONT",
+    "AADHAR_BACK",
+    "BUSINESS_OTHER_DOCS",
+    "PAN",
+    { anyOf: ["PHOTO", "SELFIE"], label: "PHOTO_OR_SELFIE" },
+    "SHOP_ACT",
+    "UDHYAM_AADHAR",
+    "ITR",
+    "GST_DOCUMENT",
+    "SHOP_PHOTO",
+    "BUSINESS_OTHER_DOCS",
+    "BANK_STATEMENT_1",
+    "BANK_STATEMENT_2",
+  ];
+
+  if (isFemale && (loanType === "BUSINESS" || loanType === "HOME_LOAN_SELF_EMPLOYED")) {
+    rules.push("CO_APPLICANT_AADHAR_FRONT");
+    rules.push("CO_APPLICANT_AADHAR_BACK");
+    rules.push("CO_APPLICANT_PAN");
+    rules.push({ anyOf: ["CO_APPLICANT_SELFIE"], label: "CO_APPLICANT_SELFIE_OR_PHOTO" });
+  }
+
+  return rules;
+};
+
+const findMissingMandatoryDocs = (loanType, customer, docs = []) => {
+  const uploadedTypes = new Set(docs.map((d) => normalizeIncomingDocType(d.docType)));
+  const rules = getMandatoryDocRules(loanType, customer);
+  const missing = [];
+
+  for (const rule of rules) {
+    if (typeof rule === "string") {
+      if (!uploadedTypes.has(rule)) missing.push(rule);
+      continue;
+    }
+    if (rule?.anyOf && !rule.anyOf.some((t) => uploadedTypes.has(t))) {
+      missing.push(rule.label || rule.anyOf.join("_OR_"));
+    }
+  }
+
+  return missing;
+};
+
+// Preserve multiple files of the same docType while still replacing existing re-uploads.
+const mergeApplicationDocs = (existingDocs = [], newDocs = [], uploadedBy) => {
+  const groupedExisting = new Map();
+  const mergedDocs = [];
+
+  for (const doc of existingDocs) {
+    const key = normalizeDocTypeKey(doc.docType);
+    if (!groupedExisting.has(key)) groupedExisting.set(key, []);
+    groupedExisting.get(key).push(doc);
+  }
+
+  for (const incoming of newDocs) {
+    const key = normalizeDocTypeKey(incoming.docType);
+    const bucket = groupedExisting.get(key) || [];
+    const existingDoc = bucket.length ? bucket.shift() : null;
+    groupedExisting.set(key, bucket);
+
+    if (existingDoc) {
+      mergedDocs.push({
+        ...existingDoc,
+        url: incoming.url,
+        status: "PENDING",
+        remarks: "",
+        uploadedBy: uploadedBy ?? existingDoc.uploadedBy ?? null,
+        updatedAt: new Date(),
+        verifiedAt: null,
+        rejectedAt: null,
+        verifiedBy: null,
+        rejectedBy: null,
+      });
+    } else {
+      mergedDocs.push(incoming);
+    }
+  }
+
+  for (const docs of groupedExisting.values()) {
+    if (docs?.length) mergedDocs.push(...docs);
+  }
+
+  return mergedDocs;
+};
+
 const router = Router();
 
 // Dummy eligibility check (PAN-only) for fast prototype.
@@ -566,6 +716,7 @@ router.post(
         references,
         coApplicant,
         partnerReferralCode,
+        status: applicationStatus,
       } = JSON.parse(req.body.data || "{}");
 
       const validationErrors = validateApplicationPayload({
@@ -674,12 +825,13 @@ router.post(
           throw new Error("S3 upload failed: missing file location");
         }
         return {
-          docType: docTypes[index] || "UNKNOWN",
+          docType: normalizeIncomingDocType(docTypes[index] || "UNKNOWN"),
           url: file.location,
           uploadedBy: null,
           status: "PENDING",
         };
       });
+
 
       // Prepare conditional sections
       let employmentInfo = null;
@@ -769,28 +921,17 @@ router.post(
         existingApp &&
         ["DRAFT", "DOC_INCOMPLETE"].includes(existingApp.status)
       ) {
-        // Update existing application - replace/re-add documents
-        const docsMap = new Map();
-
-        // Keep existing docs first
-        for (const d of existingApp.docs) docsMap.set(d.docType.toUpperCase(), d);
-        
-        // Replace with new docs (re-uploaded documents replace old ones)
-        for (const nd of newDocs) {
-          const existingDoc = docsMap.get(nd.docType.toUpperCase());
-          if (existingDoc) {
-            // Replace existing document - update URL and reset status to PENDING
-            existingDoc.url = nd.url;
-            existingDoc.status = "PENDING"; // Reset status when re-uploaded
-            existingDoc.remarks = ""; // Clear remarks when re-uploaded
-            existingDoc.uploadedBy = userId;
-          } else {
-            // New document
-            docsMap.set(nd.docType.toUpperCase(), nd);
+        const mergedDocs = mergeApplicationDocs(existingApp.docs || [], newDocs, null);
+        if (applicationStatus !== "DRAFT") {
+          const missingDocs = findMissingMandatoryDocs(loanType, customer, mergedDocs);
+          if (missingDocs.length > 0) {
+            return res.status(400).json({
+              message: "Mandatory documents missing",
+              missingDocs,
+            });
           }
         }
-
-        existingApp.docs = Array.from(docsMap.values());
+        existingApp.docs = mergedDocs;
         existingApp.customer = { ...existingApp.customer, ...customerData };
         existingApp.employmentInfo = employmentInfo;
         existingApp.businessInfo = businessInfo;
@@ -817,6 +958,16 @@ router.post(
       }
 
       // Otherwise create new application
+      if (applicationStatus !== "DRAFT") {
+        const missingDocs = findMissingMandatoryDocs(loanType, customer, newDocs);
+        if (missingDocs.length > 0) {
+          return res.status(400).json({
+            message: "Mandatory documents missing",
+            missingDocs,
+          });
+        }
+      }
+
       // ✅ CRITICAL: Retry logic to handle duplicate appNo race conditions
       let app = null;
       let appRetries = 0;
@@ -947,6 +1098,7 @@ router.post(
         references,
         coApplicant,
         partnerReferralCode,
+        status: applicationStatus,
       } = JSON.parse(req.body.data || "{}");
 
       const validationErrors = validateApplicationPayload({
@@ -1061,12 +1213,13 @@ router.post(
           throw new Error("S3 upload failed: missing file location");
         }
         return {
-          docType: docTypes[index] || "UNKNOWN",
+          docType: normalizeIncomingDocType(docTypes[index] || "UNKNOWN"),
           url: file.location,
           uploadedBy: userId,
           status: "PENDING",
         };
       });
+
 
       // Prepare conditional sections
       let employmentInfo = null;
@@ -1156,28 +1309,17 @@ router.post(
         existingApp &&
         ["DRAFT", "DOC_INCOMPLETE"].includes(existingApp.status)
       ) {
-        // Update existing application - replace/re-add documents
-        const docsMap = new Map();
-
-        // Keep existing docs first
-        for (const d of existingApp.docs) docsMap.set(d.docType.toUpperCase(), d);
-        
-        // Replace with new docs (re-uploaded documents replace old ones)
-        for (const nd of newDocs) {
-          const existingDoc = docsMap.get(nd.docType.toUpperCase());
-          if (existingDoc) {
-            // Replace existing document - update URL and reset status to PENDING
-            existingDoc.url = nd.url;
-            existingDoc.status = "PENDING"; // Reset status when re-uploaded
-            existingDoc.remarks = ""; // Clear remarks when re-uploaded
-            existingDoc.uploadedBy = userId;
-          } else {
-            // New document
-            docsMap.set(nd.docType.toUpperCase(), nd);
+        const mergedDocs = mergeApplicationDocs(existingApp.docs || [], newDocs, userId);
+        if (applicationStatus !== "DRAFT") {
+          const missingDocs = findMissingMandatoryDocs(loanType, customer, mergedDocs);
+          if (missingDocs.length > 0) {
+            return res.status(400).json({
+              message: "Mandatory documents missing",
+              missingDocs,
+            });
           }
         }
-
-        existingApp.docs = Array.from(docsMap.values());
+        existingApp.docs = mergedDocs;
         existingApp.customer = { ...existingApp.customer, ...customerData };
         existingApp.employmentInfo = employmentInfo;
         existingApp.businessInfo = businessInfo;
@@ -1204,6 +1346,16 @@ router.post(
       }
 
       // Otherwise create new application
+      if (applicationStatus !== "DRAFT") {
+        const missingDocs = findMissingMandatoryDocs(loanType, customer, newDocs);
+        if (missingDocs.length > 0) {
+          return res.status(400).json({
+            message: "Mandatory documents missing",
+            missingDocs,
+          });
+        }
+      }
+
       // ✅ CRITICAL: Retry logic to handle duplicate appNo race conditions
       let app = null;
       let appRetries = 0;
