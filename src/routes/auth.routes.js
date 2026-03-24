@@ -415,6 +415,32 @@ router.post("/change-password", auth, async (req, res) => {
   }
 });
 
+// POST /api/auth/verify-password (authenticated)
+router.post("/verify-password", auth, async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    if (!password) {
+      return res.status(400).json({ message: "Password is required." });
+    }
+
+    const user = await User.findById(req.user.sub).select("passwordHash status");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    if (user.status === "SUSPENDED") {
+      return res.status(403).json({ message: "Account suspended." });
+    }
+
+    const valid = await argon2.verify(user.passwordHash, String(password));
+    if (!valid) {
+      return res.status(400).json({ message: "Current password is incorrect." });
+    }
+
+    return res.json({ message: "Password verified successfully." });
+  } catch (err) {
+    console.error("verify-password:", err);
+    return res.status(500).json({ message: err.message || "Could not verify password" });
+  }
+});
+
 // POST /api/auth/email-change/confirm  (public — token from email link)
 router.post("/email-change/confirm", async (req, res) => {
   try {
