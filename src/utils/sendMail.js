@@ -2,13 +2,16 @@ import nodemailer from "nodemailer";
 import { COMPANY_NAME } from "../config/branding.js";
 
 export const sendMail = async ({ to, subject, html }) => {
+  const EMAIL_USER = String(process.env.EMAIL_USER || "").trim();
+  const EMAIL_PASS = String(process.env.EMAIL_PASS || "").trim();
+
   // Validate required parameters
   if (!to || !subject || !html) {
     throw new Error("sendMail: Missing required parameters (to, subject, html)");
   }
 
   // Validate email credentials
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+  if (!EMAIL_USER || !EMAIL_PASS) {
     throw new Error("Email credentials are missing. EMAIL_USER and EMAIL_PASS must be set.");
   }
 
@@ -18,8 +21,8 @@ export const sendMail = async ({ to, subject, html }) => {
     port: 587,
     secure: false, // Use TLS
     auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
+      user: EMAIL_USER,
+      pass: EMAIL_PASS,
     },
     requireTLS: true,
     connectionTimeout: 30000, // 30 seconds (increased for slow connections)
@@ -33,8 +36,8 @@ export const sendMail = async ({ to, subject, html }) => {
     port: 465,
     secure: true, // Use SSL
     auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
+      user: EMAIL_USER,
+      pass: EMAIL_PASS,
     },
     connectionTimeout: 30000, // 30 seconds (increased for slow connections)
     greetingTimeout: 30000,
@@ -46,7 +49,7 @@ export const sendMail = async ({ to, subject, html }) => {
     const transporter = nodemailer.createTransport(primaryConfig);
 
     const info = await transporter.sendMail({
-      from: `"${COMPANY_NAME}" <${process.env.EMAIL_USER}>`,
+      from: `"${COMPANY_NAME}" <${EMAIL_USER}>`,
       to,
       subject,
       html,
@@ -69,7 +72,7 @@ export const sendMail = async ({ to, subject, html }) => {
         const transporter = nodemailer.createTransport(fallbackConfig);
 
         const info = await transporter.sendMail({
-          from: `"${COMPANY_NAME}" <${process.env.EMAIL_USER}>`,
+          from: `"${COMPANY_NAME}" <${EMAIL_USER}>`,
           to,
           subject,
           html,
@@ -85,7 +88,7 @@ export const sendMail = async ({ to, subject, html }) => {
         // Enhanced error diagnostics
         if (fallbackError.message.includes("535") || fallbackError.message.includes("authentication")) {
           console.error(`   🔴 Authentication Error:`);
-          console.error(`      1. EMAIL_USER should be full email: ${process.env.EMAIL_USER}`);
+          console.error(`      1. EMAIL_USER should be full email: ${EMAIL_USER}`);
           console.error(`      2. EMAIL_PASS should be correct (use App Password if 2FA enabled)`);
           console.error(`      3. Verify SMTP is enabled in Hostinger control panel`);
           
