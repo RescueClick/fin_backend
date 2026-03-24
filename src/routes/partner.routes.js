@@ -2660,6 +2660,7 @@ router.patch(
         firstName,
         middleName,
         lastName,
+        currentEmail,
         phone,
         email,
         dob,
@@ -2715,8 +2716,15 @@ router.patch(
           return res.status(409).json({ message: "Email already in use" });
         }
         const current = await User.findById(partnerId).select("email firstName");
+        if (
+          currentEmail &&
+          String(currentEmail).toLowerCase().trim() !== String(current.email).toLowerCase().trim()
+        ) {
+          return res.status(400).json({ message: "Current email does not match your active email." });
+        }
         await createEmailChangeRequest({
           user: current,
+          currentEmail: current.email,
           newEmail: normalizedEmail,
           clientUrl: process.env.CLIENT_URL,
         });
@@ -2744,6 +2752,54 @@ router.patch(
     } catch (err) {
       console.error(err);
       res.status(500).json({ message: err.message });
+    }
+  }
+);
+
+router.patch(
+  "/profile/avatar",
+  auth,
+  requireRole(ROLES.PARTNER),
+  upload.single("avatar"),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      if (!req.file?.location) {
+        return res.status(400).json({ message: "Avatar image is required" });
+      }
+      if (!String(req.file.mimetype || "").startsWith("image/")) {
+        return res.status(400).json({ message: "Only image files are allowed for avatar" });
+      }
+
+      const partner = await User.findOne({ _id: partnerId, role: ROLES.PARTNER });
+      if (!partner) {
+        return res.status(404).json({ message: "Partner not found" });
+      }
+
+      const nextDocs = Array.isArray(partner.docs)
+        ? partner.docs.filter((d) => String(d.docType || "").toUpperCase() !== "SELFIE")
+        : [];
+
+      nextDocs.push({
+        docType: "SELFIE",
+        url: req.file.location,
+        uploadedBy: partnerId,
+        status: "PENDING",
+        remarks: "",
+        uploadedAt: new Date(),
+      });
+
+      partner.docs = nextDocs;
+      await partner.save();
+
+      return res.json({
+        message: "Avatar updated successfully",
+        profilePic: req.file.location,
+        partner,
+      });
+    } catch (err) {
+      console.error("Error updating partner avatar:", err);
+      return res.status(500).json({ message: err.message || "Failed to update avatar" });
     }
   }
 );

@@ -423,8 +423,13 @@ router.post("/email-change/confirm", async (req, res) => {
       return res.status(400).json({ message: "Invalid or missing token" });
     }
 
+    const cleanToken = token.trim();
     const user = await User.findOne({
-      emailChangeToken: token.trim(),
+      $or: [
+        { emailChangeToken: cleanToken }, // legacy
+        { emailChangeTokenOld: cleanToken },
+        { emailChangeTokenNew: cleanToken },
+      ],
       emailChangeTokenExpires: { $gt: new Date() },
     });
 
@@ -441,13 +446,32 @@ router.post("/email-change/confirm", async (req, res) => {
       return res.status(409).json({ message: "This email is already in use by another account." });
     }
 
-    user.email = newEmail;
-    user.pendingEmail = undefined;
-    user.emailChangeToken = undefined;
-    user.emailChangeTokenExpires = undefined;
-    await user.save();
+    if (cleanToken === user.emailChangeTokenOld) {
+      user.emailChangeOldVerified = true;
+      user.emailChangeTokenOld = undefined;
+    } else if (cleanToken === user.emailChangeTokenNew || cleanToken === user.emailChangeToken) {
+      user.emailChangeNewVerified = true;
+      user.emailChangeTokenNew = undefined;
+      user.emailChangeToken = undefined;
+    }
 
-    res.json({ message: "Email updated successfully. You can log in with your new email." });
+    if (user.emailChangeOldVerified && user.emailChangeNewVerified) {
+      user.email = newEmail;
+      user.pendingEmail = undefined;
+      user.emailChangeTokenExpires = undefined;
+      user.emailChangeOldVerified = false;
+      user.emailChangeNewVerified = false;
+      await user.save();
+      return res.json({
+        message: "Email updated successfully after dual verification. You can log in with your new email.",
+      });
+    }
+
+    await user.save();
+    return res.json({
+      message:
+        "Verification recorded. Please complete verification from the other email link to finish email change.",
+    });
   } catch (err) {
     console.error("email-change/confirm:", err);
     res.status(500).json({ message: err.message || "Could not confirm email change" });
@@ -467,6 +491,7 @@ router.post("/email-change/resend", auth, async (req, res) => {
     await createEmailChangeRequest({
       user,
       newEmail: user.pendingEmail,
+      currentEmail: user.email,
       clientUrl: process.env.CLIENT_URL,
     });
 

@@ -3164,6 +3164,7 @@ router.patch(
       const {
         firstName,
         lastName,
+        currentEmail,
         email,
         phone,
         dob,
@@ -3220,8 +3221,15 @@ router.patch(
           return res.status(409).json({ message: "Email already in use" });
         }
         const current = await User.findById(asmId).select("email firstName");
+        if (
+          currentEmail &&
+          String(currentEmail).toLowerCase().trim() !== String(current.email).toLowerCase().trim()
+        ) {
+          return res.status(400).json({ message: "Current email does not match your active email." });
+        }
         await createEmailChangeRequest({
           user: current,
+          currentEmail: current.email,
           newEmail: normalizedEmail,
           clientUrl: process.env.CLIENT_URL,
         });

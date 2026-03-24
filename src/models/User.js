@@ -109,9 +109,13 @@ const userSchema = new mongoose.Schema(
     passwordHash: { type: String, required: true },
     deletedAt: { type: Date },
 
-    /** Pending email change (verified via link sent to new email) */
+    /** Pending email change (dual verification via old+new email links) */
     pendingEmail: { type: String, lowercase: true, sparse: true, trim: true },
-    emailChangeToken: { type: String, sparse: true },
+    emailChangeToken: { type: String, sparse: true }, // legacy
+    emailChangeTokenOld: { type: String, sparse: true },
+    emailChangeTokenNew: { type: String, sparse: true },
+    emailChangeOldVerified: { type: Boolean, default: false },
+    emailChangeNewVerified: { type: Boolean, default: false },
     emailChangeTokenExpires: { type: Date },
   },
   { timestamps: true }

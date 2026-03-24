@@ -30,6 +30,7 @@ import {
 import { sendPayoutEmail } from "../utils/emailService.js";
 import { sendIncentiveEmail } from "../utils/emailService.js";
 import { emitPayoutStatusChanged, emitIncentiveStatusChanged } from "../utils/socketEmitter.js";
+import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 
 const router = Router();
 
@@ -2694,6 +2695,7 @@ router.patch(
       const {
         firstName,
         lastName,
+        currentEmail,
         email,
         phone,
         dob,
@@ -2705,7 +2707,6 @@ router.patch(
       const updateData = {
         firstName,
         lastName,
-        email,
         phone,
         dob,
         address,
@@ -2727,9 +2728,50 @@ router.patch(
       if (!updatedAdmin)
         return res.status(404).json({ message: "Admin not found" });
 
+      let emailChangePending = false;
+      let emailChangeMessage = null;
+
+      if (
+        email &&
+        String(email).toLowerCase() !== String(updatedAdmin.email).toLowerCase()
+      ) {
+        const normalizedEmail = String(email).toLowerCase();
+        const exists = await User.findOne({
+          email: normalizedEmail,
+          _id: { $ne: adminId },
+        });
+        if (exists) {
+          return res.status(409).json({ message: "Email already in use" });
+        }
+
+        const currentAdmin = await User.findById(adminId).select("email firstName");
+        if (
+          currentEmail &&
+          String(currentEmail).toLowerCase().trim() !== String(currentAdmin.email).toLowerCase().trim()
+        ) {
+          return res.status(400).json({ message: "Current email does not match your active email." });
+        }
+        await createEmailChangeRequest({
+          user: currentAdmin,
+          currentEmail: currentAdmin.email,
+          newEmail: normalizedEmail,
+          clientUrl: process.env.CLIENT_URL,
+        });
+        emailChangePending = true;
+        emailChangeMessage =
+          "Email change link sent. Please confirm via the link in your inbox.";
+      }
+
+      const profileObj = updatedAdmin?.toObject ? updatedAdmin.toObject() : updatedAdmin;
+      if (emailChangePending) {
+        profileObj.emailChangePending = true;
+        profileObj.emailChangeMessage = emailChangeMessage;
+      }
+
       res.json({
-        message: "Profile updated successfully",
-        profile: updatedAdmin,
+        message: emailChangePending ? emailChangeMessage : "Profile updated successfully",
+        profile: profileObj,
+        emailChangePending,
       });
     } catch (err) {
       console.error(err);

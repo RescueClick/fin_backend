@@ -4,36 +4,62 @@ import { sendMail } from "./sendMail.js";
 import { COMPANY_NAME, getClientBaseUrl } from "../config/branding.js";
 
 /**
- * Sends confirmation link to new email; stores token on user (email not switched until confirm).
+ * Dual verification flow:
+ * - send one link to current(active) email
+ * - send one link to new email
+ * Email is switched only when both links are verified.
  */
-export async function createEmailChangeRequest({ user, newEmail, clientUrl }) {
+export async function createEmailChangeRequest({ user, newEmail, currentEmail, clientUrl }) {
   if (!user?._id || !newEmail) {
     throw new Error("createEmailChangeRequest: user and newEmail required");
   }
 
-  const token = crypto.randomBytes(32).toString("hex");
+  const tokenOld = crypto.randomBytes(32).toString("hex");
+  const tokenNew = crypto.randomBytes(32).toString("hex");
   const expires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+
+  const activeEmail = String(currentEmail || user.email || "").toLowerCase().trim();
+  const targetEmail = String(newEmail).toLowerCase().trim();
 
   await User.findByIdAndUpdate(user._id, {
     $set: {
-      pendingEmail: String(newEmail).toLowerCase().trim(),
-      emailChangeToken: token,
+      pendingEmail: targetEmail,
+      emailChangeToken: tokenNew, // legacy compatibility
+      emailChangeTokenOld: tokenOld,
+      emailChangeTokenNew: tokenNew,
+      emailChangeOldVerified: false,
+      emailChangeNewVerified: false,
       emailChangeTokenExpires: expires,
     },
   });
 
   const base = String(clientUrl || getClientBaseUrl()).replace(/\/$/, "");
-  const link = `${base}/email-change/confirm?token=${encodeURIComponent(token)}`;
+  const oldLink = `${base}/email-change/confirm?token=${encodeURIComponent(tokenOld)}`;
+  const newLink = `${base}/email-change/confirm?token=${encodeURIComponent(tokenNew)}`;
 
   try {
+    if (activeEmail) {
+      await sendMail({
+        to: activeEmail,
+        subject: `Approve email change request — ${COMPANY_NAME}`,
+        html: `
+          <p>Hi${user.firstName ? ` ${user.firstName}` : ""},</p>
+          <p>We received a request to change your login email to <b>${targetEmail}</b>.</p>
+          <p>Approve this request by clicking below:</p>
+          <p><a href="${oldLink}">${oldLink}</a></p>
+          <p>If you did not request this, ignore this email and secure your account.</p>
+        `,
+      });
+    }
+
     await sendMail({
-      to: newEmail,
-      subject: `Confirm your new email address — ${COMPANY_NAME}`,
+      to: targetEmail,
+      subject: `Verify your new email address — ${COMPANY_NAME}`,
       html: `
         <p>Hi${user.firstName ? ` ${user.firstName}` : ""},</p>
-        <p>Click the link below to confirm this email as your new login email:</p>
-        <p><a href="${link}">${link}</a></p>
-        <p>If you did not request this, ignore this email.</p>
+        <p>Please verify this email as your new login email address:</p>
+        <p><a href="${newLink}">${newLink}</a></p>
+        <p>For security, the change completes only after approval from your current email.</p>
       `,
     });
   } catch (err) {
