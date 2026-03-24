@@ -3419,6 +3419,96 @@ router.get(
   }
 );
 
+const ACTIVE_APPLICATION_STATUSES = [
+  "DRAFT",
+  "SUBMITTED",
+  "DOC_INCOMPLETE",
+  "DOC_COMPLETE",
+  "LOGIN",
+  "DOC_SUBMITTED",
+  "UNDER_REVIEW",
+  "APPROVED",
+  "AGREEMENT",
+];
+
+const DELETE_RETENTION_DAYS = Number(process.env.DELETE_RETENTION_DAYS || 90);
+
+const buildSoftDeletedPhone = () => {
+  const seed = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  return seed.slice(-10);
+};
+
+const evaluatePartnerHardDeleteEligibility = async (partnerId) => {
+  const [
+    activeApplications,
+    pendingPayouts,
+    pendingIncentives,
+    latestApplication,
+    latestPayout,
+    latestIncentive,
+  ] =
+    await Promise.all([
+      Application.countDocuments({
+        partnerId,
+        status: { $in: ACTIVE_APPLICATION_STATUSES },
+      }),
+      Payout.countDocuments({
+        partnerId,
+        payOutStatus: "PENDING",
+      }),
+      Incentive.countDocuments({
+        partnerId,
+        status: "PENDING",
+      }),
+      Application.findOne({
+        partnerId,
+      })
+        .sort({ updatedAt: -1 })
+        .select("updatedAt")
+        .lean(),
+      Payout.findOne({
+        partnerId,
+      })
+        .sort({ updatedAt: -1 })
+        .select("updatedAt")
+        .lean(),
+      Incentive.findOne({
+        partnerId,
+      })
+        .sort({ updatedAt: -1 })
+        .select("updatedAt")
+        .lean(),
+    ]);
+
+  const latestActivityAt = [
+    latestApplication?.updatedAt,
+    latestPayout?.updatedAt,
+    latestIncentive?.updatedAt,
+  ]
+    .filter(Boolean)
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] || null;
+  const retentionEligible = latestActivityAt
+    ? Date.now() - new Date(latestActivityAt).getTime() >=
+      DELETE_RETENTION_DAYS * 24 * 60 * 60 * 1000
+    : true;
+
+  const blockers = [];
+  if (activeApplications > 0) blockers.push("ACTIVE_APPLICATIONS");
+  if (pendingPayouts > 0) blockers.push("PENDING_PAYOUTS");
+  if (pendingIncentives > 0) blockers.push("PENDING_INCENTIVES");
+  if (!retentionEligible) blockers.push("RETENTION_PERIOD_NOT_COMPLETE");
+
+  return {
+    eligible: blockers.length === 0,
+    blockers,
+    activeApplications,
+    pendingPayouts,
+    pendingIncentives,
+    latestActivityAt,
+    retentionDays: DELETE_RETENTION_DAYS,
+  };
+};
+
 // Update delete-account request status (e.g., mark as COMPLETED or REJECTED)
 router.patch(
   "/delete-account-requests/:id",
@@ -3441,6 +3531,49 @@ router.patch(
       }
 
       const previousStatus = requestDoc.status;
+      let deletionOutcome = null;
+
+      if (status === "COMPLETED") {
+        const partner = await User.findById(requestDoc.user);
+        if (!partner) {
+          return res.status(404).json({ message: "Partner not found for this request" });
+        }
+        if (partner.role !== ROLES.PARTNER) {
+          return res.status(400).json({ message: "Delete flow currently supports Partner only" });
+        }
+
+        // Always do soft-delete first (deactivate account access).
+        partner.status = "SUSPENDED";
+
+        const hardDeleteCheck = await evaluatePartnerHardDeleteEligibility(partner._id);
+        if (hardDeleteCheck.eligible) {
+          const deletedTag = `deleted_${partner._id}_${Date.now()}`;
+          partner.firstName = "Deleted";
+          partner.lastName = "User";
+          partner.middleName = "";
+          partner.email = `${deletedTag}@deleted.local`;
+          partner.phone = buildSoftDeletedPhone();
+          partner.address = "";
+          partner.region = "";
+          partner.pincode = "";
+          partner.landmark = "";
+          partner.docs = [];
+          partner.deletedAt = new Date();
+
+          deletionOutcome = {
+            mode: "HARD_DELETE_SCHEDULED",
+            ...hardDeleteCheck,
+          };
+        } else {
+          deletionOutcome = {
+            mode: "SOFT_DELETE_ONLY",
+            ...hardDeleteCheck,
+          };
+        }
+
+        await partner.save();
+      }
+
       requestDoc.status = status;
 
       if (status !== "PENDING") {
@@ -3449,6 +3582,14 @@ router.patch(
       } else {
         requestDoc.processedAt = undefined;
         requestDoc.processedBy = undefined;
+      }
+
+      if (deletionOutcome) {
+        requestDoc.meta = {
+          ...(requestDoc.meta || {}),
+          deletionOutcome,
+          updatedByAdminAt: new Date(),
+        };
       }
 
       await requestDoc.save();
@@ -3478,6 +3619,7 @@ router.patch(
       res.json({
         message: "Delete account request updated successfully",
         request: populated,
+        deletionOutcome,
       });
     } catch (err) {
       console.error("Error updating delete account request:", err);
