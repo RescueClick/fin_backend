@@ -2911,7 +2911,32 @@ router.patch(
       });
     } catch (err) {
       console.error(err);
-      res.status(500).json({ message: err.message });
+      // Convert raw MongoDB duplicate-key (E11000) into a clean UI message.
+      // This prevents exposing "E11000 duplicate key error" to the user.
+      if (err?.code === 11000) {
+        const keyValue = err.keyValue || {};
+        const key =
+          Object.keys(keyValue)[0] ||
+          (err.keyPattern ? Object.keys(err.keyPattern)[0] : null);
+
+        const keyLower = String(key || "").toLowerCase();
+
+        let message = "Already exists";
+        if (keyLower.includes("email")) message = "Email already in use";
+        else if (
+          keyLower.includes("phone") ||
+          keyLower.includes("mobile") ||
+          keyLower.includes("registeredmobile")
+        ) {
+          message = "Mobile number already in use";
+        } else if (keyLower) {
+          message = `${key} already in use`;
+        }
+
+        return res.status(409).json({ message });
+      }
+
+      res.status(500).json({ message: err.message || "Something went wrong" });
     }
   }
 );
