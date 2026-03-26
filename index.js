@@ -25,6 +25,9 @@ import { Server } from "socket.io";
 import { cleanupRejectedApps } from "./src/jobs/cleanupRejectedApps.js";
 import { initializeSocket } from "./src/socket/socketHandler.js";
 import { Notification } from "./src/models/Notification.js";
+import { requestContext } from "./src/middleware/requestContext.js";
+import { notFound } from "./src/middleware/notFound.js";
+import { errorHandler } from "./src/middleware/errorHandler.js";
 
 dotenv.config();
 
@@ -58,6 +61,8 @@ app.use(
   }),
   express.static(path.join(process.cwd(), "uploads"))
 );
+
+app.use(requestContext);
 
 // Configure helmet with CSP that allows inline scripts for test-email page
 app.use(helmet({
@@ -394,6 +399,9 @@ app.post("/api/test-email", async (req, res) => {
     });
   }
 });
+
+app.use(notFound);
+app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 

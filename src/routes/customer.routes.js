@@ -264,6 +264,31 @@ router.post(
       });
     } catch (err) {
       console.error(err);
+      // Convert MongoDB duplicate-key (E11000) into a clean UI message
+      if (err?.code === 11000) {
+        const keyValue = err.keyValue || {};
+        const key =
+          Object.keys(keyValue)[0] ||
+          (err.keyPattern ? Object.keys(err.keyPattern)[0] : null);
+        const keyLower = String(key || "").toLowerCase();
+
+        const field =
+          keyLower.includes("email")
+            ? "email"
+            : keyLower.includes("phone") || keyLower.includes("mobile")
+            ? "phone"
+            : undefined;
+
+        const message =
+          field === "email"
+            ? "Email already in use"
+            : field === "phone"
+            ? "Phone number already in use"
+            : "Already exists";
+
+        return res.status(409).json({ message, field });
+      }
+
       res.status(500).json({ message: "Server error", error: err.message });
     }
   }

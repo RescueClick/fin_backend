@@ -436,13 +436,25 @@ router.post(
         });
       }
 
+      const normalizedEmail = String(email).toLowerCase();
       const exists = await User.findOne({
-        $or: [{ email: email.toLowerCase() }, { phone }],
-      });
+        $or: [{ email: normalizedEmail }, { phone }],
+      })
+        .select("email phone")
+        .lean();
       if (exists) {
-        return res
-          .status(409)
-          .json({ message: "Email or phone already in use" });
+        const emailTaken = String(exists.email || "").toLowerCase() === normalizedEmail;
+        const phoneTaken = String(exists.phone || "") === String(phone || "");
+
+        const field = emailTaken && phoneTaken ? "email,phone" : emailTaken ? "email" : "phone";
+        const message =
+          emailTaken && phoneTaken
+            ? "Email and phone number already in use"
+            : emailTaken
+            ? "Email already in use"
+            : "Phone number already in use";
+
+        return res.status(409).json({ message, field });
       }
 
       const rawPassword =
@@ -921,9 +933,11 @@ router.post(
         existingApp &&
         ["DRAFT", "DOC_INCOMPLETE"].includes(existingApp.status)
       ) {
-        const mergedDocs = mergeApplicationDocs(existingApp.docs || [], newDocs, null);
+        // Partner resubmission should reflect only the docs uploaded in this request.
+        // (Do NOT keep older docs that the partner didn't re-upload.)
+        const docsToSave = newDocs;
         if (applicationStatus !== "DRAFT") {
-          const missingDocs = findMissingMandatoryDocs(loanType, customer, mergedDocs);
+          const missingDocs = findMissingMandatoryDocs(loanType, customer, docsToSave);
           if (missingDocs.length > 0) {
             return res.status(400).json({
               message: "Mandatory documents missing",
@@ -931,7 +945,7 @@ router.post(
             });
           }
         }
-        existingApp.docs = mergedDocs;
+        existingApp.docs = docsToSave;
         existingApp.customer = { ...existingApp.customer, ...customerData };
         existingApp.employmentInfo = employmentInfo;
         existingApp.businessInfo = businessInfo;
@@ -1309,9 +1323,11 @@ router.post(
         existingApp &&
         ["DRAFT", "DOC_INCOMPLETE"].includes(existingApp.status)
       ) {
-        const mergedDocs = mergeApplicationDocs(existingApp.docs || [], newDocs, userId);
+        // Partner resubmission should reflect only the docs uploaded in this request.
+        // (Do NOT keep older docs that the partner didn't re-upload.)
+        const docsToSave = newDocs;
         if (applicationStatus !== "DRAFT") {
-          const missingDocs = findMissingMandatoryDocs(loanType, customer, mergedDocs);
+          const missingDocs = findMissingMandatoryDocs(loanType, customer, docsToSave);
           if (missingDocs.length > 0) {
             return res.status(400).json({
               message: "Mandatory documents missing",
@@ -1319,7 +1335,7 @@ router.post(
             });
           }
         }
-        existingApp.docs = mergedDocs;
+        existingApp.docs = docsToSave;
         existingApp.customer = { ...existingApp.customer, ...customerData };
         existingApp.employmentInfo = employmentInfo;
         existingApp.businessInfo = businessInfo;

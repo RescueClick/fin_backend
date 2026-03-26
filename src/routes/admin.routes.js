@@ -264,7 +264,7 @@ router.post(
   "/create-asm",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
-  async (req, res) => {
+  async (req, res, next) => {
     try {
       const { firstName, lastName, phone, email, dob, region, password } =
         req.body || {};
@@ -273,9 +273,24 @@ router.post(
         return res.status(400).json({ message: "name and email required" });
       }
 
-      const exists = await User.findOne({ email: email.toLowerCase() });
+      const normalizedEmail = String(email).toLowerCase();
+      const normalizedPhone = String(phone).trim();
+      const exists = await User.findOne({
+        $or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
+      })
+        .select("email phone")
+        .lean();
       if (exists) {
-        return res.status(409).json({ message: "Email already in use" });
+        const emailTaken = String(exists.email || "").toLowerCase() === normalizedEmail;
+        const phoneTaken = String(exists.phone || "") === normalizedPhone;
+        const field = emailTaken && phoneTaken ? "email,phone" : emailTaken ? "email" : "phone";
+        const message =
+          emailTaken && phoneTaken
+            ? "Email and phone number already in use"
+            : emailTaken
+            ? "Email already in use"
+            : "Phone number already in use";
+        return res.status(409).json({ message, field });
       }
 
       const rawPassword =
@@ -284,7 +299,7 @@ router.post(
       const asm = await User.create({
         firstName,
         lastName,
-        phone,
+        phone: normalizedPhone,
         email: email.toLowerCase(),
         passwordHash: await argon2.hash(rawPassword),
         role: ROLES.ASM,
@@ -429,7 +444,8 @@ router.post(
       });
     } catch (err) {
       console.error("Create ASM Error:", err);
-      return res.status(500).json({ message: "Internal Server Error" });
+      // Let global error handler convert duplicate-key and other errors properly.
+      return next(err);
     }
   }
 );
@@ -464,10 +480,25 @@ router.post(
         });
       }
 
-      // Check if email already exists
-      const exists = await User.findOne({ email: email.toLowerCase() });
-      if (exists)
-        return res.status(409).json({ message: "Email already in use" });
+      // Check if email or phone already exists
+      const normalizedEmail = String(email).toLowerCase();
+      const exists = await User.findOne({
+        $or: [{ email: normalizedEmail }, { phone }],
+      })
+        .select("email phone")
+        .lean();
+      if (exists) {
+        const emailTaken = String(exists.email || "").toLowerCase() === normalizedEmail;
+        const phoneTaken = String(exists.phone || "") === String(phone || "");
+        const field = emailTaken && phoneTaken ? "email,phone" : emailTaken ? "email" : "phone";
+        const message =
+          emailTaken && phoneTaken
+            ? "Email and phone number already in use"
+            : emailTaken
+            ? "Email already in use"
+            : "Phone number already in use";
+        return res.status(409).json({ message, field });
+      }
 
       // Check if Personal RSM exists and is of correct type
       const personalRsm = await User.findOne({ 
@@ -671,9 +702,23 @@ router.post(
       const asm = await User.findOne({ _id: asmId, role: ROLES.ASM });
       if (!asm) return res.status(404).json({ message: "ASM not found" });
 
-      const exists = await User.findOne({ email: email.toLowerCase() });
+      const normalizedEmail = String(email).toLowerCase();
+      const exists = await User.findOne({
+        $or: [{ email: normalizedEmail }, { phone }],
+      })
+        .select("email phone")
+        .lean();
       if (exists) {
-        return res.status(409).json({ message: "Email already in use" });
+        const emailTaken = String(exists.email || "").toLowerCase() === normalizedEmail;
+        const phoneTaken = String(exists.phone || "") === String(phone || "");
+        const field = emailTaken && phoneTaken ? "email,phone" : emailTaken ? "email" : "phone";
+        const message =
+          emailTaken && phoneTaken
+            ? "Email and phone number already in use"
+            : emailTaken
+            ? "Email already in use"
+            : "Phone number already in use";
+        return res.status(409).json({ message, field });
       }
 
       const rawPassword =

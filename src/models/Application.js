@@ -233,6 +233,9 @@ ApplicationSchema.methods.getRequiredDocTypes = function() {
 ApplicationSchema.methods.areAllDocumentsVerified = function() {
   const requiredDocTypes = this.getRequiredDocTypes();
   const uploadedDocs = this.docs || [];
+
+  // If there are no uploaded documents, do not allow completion.
+  if (!uploadedDocs.length) return false;
   
   // Check if all required documents exist and are verified
   for (const docType of requiredDocTypes) {
@@ -245,8 +248,9 @@ ApplicationSchema.methods.areAllDocumentsVerified = function() {
       return false;
     }
   }
-  
-  return true;
+
+  // ✅ If any SINGLE document is not VERIFIED, block completion.
+  return uploadedDocs.every((doc) => doc?.status === "VERIFIED");
 };
 
 // 🚦 State transition guard

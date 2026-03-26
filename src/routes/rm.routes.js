@@ -70,14 +70,26 @@ router.post(
       }
 
       // Check if email or phone already exists
+      const normalizedEmail = String(email).toLowerCase();
       const exists = await User.findOne({
-        $or: [{ email: email.toLowerCase() }, { phone }],
-      });
+        $or: [{ email: normalizedEmail }, { phone }],
+      })
+        .select("email phone")
+        .lean();
 
       if (exists) {
-        return res
-          .status(409)
-          .json({ message: "Email or phone already in use" });
+        const emailTaken = String(exists.email || "").toLowerCase() === normalizedEmail;
+        const phoneTaken = String(exists.phone || "") === String(phone || "");
+
+        const field = emailTaken && phoneTaken ? "email,phone" : emailTaken ? "email" : "phone";
+        const message =
+          emailTaken && phoneTaken
+            ? "Email and phone number already in use"
+            : emailTaken
+            ? "Email already in use"
+            : "Phone number already in use";
+
+        return res.status(409).json({ message, field });
       }
 
       const rawPassword =
@@ -217,6 +229,30 @@ router.post(
       });
     } catch (err) {
       console.error("Error creating partner:", err);
+      if (err?.code === 11000) {
+        const keyValue = err.keyValue || {};
+        const key =
+          Object.keys(keyValue)[0] ||
+          (err.keyPattern ? Object.keys(err.keyPattern)[0] : null);
+        const keyLower = String(key || "").toLowerCase();
+
+        const field =
+          keyLower.includes("email")
+            ? "email"
+            : keyLower.includes("phone") || keyLower.includes("mobile")
+            ? "phone"
+            : undefined;
+
+        const message =
+          field === "email"
+            ? "Email already in use"
+            : field === "phone"
+            ? "Phone number already in use"
+            : "Already exists";
+
+        return res.status(409).json({ message, field });
+      }
+
       res.status(500).json({ message: "Server error", error: err.message });
     }
   }
@@ -784,7 +820,7 @@ router.post(
         const requiredDocTypes = app.getRequiredDocTypes();
         const uploadedDocs = app.docs || [];
         const missingDocs = [];
-        const unverifiedDocs = [];
+        const unverifiedDocsSet = new Set();
         
         // Check for missing or unverified documents
         for (const docType of requiredDocTypes) {
@@ -795,9 +831,19 @@ router.post(
           if (!doc) {
             missingDocs.push(docType);
           } else if (doc.status !== "VERIFIED") {
-            unverifiedDocs.push(`${docType} (${doc.status})`);
+            unverifiedDocsSet.add(`${docType} (${doc.status})`);
           }
         }
+
+        // ✅ If any SINGLE uploaded document is not VERIFIED, DOC_COMPLETE must be blocked.
+        for (const doc of uploadedDocs) {
+          if (doc?.status !== "VERIFIED") {
+            const docType = doc?.docType || "UNKNOWN";
+            unverifiedDocsSet.add(`${docType} (${doc.status})`);
+          }
+        }
+
+        const unverifiedDocs = Array.from(unverifiedDocsSet);
         
         if (missingDocs.length > 0 || unverifiedDocs.length > 0) {
           let errorMessage = "Cannot set DOC_COMPLETE status. ";
@@ -807,7 +853,7 @@ router.post(
           if (unverifiedDocs.length > 0) {
             errorMessage += `Unverified documents: ${unverifiedDocs.join(", ")}. `;
           }
-          errorMessage += "Please verify all required documents first or change status to DOC_INCOMPLETE.";
+          errorMessage += "Please verify all documents first (no PENDING/UPDATED/REJECTED allowed) or change status to DOC_INCOMPLETE.";
           
           return res.status(400).json({
             message: errorMessage,
@@ -879,23 +925,6 @@ router.post(
 
       // Transition
       app.transition(to, req.user.sub, note);
-
-      // ✅ Auto-update document statuses based on application status change
-      const now = new Date();
-      if (to === "DOC_COMPLETE") {
-        // When moving to DOC_COMPLETE, verify all PENDING/UPDATED documents
-        app.docs.forEach((doc) => {
-          if (doc.status === "PENDING" || doc.status === "UPDATED") {
-            doc.status = "VERIFIED";
-            doc.verifiedAt = now;
-            doc.verifiedBy = req.user.sub;
-            doc.updatedAt = now;
-            // Clear rejection info if any
-            doc.rejectedAt = null;
-            doc.rejectedBy = null;
-          }
-        });
-      }
 
       // ✅ Save application with rsmId and asmId
       await app.save();
@@ -2060,94 +2089,11 @@ router.put(
         app.docs[docIndex].updatedAt = now;
       }
       
-      // If document is rejected, update application status to DOC_INCOMPLETE
-      if (status === "REJECTED" && app.status !== "DOC_INCOMPLETE") {
-        try {
-          app.transition("DOC_INCOMPLETE", req.user.sub, 
-            `Document ${decodedDocType} marked as REJECTED. ${remarks || ""}`);
-        } catch (transitionErr) {
-          // If transition fails, still update the document but log the error
-          console.error("Transition error (non-fatal):", transitionErr.message);
-          // Manually set status if transition not allowed
-          const oldStatus = app.status;
-          if (oldStatus === "DRAFT" || oldStatus === "SUBMITTED" || oldStatus === "DOC_SUBMITTED" || oldStatus === "UNDER_REVIEW") {
-            app.status = "DOC_INCOMPLETE";
-            if (!app.stageHistory) app.stageHistory = [];
-            app.stageHistory.push({
-              from: oldStatus,
-              to: "DOC_INCOMPLETE",
-              by: req.user.sub,
-              at: new Date(),
-              note: `Document ${decodedDocType} marked as REJECTED. ${remarks || ""}`
-            });
-          }
-        }
-      }
-
       // Ensure uploadedAt exists
       if (!app.docs[docIndex].uploadedAt) {
         app.docs[docIndex].uploadedAt = now;
       }
 
-      // If all documents are verified and application is DOC_INCOMPLETE, check if can move to DOC_COMPLETE
-      // ✅ Only allow if application hasn't been transferred to RSM yet
-      if (status === "VERIFIED" && app.status === "DOC_INCOMPLETE" && !app.rsmId) {
-        const allDocsVerified = app.docs.every(doc => 
-          doc.status === "VERIFIED"
-        );
-        
-        if (allDocsVerified && app.docs.length > 0) {
-          try {
-            // Transition to DOC_COMPLETE
-            app.transition("DOC_COMPLETE", req.user.sub, 
-              "All documents have been verified");
-            
-            // ✅ AUTO-ROUTE TO RSM based on loanType + RM's RSM mapping
-            // This ensures rsmId is ALWAYS assigned when DOC_COMPLETE is set
-            if (!app.rsmId) {
-              const rm = await User.findById(req.user.sub).select("personalRsmId businessHomeRsmId");
-              if (rm) {
-                let targetRsmId = null;
-                let targetAsmId = null;
-
-                // Determine which RSM should handle this loan based on loanType
-                if (app.loanType === "PERSONAL") {
-                  targetRsmId = rm.personalRsmId;
-                  console.log(`📋 Auto-routing: Loan Type PERSONAL → Personal Loan RSM: ${targetRsmId}`);
-                } else if (
-                  app.loanType === "BUSINESS" ||
-                  app.loanType === "HOME_LOAN_SALARIED" ||
-                  app.loanType === "HOME_LOAN_SELF_EMPLOYED"
-                ) {
-                  targetRsmId = rm.businessHomeRsmId;
-                  console.log(`📋 Auto-routing: Loan Type ${app.loanType} → Business & Home Loan RSM: ${targetRsmId}`);
-                }
-
-                if (targetRsmId) {
-                  // Fetch RSM to get ASM link
-                  const rsm = await User.findById(targetRsmId).select("asmId rsmType firstName lastName employeeId");
-                  if (rsm) {
-                    targetAsmId = rsm.asmId;
-                    
-                    // Assign RSM and ASM to application
-                    app.rsmId = targetRsmId;
-                    app.asmId = targetAsmId;
-                    
-                    console.log(`✅ Auto-routed application ${app.appNo} (${app.loanType}) to RSM ${rsm.firstName} ${rsm.lastName} (${rsm.employeeId}, Type: ${rsm.rsmType}) - ASM: ${targetAsmId}`);
-                  } else {
-                    console.error(`❌ RSM ${targetRsmId} not found for auto-routing`);
-                  }
-                } else {
-                  console.error(`❌ RM ${req.user.sub} is not assigned to an RSM for loan type ${app.loanType}`);
-                }
-              }
-            }
-          } catch (transitionErr) {
-            console.error("Transition to DOC_COMPLETE error:", transitionErr.message);
-          }
-        }
-      }
-      
       // When RM marks document as UPDATED, it means they acknowledge the re-upload
       // This will be changed to VERIFIED or REJECTED after RM reviews
       // When RM verifies an UPDATED document, it becomes VERIFIED
@@ -2214,7 +2160,7 @@ router.put(
         message: "Document status updated successfully",
         document: app.docs[docIndex],
         applicationStatus: app.status,
-        allDocumentsVerified: app.docs.every(doc => doc.status === "VERIFIED"),
+        allDocumentsVerified: app.areAllDocumentsVerified(),
       });
 
       // Email is intentionally NOT sent for document status changes (too noisy).
@@ -2301,86 +2247,6 @@ router.post(
         app.docs[docIndex].remarks = remarks || "";
       }
       
-      if (status === "REJECTED" && app.status !== "DOC_INCOMPLETE") {
-        try {
-          app.transition("DOC_INCOMPLETE", req.user.sub, 
-            `Document ${decodedDocType} marked as REJECTED. ${remarks || ""}`);
-        } catch (transitionErr) {
-          console.error("Transition error (non-fatal):", transitionErr.message);
-          const oldStatus = app.status;
-          if (oldStatus === "DRAFT" || oldStatus === "SUBMITTED" || oldStatus === "DOC_SUBMITTED" || oldStatus === "UNDER_REVIEW") {
-            app.status = "DOC_INCOMPLETE";
-            if (!app.stageHistory) app.stageHistory = [];
-            app.stageHistory.push({
-              from: oldStatus,
-              to: "DOC_INCOMPLETE",
-              by: req.user.sub,
-              at: new Date(),
-              note: `Document ${decodedDocType} marked as REJECTED. ${remarks || ""}`
-            });
-          }
-        }
-      }
-
-      // ✅ If all documents are verified and application is DOC_INCOMPLETE, check if can move to DOC_COMPLETE
-      // ✅ Only allow if application hasn't been transferred to RSM yet
-      if (status === "VERIFIED" && app.status === "DOC_INCOMPLETE" && !app.rsmId) {
-        const allDocsVerified = app.docs.every(doc => 
-          doc.status === "VERIFIED"
-        );
-        
-        if (allDocsVerified && app.docs.length > 0) {
-          try {
-            // Transition to DOC_COMPLETE
-            app.transition("DOC_COMPLETE", req.user.sub, 
-              "All documents have been verified");
-            
-            // ✅ AUTO-ROUTE TO RSM based on loanType + RM's RSM mapping
-            // This ensures rsmId is ALWAYS assigned when DOC_COMPLETE is set
-            if (!app.rsmId) {
-              const rm = await User.findById(req.user.sub).select("personalRsmId businessHomeRsmId");
-              if (rm) {
-                let targetRsmId = null;
-                let targetAsmId = null;
-
-                // Determine which RSM should handle this loan based on loanType
-                if (app.loanType === "PERSONAL") {
-                  targetRsmId = rm.personalRsmId;
-                  console.log(`📋 Auto-routing: Loan Type PERSONAL → Personal Loan RSM: ${targetRsmId}`);
-                } else if (
-                  app.loanType === "BUSINESS" ||
-                  app.loanType === "HOME_LOAN_SALARIED" ||
-                  app.loanType === "HOME_LOAN_SELF_EMPLOYED"
-                ) {
-                  targetRsmId = rm.businessHomeRsmId;
-                  console.log(`📋 Auto-routing: Loan Type ${app.loanType} → Business & Home Loan RSM: ${targetRsmId}`);
-                }
-
-                if (targetRsmId) {
-                  // Fetch RSM to get ASM link
-                  const rsm = await User.findById(targetRsmId).select("asmId rsmType firstName lastName employeeId");
-                  if (rsm) {
-                    targetAsmId = rsm.asmId;
-                    
-                    // Assign RSM and ASM to application
-                    app.rsmId = targetRsmId;
-                    app.asmId = targetAsmId;
-                    
-                    console.log(`✅ Auto-routed application ${app.appNo} (${app.loanType}) to RSM ${rsm.firstName} ${rsm.lastName} (${rsm.employeeId}, Type: ${rsm.rsmType}) - ASM: ${targetAsmId}`);
-                  } else {
-                    console.error(`❌ RSM ${targetRsmId} not found for auto-routing`);
-                  }
-                } else {
-                  console.error(`❌ RM ${req.user.sub} is not assigned to an RSM for loan type ${app.loanType}`);
-                }
-              }
-            }
-          } catch (transitionErr) {
-            console.error("Transition to DOC_COMPLETE error:", transitionErr.message);
-          }
-        }
-      }
-
       if (!app.docs[docIndex].uploadedAt) {
         app.docs[docIndex].uploadedAt = new Date();
       }

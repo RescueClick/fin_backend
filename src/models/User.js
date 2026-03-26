@@ -121,6 +121,36 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+userSchema.set("toJSON", {
+  virtuals: true,
+  versionKey: false,
+  transform(_doc, ret) {
+    delete ret.passwordHash;
+    delete ret.resetToken;
+    delete ret.resetTokenExpiry;
+    delete ret.emailChangeToken;
+    delete ret.emailChangeTokenOld;
+    delete ret.emailChangeTokenNew;
+    delete ret.emailChangeTokenExpires;
+    return ret;
+  },
+});
+
+userSchema.set("toObject", {
+  virtuals: true,
+  versionKey: false,
+  transform(_doc, ret) {
+    delete ret.passwordHash;
+    delete ret.resetToken;
+    delete ret.resetTokenExpiry;
+    delete ret.emailChangeToken;
+    delete ret.emailChangeTokenOld;
+    delete ret.emailChangeTokenNew;
+    delete ret.emailChangeTokenExpires;
+    return ret;
+  },
+});
+
 // Virtual helpers
 userSchema.virtual("isAdmin").get(function () {
   return this.role === ROLES.SUPER_ADMIN;

@@ -9,95 +9,84 @@ import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { getClientBaseUrl } from "../config/branding.js";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
+import { asyncHandler } from "../middleware/asyncHandler.js";
+import { ApiError } from "../utils/apiError.js";
+import { sendSuccess } from "../utils/apiResponse.js";
 
 const router = Router();
 
-router.post("/create-admin", async (req, res) => {
-  try {
-    const { firstName, lastName, phone, email, password } = req.body;
-
-    // Check if admin already exists
-    const existingAdmin = await User.findOne({ email: email.toLowerCase() });
-    if (existingAdmin) {
-      return res
-        .status(400)
-        .json({ message: "Admin already exists with this email" });
+router.post(
+  "/create-admin",
+  asyncHandler(async (req, res) => {
+    const { firstName, lastName, phone, email, password } = req.body || {};
+    if (!firstName || !lastName || !phone || !email || !password) {
+      throw new ApiError(400, "firstName, lastName, phone, email, password are required", {
+        code: "VALIDATION_ERROR",
+      });
     }
 
-    // Hash password with argon2
-    const passwordHash = await argon2.hash(password);
+    const emailLc = String(email).toLowerCase();
+    const existingAdmin = await User.findOne({ email: emailLc });
+    if (existingAdmin) {
+      throw new ApiError(409, "Admin already exists with this email", { code: "DUPLICATE_EMAIL" });
+    }
 
-    const admin = new User({
+    const passwordHash = await argon2.hash(password);
+    const admin = await User.create({
       firstName,
       lastName,
       phone,
-      email: email.toLowerCase(),
-      passwordHash, // ✅ match login field
-      role: ROLES.SUPER_ADMIN, // ✅ use constant if defined
-      status: "ACTIVE", // ✅ match login query
+      email: emailLc,
+      passwordHash,
+      role: ROLES.SUPER_ADMIN,
+      status: "ACTIVE",
     });
 
-    await admin.save();
-
-    res.status(201).json({
+    return sendSuccess(res, {
+      statusCode: 201,
       message: "Admin created successfully",
-      admin: {
-        id: admin._id,
-        firstName: admin.firstName,
-        lastName: admin.lastName,
-        phone: admin.phone,
-        email: admin.email,
-        role: admin.role,
-        status: admin.status,
+      data: {
+        admin: {
+          id: admin._id,
+          firstName: admin.firstName,
+          lastName: admin.lastName,
+          phone: admin.phone,
+          email: admin.email,
+          role: admin.role,
+          status: admin.status,
+        },
       },
     });
-  } catch (error) {
-    console.error("Error creating admin:", error);
-    res.status(500).json({ message: "Internal server error" });
-  }
-});
+  })
+);
 
 /**
  * LOGIN  (Admin, ASM, RM, Partner)
  */
-router.post("/login", async (req, res) => {
-  try {
+router.post(
+  "/login",
+  asyncHandler(async (req, res) => {
     const { email, password } = req.body || {};
     if (!email || !password) {
-      return res.status(400).json({ message: "email and password required" });
+      throw new ApiError(400, "email and password required", { code: "VALIDATION_ERROR" });
     }
 
-    // Always fetch by email; passwordHash is the stored argon2 hash
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) {
-      return res.status(401).json({ message: "Invalid credentials" });
-    }
+    const user = await User.findOne({ email: String(email).toLowerCase() });
+    if (!user) throw new ApiError(401, "Invalid credentials", { code: "AUTH_INVALID_CREDENTIALS" });
 
-    // explicitly block suspended users
     if (user.status === "SUSPENDED") {
-      return res
-        .status(403)
-        .json({ message: "Your account has been suspended. Contact admin." });
+      throw new ApiError(403, "Your account has been suspended. Contact admin.", { code: "AUTH_SUSPENDED" });
     }
-
-    // only ACTIVE users can proceed
     if (user.status !== "ACTIVE") {
-      return res
-        .status(403)
-        .json({ message: `Account is not active (status: ${user.status}).` });
+      throw new ApiError(403, `Account is not active (status: ${user.status}).`, { code: "AUTH_INACTIVE" });
     }
-
     if (!user.passwordHash) {
-      return res
-        .status(500)
-        .json({ message: "Password not set for this account" });
+      throw new ApiError(500, "Password not set for this account", { code: "AUTH_PASSWORD_NOT_SET" });
     }
 
-    // verify the argon2 hash with the plain password received
     const ok = await argon2.verify(user.passwordHash, password);
-    if (!ok) return res.status(401).json({ message: "Invalid credentials" });
+    if (!ok) throw new ApiError(401, "Invalid credentials", { code: "AUTH_INVALID_CREDENTIALS" });
 
-    // issue token
     const token = signAccessToken({
       sub: String(user._id),
       role: user.role,
@@ -105,27 +94,28 @@ router.post("/login", async (req, res) => {
       asmId: user.asmId ? String(user.asmId) : undefined,
     });
 
-    return res.json({
-      token,
-      user: {
-        id: user._id,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: user.email,
-        role: user.role,
-        asmCode: user.asmCode,
-        status: user.status,
-        rmCode: user.rmCode,
-        asmId: user.asmId,
-        partnerCode: user.partnerCode,
-        employeeId: user.employeeId,
+    return sendSuccess(res, {
+      message: "Login successful",
+      data: {
+        token,
+        user: {
+          id: user._id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email,
+          role: user.role,
+          status: user.status,
+          employeeId: user.employeeId,
+          asmId: user.asmId,
+          rmId: user.rmId,
+          asmCode: user.asmCode,
+          rmCode: user.rmCode,
+          partnerCode: user.partnerCode,
+        },
       },
     });
-  } catch (err) {
-    console.error("Login error:", err);
-    return res.status(500).json({ message: "Internal server error" });
-  }
-});
+  })
+);
 
 // POST /admin/login-as/:userId
 router.post(

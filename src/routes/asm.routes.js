@@ -55,9 +55,23 @@ router.post(
         });
       }
 
-      const exists = await User.findOne({ email: email.toLowerCase() });
+      const normalizedEmail = String(email).toLowerCase();
+      const exists = await User.findOne({
+        $or: [{ email: normalizedEmail }, { phone }],
+      })
+        .select("email phone")
+        .lean();
       if (exists) {
-        return res.status(409).json({ message: "Email already in use" });
+        const emailTaken = String(exists.email || "").toLowerCase() === normalizedEmail;
+        const phoneTaken = String(exists.phone || "") === String(phone || "");
+        const field = emailTaken && phoneTaken ? "email,phone" : emailTaken ? "email" : "phone";
+        const message =
+          emailTaken && phoneTaken
+            ? "Email and phone number already in use"
+            : emailTaken
+            ? "Email already in use"
+            : "Phone number already in use";
+        return res.status(409).json({ message, field });
       }
 
       const rawPassword =
