@@ -1680,6 +1680,12 @@ router.post(
         return res.status(400).json({ message: "Both ASM IDs are required" });
       }
 
+      // 0️⃣ Reassign all RSMs from old ASM to new ASM
+      await User.updateMany(
+        { role: ROLES.RSM, asmId: oldAsmId },
+        { $set: { asmId: newAsmId } }
+      );
+
       // 1️⃣ Reassign all RMs from old ASM to new ASM
       const rms = await User.find({ role: ROLES.RM, asmId: oldAsmId }, "_id");
       const rmIds = rms.map((rm) => rm._id);
@@ -2091,7 +2097,7 @@ router.post(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const { rmId } = req.body;
+      const { rmId, newRmId } = req.body;
 
       if (!rmId) {
         return res.status(400).json({ message: "rmId is required" });
@@ -2104,12 +2110,28 @@ router.post(
       }
 
       // Find another active RM under the same RSM(s) or ASM
+      // If admin provided newRmId, validate and use it.
       let newRm = null;
+      if (newRmId) {
+        newRm = await User.findOne({
+          _id: newRmId,
+          role: ROLES.RM,
+          status: "ACTIVE",
+        });
+
+        if (!newRm) {
+          return res.status(404).json({ message: "New RM not found" });
+        }
+        if (String(newRm._id) === String(rmId)) {
+          return res.status(400).json({ message: "newRmId must differ from rmId" });
+        }
+      }
+
       const rsmIds = [];
       if (oldRm.personalRsmId) rsmIds.push(oldRm.personalRsmId);
       if (oldRm.businessHomeRsmId) rsmIds.push(oldRm.businessHomeRsmId);
 
-      if (rsmIds.length > 0) {
+      if (!newRm && rsmIds.length > 0) {
         // Find another active RM under the same RSM(s)
         newRm = await User.findOne({
           role: ROLES.RM,
@@ -2309,53 +2331,169 @@ router.post(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const { rsmId } = req.body;
+      const { rsmId, newRsmId } = req.body;
 
-      if (!rsmId) {
-        return res.status(400).json({ message: "rsmId is required" });
+      // ==============================
+      // ✅ 1. VALIDATION
+      // ==============================
+      if (!rsmId || !newRsmId) {
+        return res.status(400).json({
+          message: "rsmId and newRsmId are required",
+        });
       }
 
+      if (rsmId === newRsmId) {
+        return res.status(400).json({
+          message: "Cannot assign to same RSM",
+        });
+      }
+
+      // ==============================
+      // ✅ 2. FETCH USERS
+      // ==============================
+      const oldRsm = await User.findOne({
+        _id: rsmId,
+        role: ROLES.RSM,
+      });
+
+      if (!oldRsm) {
+        return res.status(404).json({ message: "RSM not found" });
+      }
+
+      const newRsm = await User.findOne({
+        _id: newRsmId,
+        role: ROLES.RSM,
+        status: "ACTIVE",
+      });
+
+      if (!newRsm) {
+        return res.status(400).json({
+          message: "Selected RSM is not valid or inactive",
+        });
+      }
+
+      // ==============================
+      // 🔥 3. TYPE SAFETY CHECK
+      // ==============================
+      if (newRsm.rsmType !== oldRsm.rsmType) {
+        return res.status(400).json({
+          message: "RSM type must match",
+        });
+      }
+
+      // ==============================
+      // 🔁 4. MOVE RMs
+      // ==============================
+      let rmResult;
+
+      if (oldRsm.rsmType === "PERSONAL") {
+        rmResult = await User.updateMany(
+          { role: ROLES.RM, personalRsmId: oldRsm._id },
+          { $set: { personalRsmId: newRsm._id } }
+        );
+      } else {
+        rmResult = await User.updateMany(
+          { role: ROLES.RM, businessHomeRsmId: oldRsm._id },
+          { $set: { businessHomeRsmId: newRsm._id } }
+        );
+      }
+
+      // ==============================
+      // 🔁 5. MOVE PARTNERS
+      // ==============================
+      const partnerResult = await Partner.updateMany(
+        { rsmId: oldRsm._id },
+        { $set: { rsmId: newRsm._id } }
+      );
+
+      // ==============================
+      // 🔁 6. MOVE CUSTOMERS
+      // ==============================
+      const customerResult = await Customer.updateMany(
+        { rsmId: oldRsm._id },
+        { $set: { rsmId: newRsm._id } }
+      );
+
+      // ==============================
+      // 🔁 7. MOVE APPLICATIONS
+      // ==============================
+      const applicationResult = await Application.updateMany(
+        { rsmId: oldRsm._id },
+        { $set: { rsmId: newRsm._id } }
+      );
+
+      // ==============================
+      // ❌ 8. DEACTIVATE OLD RSM
+      // ==============================
       const rsm = await User.findOneAndUpdate(
         { _id: rsmId, role: ROLES.RSM },
         { status: "SUSPENDED" },
         { new: true }
       );
 
-      if (!rsm) {
-        return res.status(404).json({ message: "RSM not found" });
-      }
-
-      // 📧 Send deactivation email
+      // ==============================
+      // 📧 9. EMAIL OLD RSM
+      // ==============================
       try {
         await sendMail({
-          to: rsm.email,
+          to: oldRsm.email,
           subject: "Your RSM Account Has Been Deactivated",
           html: `
-            <p>Dear ${rsm.firstName} ${rsm.lastName},</p>
-            <p>Your RSM account has been <b>deactivated</b> by the administrator.</p>
-            <p><b>Employee ID:</b> ${rsm.employeeId || "-"}<br/>
-            <b>RSM Type:</b> ${rsm.rsmType || "-"}</p>
-            <p>If you believe this action was incorrect, please contact support.</p>
+            <p>Dear ${oldRsm.firstName} ${oldRsm.lastName},</p>
+            <p>Your RSM account has been <b>deactivated</b>.</p>
+            <p><b>Employee ID:</b> ${oldRsm.employeeId || "-"}</p>
             <br/>
             <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
-        console.log("📧 RSM deactivation mail sent to:", rsm.email);
-      } catch (mailErr) {
-        console.error("❌ Failed to send RSM deactivation email:", mailErr.message);
+      } catch (err) {
+        console.error("❌ Mail error (old RSM):", err.message);
       }
 
+      // ==============================
+      // 📧 10. EMAIL NEW RSM
+      // ==============================
+      try {
+        await sendMail({
+          to: newRsm.email,
+          subject: "New RM Responsibilities Assigned",
+          html: `
+            <p>Dear ${newRsm.firstName} ${newRsm.lastName},</p>
+            <p>You have been assigned new responsibilities.</p>
+            <ul>
+              <li>RMs: ${rmResult.modifiedCount}</li>
+              <li>Partners: ${partnerResult.modifiedCount}</li>
+              <li>Customers: ${customerResult.modifiedCount}</li>
+              <li>Applications: ${applicationResult.modifiedCount}</li>
+            </ul>
+            <br/>
+            <p>Regards,<br/>DhanSource Capital</p>
+          `,
+        });
+      } catch (err) {
+        console.error("❌ Mail error (new RSM):", err.message);
+      }
+
+      // ==============================
+      // ✅ 11. FINAL RESPONSE
+      // ==============================
       res.json({
-        message: "RSM deactivated successfully and notified via email",
+        message: "RSM deactivated and all data reassigned successfully",
         rsm,
+        reassigned: {
+          rms: rmResult.modifiedCount,
+          partners: partnerResult.modifiedCount,
+          customers: customerResult.modifiedCount,
+          applications: applicationResult.modifiedCount,
+        },
+        newRsmId: newRsm._id,
       });
     } catch (error) {
-      console.error("Error in /rsm/deactivate:", error);
+      console.error("❌ Error in /rsm/deactivate:", error);
       res.status(500).json({ message: error.message });
     }
   }
 );
-
 // Permanently delete an RM (only after deactivation)
 router.delete(
   "/rm/:rmId",
