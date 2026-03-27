@@ -8,7 +8,9 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "node index.js"
+    "dev": "node index.js",
+    "cleanup:dupes:dry": "node src/scripts/cleanupDuplicateApplications.js",
+    "cleanup:dupes:apply": "node src/scripts/cleanupDuplicateApplications.js --apply"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.948.0",

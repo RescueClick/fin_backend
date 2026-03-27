@@ -24,6 +24,19 @@ import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendApplicationStatusEmail, sendDocumentStatusEmail } from "../utils/emailService.js";
 import axios from "axios";
 import { emitDocumentStatusChanged, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
+import {
+  buildReassignableApplicationFilter,
+  buildReassignmentAudit,
+  REASSIGNABLE_PAYOUT_STATUS,
+  REASSIGNABLE_INCENTIVE_STATUS,
+  LOCKED_PAYOUT_STATUS,
+  LOCKED_INCENTIVE_STATUS,
+} from "../utils/reassignmentPolicy.js";
+import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
+import {
+  deriveCurrentTargetContext,
+  rebalanceHierarchyTargetsReplace,
+} from "../utils/targetRebalanceService.js";
 
 const router = Router();
 
@@ -168,55 +181,19 @@ router.post(
         );
       }
 
-      // 🔹 STEP 2: Redistribute RM target among all Partners
+      // Auto-rebalance hierarchy for current period if targets already exist
       const now = new Date();
-      const month = now.getMonth() + 1; // current month
+      const month = now.getMonth() + 1;
       const year = now.getFullYear();
-
-      const rmTargetDoc = await Target.findOne({
-        assignedTo: req.user.sub,
-        role: ROLES.RM,
-        month,
-        year,
-      });
-
-      if (rmTargetDoc) {
-        // Get all Partners under this RM
-        const partners = await User.find({
-          role: ROLES.PARTNER,
-          rmId: req.user.sub,
-        }).lean();
-
-        const rawTargetValue = Number(rmTargetDoc.targetValue);
-        const partnerCount = partners.length;
-
-        // Avoid NaN/Infinity: only redistribute when we have a valid, positive target and at least one partner
-        if (partnerCount > 0 && Number.isFinite(rawTargetValue) && rawTargetValue > 0) {
-          const perPartnerTarget = rawTargetValue / partnerCount;
-
-          for (let p of partners) {
-            let pT = await Target.findOne({
-              assignedTo: p._id,
-              role: ROLES.PARTNER,
-              month,
-              year,
-            });
-
-            if (pT) {
-              pT.targetValue = perPartnerTarget; // redistribute equally
-              await pT.save();
-            } else {
-              pT = await Target.create({
-                assignedBy: rmTargetDoc.assignedBy,
-                assignedTo: p._id,
-                role: ROLES.PARTNER,
-                month,
-                year,
-                targetValue: perPartnerTarget,
-              });
-            }
-          }
-        }
+      const context = await deriveCurrentTargetContext(month, year);
+      if (Number(context.totalCompanyTarget) > 0) {
+        await rebalanceHierarchyTargetsReplace({
+          month,
+          year,
+          totalCompanyTarget: context.totalCompanyTarget,
+          partnerFileCountTarget: context.partnerFileCountTarget,
+          assignedBy: context.assignedBy || req.user.sub,
+        });
       }
 
       res.status(201).json({
@@ -1037,33 +1014,107 @@ router.post(
 );
 
 router.post(
-  "/deactivate-partner",
+  "/partner-deactivate",
   auth,
   requireRole(ROLES.RM),
   async (req, res) => {
+    const session = await mongoose.startSession();
     try {
-      const { oldPartnerId } = req.body;
+      const { oldPartnerId, newPartnerId } = req.body;
+      const rmId = req.user.sub;
 
       if (!oldPartnerId) {
         return res.status(400).json({ message: "oldPartnerId is required" });
       }
 
       const oldId = new mongoose.Types.ObjectId(oldPartnerId);
+      let reassignedCustomers = 0;
+      let reassignedApplications = 0;
+      let reassignedPayouts = 0;
+      let reassignedIncentives = 0;
+      let preservedPayoutsDone = 0;
+      let preservedIncentivesPaid = 0;
+      let deactivatedPartner = null;
+      let reassignmentAudit = null;
 
-      // 1️⃣ Validate old partner
-      const oldPartner = await User.findById(oldId);
-      if (!oldPartner || oldPartner.role !== ROLES.PARTNER) {
-        return res
-          .status(404)
-          .json({ message: "Old partner not found or not a partner" });
+      await session.withTransaction(async () => {
+        // 1️⃣ Validate old partner
+        const oldPartner = await User.findById(oldId).session(session);
+        if (!oldPartner || oldPartner.role !== ROLES.PARTNER) {
+          throw new Error("Old partner not found or not a partner");
+        }
+        if (String(oldPartner.rmId) !== String(rmId)) {
+          throw new Error("Partner not under your management");
+        }
+
+        if (newPartnerId) {
+          const newId = new mongoose.Types.ObjectId(newPartnerId);
+          const newPartner = await User.findById(newId).session(session);
+          if (
+            !newPartner ||
+            newPartner.role !== ROLES.PARTNER ||
+            String(newPartner.rmId) !== String(rmId) ||
+            String(newPartner._id) === String(oldPartner._id)
+          ) {
+            throw new Error("Valid newPartnerId under same RM is required");
+          }
+
+          const customerUpdate = await User.updateMany(
+            { role: ROLES.CUSTOMER, partnerId: oldId },
+            { $set: { partnerId: newId } },
+            { session }
+          );
+          reassignedCustomers = customerUpdate.modifiedCount || 0;
+
+          const appUpdate = await Application.updateMany(
+            buildReassignableApplicationFilter({ partnerId: oldId }),
+            { $set: { partnerId: newId } },
+            { session }
+          );
+          reassignedApplications = appUpdate.modifiedCount || 0;
+
+          const payoutUpdate = await Payout.updateMany(
+            { partnerId: oldId, payOutStatus: REASSIGNABLE_PAYOUT_STATUS },
+            { $set: { partnerId: newId } },
+            { session }
+          );
+          reassignedPayouts = payoutUpdate.modifiedCount || 0;
+
+          const incentiveUpdate = await Incentive.updateMany(
+            { partnerId: oldId, status: REASSIGNABLE_INCENTIVE_STATUS },
+            { $set: { partnerId: newId } },
+            { session }
+          );
+          reassignedIncentives = incentiveUpdate.modifiedCount || 0;
+        }
+
+        deactivatedPartner = await User.findByIdAndUpdate(
+          oldId,
+          { $set: { status: "SUSPENDED", updatedAt: new Date() } },
+          { new: true, session }
+        );
+
+        preservedPayoutsDone = await Payout.countDocuments({
+          partnerId: oldId,
+          payOutStatus: LOCKED_PAYOUT_STATUS,
+        }).session(session);
+        preservedIncentivesPaid = await Incentive.countDocuments({
+          partnerId: oldId,
+          status: LOCKED_INCENTIVE_STATUS,
+        }).session(session);
+
+        reassignmentAudit = buildReassignmentAudit({
+          changedBy: req.user.sub,
+          oldUserId: oldPartnerId,
+          newUserId: newPartnerId || null,
+          action: "rm_partner_deactivate",
+        });
+        await persistReassignmentAudit(reassignmentAudit, req, session);
+      });
+
+      if (!deactivatedPartner) {
+        return res.status(404).json({ message: "Old partner not found or not a partner" });
       }
-
-      // 2️⃣ Deactivate old partner
-      const deactivatedPartner = await User.findByIdAndUpdate(
-        oldId,
-        { $set: { status: "SUSPENDED", updatedAt: new Date() } },
-        { new: true }
-      );
       console.log(`Partner ${oldId} deactivated`);
 
       // 3️⃣ Send email
@@ -1083,33 +1134,41 @@ router.post(
       }
 
       return res.json({
-        message: `Partner ${deactivatedPartner.firstName} ${deactivatedPartner.lastName} has been deactivated.`,
-        deactivatedPartner: {
-          id: deactivatedPartner._id,
-          name: `${deactivatedPartner.firstName} ${deactivatedPartner.lastName}`,
-          email: deactivatedPartner.email,
-        },
+        message: `Partner ${deactivatedPartner.firstName} ${deactivatedPartner.lastName} has been deactivated. Active workload moved, settled finance/history preserved.`,
+        reassignmentAudit,
       });
     } catch (error) {
+      if (error.message === "Old partner not found or not a partner") {
+        return res.status(404).json({ message: error.message });
+      }
+      if (
+        error.message === "Partner not under your management" ||
+        error.message === "Valid newPartnerId under same RM is required"
+      ) {
+        return res.status(error.message.includes("under your management") ? 403 : 400).json({ message: error.message });
+      }
       console.error("Error in /deactivate-partner:", error);
       res
         .status(500)
         .json({ message: "Internal server error", error: error.message });
+    } finally {
+      await session.endSession();
     }
   }
 );
 
-router.post("/partner/activate", async (req, res) => {
+router.post("/partner-activate", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
     const { partnerId } = req.body;
+    const rmId = req.user.sub;
 
     if (!partnerId) {
       return res.status(400).json({ message: "partnerId is required" });
     }
 
     // Activate partner and get updated document
-    const partner = await User.findByIdAndUpdate(
-      partnerId,
+    const partner = await User.findOneAndUpdate(
+      { _id: partnerId, rmId, role: ROLES.PARTNER },
       { status: "ACTIVE" },
       { new: true }
     );
@@ -1139,7 +1198,6 @@ router.post("/partner/activate", async (req, res) => {
 
     res.json({
       message: "Partner activated successfully and notified via email",
-      partner,
     });
   } catch (error) {
     console.error("Error in /partner/activate:", error);
@@ -3085,18 +3143,16 @@ router.get("/partner/:partnerId/analytics", auth, requireRole(ROLES.RM), async (
 
     // ============== RESPONSE - Match Admin Analytics format =================
     return res.json({
-      data: {
-        profile: base,
-        analytics: {
-          scope,
-          totals,
-          assignedTarget: {
-            targetValue: assignedTargetValue,
-            achievedValue: totalDisbursed
-          },
-          totalDisbursed,
-          performance: `${performance}%`,
+      profile: base,
+      analytics: {
+        scope,
+        totals,
+        assignedTarget: {
+          targetValue: assignedTargetValue,
+          achievedValue: totalDisbursed
         },
+        totalDisbursed,
+        performance: `${performance}%`,
       },
     });
   } catch (err) {

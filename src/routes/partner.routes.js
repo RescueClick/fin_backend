@@ -121,6 +121,17 @@ const validateApplicationPayload = ({
 };
 
 const normalizeDocTypeKey = (docType) => String(docType || "").trim().toUpperCase();
+const ACTIVE_APPLICATION_STATUSES = [
+  "DRAFT",
+  "SUBMITTED",
+  "DOC_INCOMPLETE",
+  "DOC_COMPLETE",
+  "DOC_SUBMITTED",
+  "LOGIN",
+  "UNDER_REVIEW",
+  "APPROVED",
+  "AGREEMENT",
+];
 
 const normalizeIncomingDocType = (docType) => {
   const key = normalizeDocTypeKey(docType);
@@ -195,7 +206,6 @@ const getMandatoryDocRules = (loanType, customer = {}) => {
     "ITR",
     "GST_DOCUMENT",
     "SHOP_PHOTO",
-    "BUSINESS_OTHER_DOCS",
     "BANK_STATEMENT_1",
     "BANK_STATEMENT_2",
   ];
@@ -209,6 +219,30 @@ const getMandatoryDocRules = (loanType, customer = {}) => {
 
   return rules;
 };
+
+const normalizeLoanType = (loanType) => {
+  const key = String(loanType || "").trim().toUpperCase();
+  const aliases = {
+    PERSONAL_LOAN: "PERSONAL",
+    BUSINESS_LOAN: "BUSINESS",
+  };
+  return aliases[key] || key;
+};
+
+const serializeMandatoryDocRules = (rules = []) =>
+  rules.map((rule) => {
+    if (typeof rule === "string") {
+      return { key: rule, acceptedDocTypes: [rule] };
+    }
+
+    const acceptedDocTypes = Array.isArray(rule?.anyOf)
+      ? rule.anyOf
+      : [];
+    return {
+      key: String(rule?.label || acceptedDocTypes.join("_OR_") || "").toUpperCase(),
+      acceptedDocTypes,
+    };
+  });
 
 const findMissingMandatoryDocs = (loanType, customer, docs = []) => {
   const uploadedTypes = new Set(docs.map((d) => normalizeIncomingDocType(d.docType)));
@@ -271,6 +305,29 @@ const mergeApplicationDocs = (existingDocs = [], newDocs = [], uploadedBy) => {
 };
 
 const router = Router();
+
+router.get("/loan-doc-rules", auth, async (req, res) => {
+  try {
+    const loanType = normalizeLoanType(req.query.loanType);
+    if (!loanType) {
+      return res.status(400).json({ message: "loanType query param is required" });
+    }
+
+    const customer = {
+      gender: req.query.gender,
+    };
+    const rules = getMandatoryDocRules(loanType, customer);
+    return res.json({
+      loanType,
+      rules: serializeMandatoryDocRules(rules),
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Failed to fetch loan document rules",
+      error: err.message,
+    });
+  }
+});
 
 // Dummy eligibility check (PAN-only) for fast prototype.
 // Later you can replace this logic with real CIBIL logic.
@@ -954,6 +1011,7 @@ router.post(
         existingApp.references = refs;
         existingApp.partnerId = assignedPartnerId;
         existingApp.rmId = assignedRmId;
+        existingApp.asmId = assignedAsmId;
         // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to SUBMITTED
         // (Option A: new applications should not start in DRAFT)
         if (existingApp.status !== "DOC_INCOMPLETE") {
@@ -995,6 +1053,7 @@ router.post(
             appNo,
             partnerId: assignedPartnerId,
             rmId: assignedRmId,
+            asmId: assignedAsmId,
             customerId: customerUser._id,
             loanType,
             customer: customerData,
@@ -1019,6 +1078,28 @@ router.post(
             }
             // Wait a bit before retrying
             await new Promise(resolve => setTimeout(resolve, 100 * appRetries));
+          } else if (
+            createError.code === 11000 &&
+            (createError.keyPattern?.partnerId ||
+              createError.keyPattern?.customerId ||
+              createError.keyPattern?.loanType)
+          ) {
+            const dedupedApp = await Application.findOne({
+              partnerId: assignedPartnerId,
+              customerId: customerUser._id,
+              loanType,
+              deletedAt: null,
+              status: { $in: ACTIVE_APPLICATION_STATUSES },
+            }).sort({ createdAt: -1 });
+            if (dedupedApp) {
+              app = dedupedApp;
+              appCreated = true;
+              console.warn(
+                `⚠️ Duplicate create blocked, reusing existing application ${dedupedApp._id}`
+              );
+              continue;
+            }
+            throw createError;
           } else {
             // Other errors, throw immediately
             throw createError;
@@ -1344,6 +1425,7 @@ router.post(
         existingApp.references = refs;
         existingApp.partnerId = assignedPartnerId;
         existingApp.rmId = assignedRmId;
+        existingApp.asmId = assignedAsmId;
         // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to SUBMITTED
         // (Option A: new applications should not start in DRAFT)
         if (existingApp.status !== "DOC_INCOMPLETE") {
@@ -1385,6 +1467,7 @@ router.post(
             appNo,
             partnerId: assignedPartnerId,
             rmId: assignedRmId,
+            asmId: assignedAsmId,
             customerId: customerUser._id,
             loanType,
             customer: customerData,
@@ -1409,6 +1492,28 @@ router.post(
             }
             // Wait a bit before retrying
             await new Promise(resolve => setTimeout(resolve, 100 * appRetries));
+          } else if (
+            createError.code === 11000 &&
+            (createError.keyPattern?.partnerId ||
+              createError.keyPattern?.customerId ||
+              createError.keyPattern?.loanType)
+          ) {
+            const dedupedApp = await Application.findOne({
+              partnerId: assignedPartnerId,
+              customerId: customerUser._id,
+              loanType,
+              deletedAt: null,
+              status: { $in: ACTIVE_APPLICATION_STATUSES },
+            }).sort({ createdAt: -1 });
+            if (dedupedApp) {
+              app = dedupedApp;
+              appCreated = true;
+              console.warn(
+                `⚠️ Duplicate create blocked, reusing existing application ${dedupedApp._id}`
+              );
+              continue;
+            }
+            throw createError;
           } else {
             // Other errors, throw immediately
             throw createError;

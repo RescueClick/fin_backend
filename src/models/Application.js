@@ -282,6 +282,30 @@ ApplicationSchema.methods.transition = function (to, byUserId, note) {
 // TTL index
 ApplicationSchema.index({ deletedAt: 1 }, { expireAfterSeconds: 0 })
 
+// Prevent duplicate active applications for same partner + customer + loan type.
+ApplicationSchema.index(
+  { partnerId: 1, customerId: 1, loanType: 1, deletedAt: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      deletedAt: null,
+      status: {
+        $in: [
+          "DRAFT",
+          "SUBMITTED",
+          "DOC_INCOMPLETE",
+          "DOC_COMPLETE",
+          "DOC_SUBMITTED",
+          "LOGIN",
+          "UNDER_REVIEW",
+          "APPROVED",
+          "AGREEMENT",
+        ],
+      },
+    },
+  }
+);
+
 
 export const Application = mongoose.model("Application", ApplicationSchema);
 

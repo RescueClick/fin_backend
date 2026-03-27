@@ -31,6 +31,19 @@ import { sendPayoutEmail } from "../utils/emailService.js";
 import { sendIncentiveEmail } from "../utils/emailService.js";
 import { emitPayoutStatusChanged, emitIncentiveStatusChanged } from "../utils/socketEmitter.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
+import {
+  buildReassignableApplicationFilter,
+  buildReassignmentAudit,
+  REASSIGNABLE_PAYOUT_STATUS,
+  REASSIGNABLE_INCENTIVE_STATUS,
+  LOCKED_PAYOUT_STATUS,
+  LOCKED_INCENTIVE_STATUS,
+} from "../utils/reassignmentPolicy.js";
+import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
+import {
+  deriveCurrentTargetContext,
+  rebalanceHierarchyTargetsReplace,
+} from "../utils/targetRebalanceService.js";
 
 const router = Router();
 
@@ -323,114 +336,19 @@ router.post(
         console.error("❌ Failed to send ASM creation email:", mailErr.message);
       }
 
-      // 🔹 STEP 2: Redistribute targets if already assigned
+      // Auto-rebalance hierarchy for current period if targets already exist
       const now = new Date();
-      const month = now.getMonth() + 1; // current month
+      const month = now.getMonth() + 1;
       const year = now.getFullYear();
-
-      // Get all ASM targets for this admin
-      const allAsms = await User.find({
-        role: ROLES.ASM,
-        adminId: req.user.sub,
-      }).lean();
-      const asmTargets = await Target.find({
-        role: ROLES.ASM,
-        month,
-        year,
-        assignedBy: req.user.sub,
-      });
-
-      if (asmTargets.length) {
-        // Calculate total ASM target from DB
-        const totalTarget = asmTargets.reduce(
-          (sum, t) => sum + t.targetValue,
-          0
-        );
-
-        // Recalculate equal share
-        const perAsmTarget = totalTarget / allAsms.length;
-
-        for (let a of allAsms) {
-          let target = await Target.findOne({
-            assignedTo: a._id,
-            role: ROLES.ASM,
-            month,
-            year,
-          });
-
-          if (target) {
-            target.targetValue = perAsmTarget;
-            await target.save();
-          } else {
-            target = await Target.create({
-              assignedBy: req.user.sub,
-              assignedTo: a._id,
-              role: ROLES.ASM,
-              month,
-              year,
-              targetValue: perAsmTarget,
-            });
-          }
-
-          // 🔹 Redistribute to RMs
-          const rms = await User.find({ role: ROLES.RM, asmId: a._id }).lean();
-          if (rms.length) {
-            const perRmTarget = perAsmTarget / rms.length;
-
-            for (let rm of rms) {
-              let rmT = await Target.findOne({
-                assignedTo: rm._id,
-                role: ROLES.RM,
-                month,
-                year,
-              });
-              if (rmT) {
-                rmT.targetValue = perRmTarget;
-                await rmT.save();
-              } else {
-                rmT = await Target.create({
-                  assignedBy: req.user.sub,
-                  assignedTo: rm._id,
-                  role: ROLES.RM,
-                  month,
-                  year,
-                  targetValue: perRmTarget,
-                });
-              }
-
-              // 🔹 Redistribute to Partners
-              const partners = await User.find({
-                role: ROLES.PARTNER,
-                rmId: rm._id,
-              }).lean();
-              if (partners.length) {
-                const perPartnerTarget = perRmTarget / partners.length;
-
-                for (let p of partners) {
-                  let pT = await Target.findOne({
-                    assignedTo: p._id,
-                    role: ROLES.PARTNER,
-                    month,
-                    year,
-                  });
-                  if (pT) {
-                    pT.targetValue = perPartnerTarget;
-                    await pT.save();
-                  } else {
-                    pT = await Target.create({
-                      assignedBy: req.user.sub,
-                      assignedTo: p._id,
-                      role: ROLES.PARTNER,
-                      month,
-                      year,
-                      targetValue: perPartnerTarget,
-                    });
-                  }
-                }
-              }
-            }
-          }
-        }
+      const context = await deriveCurrentTargetContext(month, year);
+      if (Number(context.totalCompanyTarget) > 0) {
+        await rebalanceHierarchyTargetsReplace({
+          month,
+          year,
+          totalCompanyTarget: context.totalCompanyTarget,
+          partnerFileCountTarget: context.partnerFileCountTarget,
+          assignedBy: context.assignedBy || req.user.sub,
+        });
       }
 
       return res.status(201).json({
@@ -567,77 +485,19 @@ router.post(
         console.error("❌ Failed to send RM creation email:", mailErr.message);
       }
 
-      // 🔹 STEP 2: Redistribute ASM’s target among all RMs
+      // Auto-rebalance hierarchy for current period if targets already exist
       const now = new Date();
-      const month = now.getMonth() + 1; // current month
+      const month = now.getMonth() + 1;
       const year = now.getFullYear();
-
-      // Find ASM target for this month/year
-      const asmTargetDoc = await Target.findOne({
-        assignedTo: asm._id,
-        role: ROLES.ASM,
-        month,
-        year,
-      });
-
-      if (asmTargetDoc) {
-        // Get all RMs under this ASM
-        const rms = await User.find({ role: ROLES.RM, asmId: asm._id }).lean();
-        const perRmTarget = asmTargetDoc.targetValue / rms.length;
-
-        for (let r of rms) {
-          let rmT = await Target.findOne({
-            assignedTo: r._id,
-            role: ROLES.RM,
-            month,
-            year,
-          });
-
-          if (rmT) {
-            rmT.targetValue = perRmTarget; // redistribute equally
-            await rmT.save();
-          } else {
-            rmT = await Target.create({
-              assignedBy: asmTargetDoc.assignedBy,
-              assignedTo: r._id,
-              role: ROLES.RM,
-              month,
-              year,
-              targetValue: perRmTarget,
-            });
-          }
-
-          // 🔹 Distribute RM’s target to Partners
-          const partners = await User.find({
-            role: ROLES.PARTNER,
-            rmId: r._id,
-          }).lean();
-          if (partners.length) {
-            const perPartnerTarget = perRmTarget / partners.length;
-
-            for (let p of partners) {
-              let pT = await Target.findOne({
-                assignedTo: p._id,
-                role: ROLES.PARTNER,
-                month,
-                year,
-              });
-              if (pT) {
-                pT.targetValue = perPartnerTarget;
-                await pT.save();
-              } else {
-                pT = await Target.create({
-                  assignedBy: asmTargetDoc.assignedBy,
-                  assignedTo: p._id,
-                  role: ROLES.PARTNER,
-                  month,
-                  year,
-                  targetValue: perPartnerTarget,
-                });
-              }
-            }
-          }
-        }
+      const context = await deriveCurrentTargetContext(month, year);
+      if (Number(context.totalCompanyTarget) > 0) {
+        await rebalanceHierarchyTargetsReplace({
+          month,
+          year,
+          totalCompanyTarget: context.totalCompanyTarget,
+          partnerFileCountTarget: context.partnerFileCountTarget,
+          assignedBy: context.assignedBy || req.user.sub,
+        });
       }
 
       return res.status(201).json({
@@ -757,6 +617,21 @@ router.post(
           "❌ Failed to send RSM creation email:",
           mailErr.message
         );
+      }
+
+      // Auto-rebalance hierarchy for current period if targets already exist
+      const now = new Date();
+      const month = now.getMonth() + 1;
+      const year = now.getFullYear();
+      const context = await deriveCurrentTargetContext(month, year);
+      if (Number(context.totalCompanyTarget) > 0) {
+        await rebalanceHierarchyTargetsReplace({
+          month,
+          year,
+          totalCompanyTarget: context.totalCompanyTarget,
+          partnerFileCountTarget: context.partnerFileCountTarget,
+          assignedBy: context.assignedBy || req.user.sub,
+        });
       }
 
       return res.status(201).json({
@@ -1667,10 +1542,11 @@ router.get(
 );
 
 router.post(
-  "/assign-rms-to-asm",
+  "/asm-deactivate",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
+    const session = await mongoose.startSession();
     try {
       const { oldAsmId, newAsmId } = req.body;
 
@@ -1680,56 +1556,63 @@ router.post(
         return res.status(400).json({ message: "Both ASM IDs are required" });
       }
 
-      // 0️⃣ Reassign all RSMs from old ASM to new ASM
-      await User.updateMany(
-        { role: ROLES.RSM, asmId: oldAsmId },
-        { $set: { asmId: newAsmId } }
-      );
-
-      // 1️⃣ Reassign all RMs from old ASM to new ASM
-      const rms = await User.find({ role: ROLES.RM, asmId: oldAsmId }, "_id");
-      const rmIds = rms.map((rm) => rm._id);
-
-      await User.updateMany(
-        { role: ROLES.RM, asmId: oldAsmId },
-        { $set: { asmId: newAsmId } }
-      );
-
-      // 2️⃣ Reassign Partners under those RMs
-      const partners = await User.find(
-        { role: ROLES.PARTNER, rmId: { $in: rmIds } },
-        "_id"
-      );
-      const partnerIds = partners.map((p) => p._id);
-
-      await User.updateMany(
-        { role: ROLES.PARTNER, rmId: { $in: rmIds } },
-        { $set: { asmId: newAsmId } }
-      );
-
-      // 3️⃣ Reassign Customers under those Partners
-      if (partnerIds.length > 0) {
+      let oldAsm;
+      let newAsm;
+      let reassignmentAudit;
+      await session.withTransaction(async () => {
         await User.updateMany(
-          { partnerId: { $in: partnerIds } },
-          { $set: { asmId: newAsmId } }
+          { role: ROLES.RSM, asmId: oldAsmId },
+          { $set: { asmId: newAsmId } },
+          { session }
         );
-      }
 
-      // 4️⃣ Deactivate the old ASM
-      const oldAsm = await User.findOneAndUpdate(
-        { _id: oldAsmId, role: ROLES.ASM },
-        { $set: { status: "SUSPENDED" } },
-        { new: true }
-      );
+        const rms = await User.find({ role: ROLES.RM, asmId: oldAsmId }, "_id").session(session);
+        const rmIds = rms.map((rm) => rm._id);
 
-      // 4️⃣ Deactivate the old ASM
-      // 5️⃣ Fetch new RM details (no update required)
-      const newAsm = await User.findById(newAsmId);
-      if (!newAsm || newAsm.role !== ROLES.ASM) {
-        return res
-          .status(404)
-          .json({ message: "New ASM not found or invalid" });
-      }
+        await User.updateMany(
+          { role: ROLES.RM, asmId: oldAsmId },
+          { $set: { asmId: newAsmId } },
+          { session }
+        );
+
+        const partners = await User.find(
+          { role: ROLES.PARTNER, rmId: { $in: rmIds } },
+          "_id"
+        ).session(session);
+        const partnerIds = partners.map((p) => p._id);
+
+        await User.updateMany(
+          { role: ROLES.PARTNER, rmId: { $in: rmIds } },
+          { $set: { asmId: newAsmId } },
+          { session }
+        );
+
+        if (partnerIds.length > 0) {
+          await User.updateMany(
+            { partnerId: { $in: partnerIds } },
+            { $set: { asmId: newAsmId } },
+            { session }
+          );
+        }
+
+        oldAsm = await User.findOneAndUpdate(
+          { _id: oldAsmId, role: ROLES.ASM },
+          { $set: { status: "SUSPENDED" } },
+          { new: true, session }
+        );
+        newAsm = await User.findById(newAsmId).session(session);
+        if (!newAsm || newAsm.role !== ROLES.ASM) {
+          throw new Error("New ASM not found or invalid");
+        }
+
+        reassignmentAudit = buildReassignmentAudit({
+          changedBy: req.user.sub,
+          oldUserId: oldAsmId,
+          newUserId: newAsmId,
+          action: "admin_asm_deactivate",
+        });
+        await persistReassignmentAudit(reassignmentAudit, req, session);
+      });
 
       if (oldAsm) {
         // 📧 Send deactivation mail
@@ -1777,17 +1660,23 @@ router.post(
       res.json({
         message:
           "All RMs, Partners, and Customers reassigned to new ASM. Old ASM deactivated and notified.",
+        reassignmentAudit,
       });
     } catch (error) {
+      if (error.message === "New ASM not found or invalid") {
+        return res.status(404).json({ message: error.message });
+      }
       console.error("Error in assign-rms-to-asm:", error);
       res.status(500).json({ message: error.message });
+    } finally {
+      await session.endSession();
     }
   }
 );
 
 // Activate ASM (Admin only)
 router.post(
-  "/asm/activate",
+  "/asm-activate",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
@@ -1830,7 +1719,6 @@ router.post(
 
       res.json({
         message: "ASM activated successfully and notified via email",
-        asm,
       });
     } catch (error) {
       console.error("Error in /asm/activate:", error);
@@ -1839,59 +1727,298 @@ router.post(
   }
 );
 
-// Deactivate ASM (Admin only)
+// Deactivate RSM and Reassign
 router.post(
-  "/asm/deactivate",
+  "/rsm-deactivate",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
+    const session = await mongoose.startSession();
     try {
-      const { asmId } = req.body;
+      const { rsmId, newRsmId } = req.body;
 
-      if (!asmId) {
-        return res.status(400).json({ message: "asmId is required" });
+      if (!rsmId || !newRsmId) {
+        return res.status(400).json({ message: "Both RSM IDs are required" });
       }
 
-      const asm = await User.findOneAndUpdate(
-        { _id: asmId, role: ROLES.ASM },
-        { status: "SUSPENDED" },
-        { new: true }
-      );
+      let oldRsm;
+      let newRsm;
+      let reassignmentAudit;
+      await session.withTransaction(async () => {
+        oldRsm = await User.findById(rsmId).session(session);
+        if (!oldRsm || oldRsm.role !== ROLES.RSM) {
+          throw new Error("Old RSM not found");
+        }
 
-      if (!asm) {
-        return res.status(404).json({ message: "ASM not found" });
-      }
+        if (oldRsm.rsmType === "PERSONAL") {
+          await User.updateMany(
+            { role: ROLES.RM, personalRsmId: rsmId },
+            { $set: { personalRsmId: newRsmId } },
+            { session }
+          );
+        } else if (oldRsm.rsmType === "BUSINESS_HOME") {
+          await User.updateMany(
+            { role: ROLES.RM, businessHomeRsmId: rsmId },
+            { $set: { businessHomeRsmId: newRsmId } },
+            { session }
+          );
+        } else {
+          await User.updateMany(
+             { role: ROLES.RM, $or: [{ personalRsmId: rsmId }, { businessHomeRsmId: rsmId }] },
+             { $set: { personalRsmId: newRsmId, businessHomeRsmId: newRsmId } },
+             { session }
+          );
+        }
 
-      // 📧 Send deactivation email
-      try {
-        await sendMail({
-          to: asm.email,
-          subject: "Your ASM Account Has Been Deactivated",
-          html: `
-            <p>Dear ${asm.firstName} ${asm.lastName},</p>
-            <p>Your ASM account has been <b>deactivated</b> by the administrator.</p>
-            <p><b>Employee ID:</b> ${asm.employeeId || "-"}<br/>
-            <b>ASM Code:</b> ${asm.asmCode || "-"}</p>
-            <p>If you believe this action was incorrect, please contact support.</p>
-            <br/>
-            <p>Regards,<br/>DhanSource Capital</p>
-          `,
+        await User.findOneAndUpdate(
+          { _id: rsmId, role: ROLES.RSM },
+          { $set: { status: "SUSPENDED" } },
+          { new: true, session }
+        );
+
+        newRsm = await User.findById(newRsmId).session(session);
+        reassignmentAudit = buildReassignmentAudit({
+          changedBy: req.user.sub,
+          oldUserId: rsmId,
+          newUserId: newRsmId,
+          action: "admin_rsm_deactivate",
         });
-        console.log("📧 ASM deactivation mail sent to:", asm.email);
-      } catch (mailErr) {
-        console.error("❌ Failed to send ASM deactivation email:", mailErr.message);
+        await persistReassignmentAudit(reassignmentAudit, req, session);
+      });
+
+      // Send Mails
+      if (oldRsm && oldRsm.email) {
+        sendMail({
+          to: oldRsm.email,
+          subject: "Your RSM Account Has Been Deactivated",
+          html: `<p>Dear ${oldRsm.firstName}, your RSM account has been deactivated and your RMs have been reassigned.</p>`,
+        }).catch(err => console.error(err));
+      }
+      if (newRsm && newRsm.email) {
+        sendMail({
+          to: newRsm.email,
+          subject: "You Have Been Assigned New RMs",
+          html: `<p>Dear ${newRsm.firstName}, you have been assigned RMs from a deactivated RSM.</p>`,
+        }).catch(err => console.error(err));
       }
 
       res.json({
-        message: "ASM deactivated successfully and notified via email",
-        asm,
+        message: "RSM deactivated and RMs reassigned successfully.",
+        reassignmentAudit,
       });
     } catch (error) {
-      console.error("Error in /asm/deactivate:", error);
+      if (error.message === "Old RSM not found") {
+        return res.status(404).json({ message: error.message });
+      }
+      console.error("Error in /rsm-deactivate:", error);
       res.status(500).json({ message: error.message });
+    } finally {
+      await session.endSession();
     }
   }
 );
+
+
+// Deactivate RM and Reassign
+router.post(
+  "/rm-deactivate",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    const session = await mongoose.startSession();
+    try {
+      const { oldRmId, newRmId } = req.body;
+
+      if (!oldRmId || !newRmId) {
+        return res.status(400).json({ message: "Both old and new RM IDs are required" });
+      }
+
+      let oldRm;
+      let newRm;
+      let reassignmentAudit;
+      await session.withTransaction(async () => {
+        const partners = await User.find({ role: ROLES.PARTNER, rmId: oldRmId }, "_id").session(session);
+        const partnerIds = partners.map((p) => p._id);
+
+        await User.updateMany(
+          { role: ROLES.PARTNER, rmId: oldRmId },
+          { $set: { rmId: newRmId } },
+          { session }
+        );
+
+        await Application.updateMany(
+          buildReassignableApplicationFilter({ rmId: oldRmId }),
+          { $set: { rmId: newRmId } },
+          { session }
+        );
+
+        if (partnerIds.length > 0) {
+          await User.updateMany(
+            { partnerId: { $in: partnerIds } },
+            { $set: { rmId: newRmId } },
+            { session }
+          );
+        }
+
+        oldRm = await User.findOneAndUpdate(
+          { _id: oldRmId, role: ROLES.RM },
+          { $set: { status: "SUSPENDED" } },
+          { new: true, session }
+        );
+        newRm = await User.findById(newRmId).session(session);
+        reassignmentAudit = buildReassignmentAudit({
+          changedBy: req.user.sub,
+          oldUserId: oldRmId,
+          newUserId: newRmId,
+          action: "admin_rm_deactivate",
+        });
+        await persistReassignmentAudit(reassignmentAudit, req, session);
+      });
+
+      // Send Mails
+      if (oldRm && oldRm.email) {
+        sendMail({
+          to: oldRm.email,
+          subject: "Your RM Account Has Been Deactivated",
+          html: `<p>Dear ${oldRm.firstName}, your RM account has been deactivated and your Partners have been reassigned.</p>`,
+        }).catch(err => console.error(err));
+      }
+      if (newRm && newRm.email) {
+        sendMail({
+          to: newRm.email,
+          subject: "You Have Been Assigned New Partners",
+          html: `<p>Dear ${newRm.firstName}, you have been assigned Partners from a deactivated RM.</p>`,
+        }).catch(err => console.error(err));
+      }
+
+      res.json({
+        message: "RM deactivated and Partners reassigned successfully.",
+        reassignmentAudit,
+      });
+    } catch (error) {
+      console.error("Error in /rm-deactivate:", error);
+      res.status(500).json({ message: error.message });
+    } finally {
+      await session.endSession();
+    }
+  }
+);
+
+// Deactivate Partner
+router.post(
+  "/partner-deactivate",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    const session = await mongoose.startSession();
+    try {
+      const { oldPartnerId, newPartnerId } = req.body;
+
+      if (!oldPartnerId || !newPartnerId) {
+        return res.status(400).json({ message: "Both oldPartnerId and newPartnerId are required" });
+      }
+
+      let customerUpdate;
+      let appUpdate;
+      let payoutUpdate;
+      let incentiveUpdate;
+      let lockedPayouts = 0;
+      let lockedIncentives = 0;
+      let oldPartner;
+      let reassignmentAudit;
+
+      await session.withTransaction(async () => {
+        // 1. Reassign all Customers from old Partner to new Partner
+        customerUpdate = await User.updateMany(
+          { role: ROLES.CUSTOMER, partnerId: oldPartnerId },
+          { $set: { partnerId: newPartnerId } },
+          { session }
+        );
+
+        // 2. Reassign all Applications from old Partner to new Partner
+        appUpdate = await Application.updateMany(
+          buildReassignableApplicationFilter({ partnerId: oldPartnerId }),
+          { $set: { partnerId: newPartnerId } },
+          { session }
+        );
+
+        // 3. Reassign only unsettled payout/incentive ownership
+        payoutUpdate = await Payout.updateMany(
+          { partnerId: oldPartnerId, payOutStatus: REASSIGNABLE_PAYOUT_STATUS },
+          { $set: { partnerId: newPartnerId } },
+          { session }
+        );
+        incentiveUpdate = await Incentive.updateMany(
+          { partnerId: oldPartnerId, status: REASSIGNABLE_INCENTIVE_STATUS },
+          { $set: { partnerId: newPartnerId } },
+          { session }
+        );
+        lockedPayouts = await Payout.countDocuments({
+          partnerId: oldPartnerId,
+          payOutStatus: LOCKED_PAYOUT_STATUS,
+        }).session(session);
+        lockedIncentives = await Incentive.countDocuments({
+          partnerId: oldPartnerId,
+          status: LOCKED_INCENTIVE_STATUS,
+        }).session(session);
+
+        oldPartner = await User.findOneAndUpdate(
+          { _id: oldPartnerId, role: ROLES.PARTNER },
+          { $set: { status: "SUSPENDED" } },
+          { new: true, session }
+        );
+        if (!oldPartner) {
+          throw new Error("Old Partner not found");
+        }
+
+        reassignmentAudit = buildReassignmentAudit({
+          changedBy: req.user.sub,
+          oldUserId: oldPartnerId,
+          newUserId: newPartnerId,
+          action: "admin_partner_deactivate",
+        });
+        await persistReassignmentAudit(reassignmentAudit, req, session);
+      });
+
+      if (!oldPartner) {
+         return res.status(404).json({ message: "Old Partner not found" });
+      }
+      
+      const newPartner = await User.findById(newPartnerId);
+
+      // Mails
+      if (oldPartner && oldPartner.email) {
+         sendMail({
+            to: oldPartner.email,
+            subject: "Your Partner Account Has Been Deactivated",
+            html: `<p>Dear ${oldPartner.firstName}, your Partner account has been suspended and your customers have been reassigned.</p>`,
+         }).catch(err => console.error(err));
+      }
+      if (newPartner && newPartner.email) {
+         sendMail({
+            to: newPartner.email,
+            subject: "You Have Been Assigned New Customers",
+            html: `<p>Dear ${newPartner.firstName}, you have been assigned Customers from a deactivated Partner.</p>`,
+         }).catch(err => console.error(err));
+      }
+
+      res.json({
+        message:
+          "Partner deactivated and active workload reassigned successfully. Settled finance/history is preserved.",
+        reassignmentAudit,
+      });
+    } catch (error) {
+      if (error.message === "Old Partner not found") {
+        return res.status(404).json({ message: error.message });
+      }
+      console.error("Error in /partner-deactivate:", error);
+      res.status(500).json({ message: error.message });
+    } finally {
+      await session.endSession();
+    }
+  }
+);
+
 
 // Permanently delete an ASM (only after deactivation)
 router.delete(
@@ -1933,112 +2060,10 @@ router.delete(
   }
 );
 
-router.post(
-  "/assign-partners-rm",
-  auth,
-  requireRole(ROLES.SUPER_ADMIN),
-  async (req, res) => {
-    try {
-      const { oldRmId, newRmId } = req.body;
-
-      if (!oldRmId || !newRmId) {
-        return res.status(400).json({ message: "Both RM IDs are required" });
-      }
-
-      // 1️⃣ Find all partners under old RM
-      const partners = await User.find(
-        { role: ROLES.PARTNER, rmId: oldRmId },
-        "_id"
-      );
-      const partnerIds = partners.map((p) => p._id);
-
-      // 2️⃣ Reassign all Partners to new RM
-      await User.updateMany(
-        { role: ROLES.PARTNER, rmId: oldRmId },
-        { $set: { rmId: newRmId } }
-      );
-
-      // 3️⃣ Reassign all Customers of those Partners to new RM
-      if (partnerIds.length > 0) {
-        await User.updateMany(
-          { partnerId: { $in: partnerIds } },
-          { $set: { rmId: newRmId } }
-        );
-      }
-
-      // 4️⃣ Deactivate the old RM and fetch details
-      const oldRm = await User.findOneAndUpdate(
-        { _id: oldRmId, role: ROLES.RM },
-        { $set: { status: "SUSPENDED" } },
-        { new: true }
-      );
-
-      // 5️⃣ Fetch new RM details (no update required)
-      const newRm = await User.findById(newRmId);
-      if (!newRm || newRm.role !== ROLES.RM) {
-        return res.status(404).json({ message: "New RM not found or invalid" });
-      }
-
-      if (oldRm) {
-        // 📧 Send deactivation mail
-        try {
-          await sendMail({
-            to: oldRm.email,
-            subject: "Your RM Account Has Been Deactivated",
-            html: `
-              <p>Dear ${oldRm.firstName} ${oldRm.lastName},</p>
-              <p>Your RM account has been <b>deactivated</b>. All your Partners and their Customers have been reassigned to another RM.</p>
-              <p><b>Employee ID:</b> ${oldRm.employeeId}</p>
-              <p><b>RM Code:</b> ${oldRm.rmCode}</p>
-              <p>If you believe this action was incorrect, please contact support immediately.</p>
-              <br/>
-              <p>Regards,<br/>DhanSource Capital</p>
-            `,
-          });
-          console.log("📧 Deactivation mail sent to:", oldRm.email);
-        } catch (mailErr) {
-          console.error(
-            "❌ Failed to send deactivation email:",
-            mailErr.message
-          );
-        }
-      }
-
-      if (newRm) {
-        try {
-          await sendMail({
-            to: newRm.email,
-            subject: "You Have Been Assigned New Partners & Customers",
-            html: `
-              <p>Dear ${newRm.firstName} ${newRm.lastName},</p>
-              <p>You have been assigned new <b>Partners</b> and their <b>Customers</b>.</p>
-              <p><b>Employee ID:</b> ${newRm.employeeId}</p>
-              <p><b>RM Code:</b> ${newRm.rmCode}</p>
-              <p>Please check your dashboard for details of the reassigned accounts.</p>
-              <br/>
-              <p>Regards,<br/>DhanSource Capital</p>
-            `,
-          });
-          console.log("📧 Assignment mail sent to:", newRm.email);
-        } catch (mailErr) {
-          console.error("❌ Failed to send assignment email:", mailErr.message);
-        }
-      }
-
-      res.json({
-        message:
-          "All Partners and their Customers reassigned to new RM, old RM deactivated and notified",
-      });
-    } catch (error) {
-      console.error("Error in assign-partners-rm:", error);
-      res.status(500).json({ message: error.message });
-    }
-  }
-);
 
 // Activate RM (Admin only)
 router.post(
-  "/rm/activate",
+  "/rm-activate",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
@@ -2081,7 +2106,6 @@ router.post(
 
       res.json({
         message: "RM activated successfully and notified via email",
-        rm,
       });
     } catch (error) {
       console.error("Error in /rm/activate:", error);
@@ -2090,189 +2114,10 @@ router.post(
   }
 );
 
-// Deactivate RM (Admin only) - with automatic reassignment
-router.post(
-  "/rm/deactivate",
-  auth,
-  requireRole(ROLES.SUPER_ADMIN),
-  async (req, res) => {
-    try {
-      const { rmId, newRmId } = req.body;
-
-      if (!rmId) {
-        return res.status(400).json({ message: "rmId is required" });
-      }
-
-      // Get the RM to deactivate
-      const oldRm = await User.findOne({ _id: rmId, role: ROLES.RM });
-      if (!oldRm) {
-        return res.status(404).json({ message: "RM not found" });
-      }
-
-      // Find another active RM under the same RSM(s) or ASM
-      // If admin provided newRmId, validate and use it.
-      let newRm = null;
-      if (newRmId) {
-        newRm = await User.findOne({
-          _id: newRmId,
-          role: ROLES.RM,
-          status: "ACTIVE",
-        });
-
-        if (!newRm) {
-          return res.status(404).json({ message: "New RM not found" });
-        }
-        if (String(newRm._id) === String(rmId)) {
-          return res.status(400).json({ message: "newRmId must differ from rmId" });
-        }
-      }
-
-      const rsmIds = [];
-      if (oldRm.personalRsmId) rsmIds.push(oldRm.personalRsmId);
-      if (oldRm.businessHomeRsmId) rsmIds.push(oldRm.businessHomeRsmId);
-
-      if (!newRm && rsmIds.length > 0) {
-        // Find another active RM under the same RSM(s)
-        newRm = await User.findOne({
-          role: ROLES.RM,
-          status: "ACTIVE",
-          _id: { $ne: rmId },
-          $or: [
-            { personalRsmId: { $in: rsmIds } },
-            { businessHomeRsmId: { $in: rsmIds } }
-          ]
-        });
-      }
-
-      // If no RM found under same RSM, find any active RM under the same ASM
-      if (!newRm && oldRm.asmId) {
-        newRm = await User.findOne({
-          role: ROLES.RM,
-          status: "ACTIVE",
-          _id: { $ne: rmId },
-          asmId: oldRm.asmId
-        });
-      }
-
-      // If still no RM found, find any active RM
-      if (!newRm) {
-        newRm = await User.findOne({
-          role: ROLES.RM,
-          status: "ACTIVE",
-          _id: { $ne: rmId }
-        });
-      }
-
-      if (!newRm) {
-        return res.status(400).json({ 
-          message: "Cannot deactivate RM. No other active RM found to reassign data." 
-        });
-      }
-
-      // 1️⃣ Reassign all Partners from old RM to new RM first
-      const partners = await User.find(
-        { role: ROLES.PARTNER, rmId: rmId },
-        "_id"
-      );
-      const partnerIds = partners.map((p) => p._id);
-      const partnersUpdated = await User.updateMany(
-        { role: ROLES.PARTNER, rmId: rmId },
-        { $set: { rmId: newRm._id } }
-      );
-
-      // 2️⃣ Reassign all Applications from old RM to new RM
-      // This includes both direct rmId assignments and applications via partners
-      const appsUpdated = await Application.updateMany(
-        {
-          $or: [
-            { rmId: rmId }, // Direct RM assignment
-            { partnerId: { $in: partnerIds } } // Applications from partners under old RM
-          ]
-        },
-        { $set: { rmId: newRm._id } }
-      );
-
-      // 3️⃣ Reassign all Customers of those Partners (update their rmId if exists)
-      let customersUpdated = 0;
-      if (partnerIds.length > 0) {
-        const customerUpdate = await User.updateMany(
-          { partnerId: { $in: partnerIds } },
-          { $set: { rmId: newRm._id } }
-        );
-        customersUpdated = customerUpdate.modifiedCount;
-      }
-
-      // 4️⃣ Deactivate the old RM
-      const deactivatedRm = await User.findByIdAndUpdate(
-        rmId,
-        { status: "SUSPENDED" },
-        { new: true }
-      );
-
-      // 📧 Send deactivation email to old RM
-      try {
-        await sendMail({
-          to: deactivatedRm.email,
-          subject: "Your RM Account Has Been Deactivated",
-          html: `
-            <p>Dear ${deactivatedRm.firstName} ${deactivatedRm.lastName},</p>
-            <p>Your RM account has been <b>deactivated</b> by the administrator.</p>
-            <p>All your Applications, Partners, and Customers have been reassigned to another RM.</p>
-            <p><b>Employee ID:</b> ${deactivatedRm.employeeId || "-"}<br/>
-            <b>RM Code:</b> ${deactivatedRm.rmCode || "-"}</p>
-            <p>If you believe this action was incorrect, please contact support.</p>
-            <br/>
-            <p>Regards,<br/>DhanSource Capital</p>
-          `,
-        });
-        console.log("📧 RM deactivation mail sent to:", deactivatedRm.email);
-      } catch (mailErr) {
-        console.error("❌ Failed to send RM deactivation email:", mailErr.message);
-      }
-
-      // 📧 Send notification email to new RM
-      try {
-        await sendMail({
-          to: newRm.email,
-          subject: "You Have Been Assigned New Data",
-          html: `
-            <p>Dear ${newRm.firstName} ${newRm.lastName},</p>
-            <p>You have been assigned new Applications, Partners, and Customers from a deactivated RM.</p>
-            <p><b>Employee ID:</b> ${newRm.employeeId || "-"}<br/>
-            <b>RM Code:</b> ${newRm.rmCode || "-"}</p>
-            <p>Please check your dashboard for details.</p>
-            <br/>
-            <p>Regards,<br/>DhanSource Capital</p>
-          `,
-        });
-        console.log("📧 Assignment mail sent to:", newRm.email);
-      } catch (mailErr) {
-        console.error("❌ Failed to send assignment email:", mailErr.message);
-      }
-
-      res.json({
-        message: "RM deactivated successfully. All data reassigned to another RM.",
-        reassigned: {
-          applications: appsUpdated.modifiedCount,
-          partners: partnersUpdated.modifiedCount,
-          customers: customersUpdated
-        },
-        newRm: {
-          id: newRm._id,
-          name: `${newRm.firstName} ${newRm.lastName}`,
-          employeeId: newRm.employeeId
-        }
-      });
-    } catch (error) {
-      console.error("Error in /rm/deactivate:", error);
-      res.status(500).json({ message: error.message });
-    }
-  }
-);
 
 // Activate RSM (Admin only)
 router.post(
-  "/rsm/activate",
+  "/rsm-activate",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
@@ -2315,7 +2160,6 @@ router.post(
 
       res.json({
         message: "RSM activated successfully and notified via email",
-        rsm,
       });
     } catch (error) {
       console.error("Error in /rsm/activate:", error);
@@ -2324,176 +2168,6 @@ router.post(
   }
 );
 
-// Deactivate RSM (Admin only)
-router.post(
-  "/rsm/deactivate",
-  auth,
-  requireRole(ROLES.SUPER_ADMIN),
-  async (req, res) => {
-    try {
-      const { rsmId, newRsmId } = req.body;
-
-      // ==============================
-      // ✅ 1. VALIDATION
-      // ==============================
-      if (!rsmId || !newRsmId) {
-        return res.status(400).json({
-          message: "rsmId and newRsmId are required",
-        });
-      }
-
-      if (rsmId === newRsmId) {
-        return res.status(400).json({
-          message: "Cannot assign to same RSM",
-        });
-      }
-
-      // ==============================
-      // ✅ 2. FETCH USERS
-      // ==============================
-      const oldRsm = await User.findOne({
-        _id: rsmId,
-        role: ROLES.RSM,
-      });
-
-      if (!oldRsm) {
-        return res.status(404).json({ message: "RSM not found" });
-      }
-
-      const newRsm = await User.findOne({
-        _id: newRsmId,
-        role: ROLES.RSM,
-        status: "ACTIVE",
-      });
-
-      if (!newRsm) {
-        return res.status(400).json({
-          message: "Selected RSM is not valid or inactive",
-        });
-      }
-
-      // ==============================
-      // 🔥 3. TYPE SAFETY CHECK
-      // ==============================
-      if (newRsm.rsmType !== oldRsm.rsmType) {
-        return res.status(400).json({
-          message: "RSM type must match",
-        });
-      }
-
-      // ==============================
-      // 🔁 4. MOVE RMs
-      // ==============================
-      let rmResult;
-
-      if (oldRsm.rsmType === "PERSONAL") {
-        rmResult = await User.updateMany(
-          { role: ROLES.RM, personalRsmId: oldRsm._id },
-          { $set: { personalRsmId: newRsm._id } }
-        );
-      } else {
-        rmResult = await User.updateMany(
-          { role: ROLES.RM, businessHomeRsmId: oldRsm._id },
-          { $set: { businessHomeRsmId: newRsm._id } }
-        );
-      }
-
-      // ==============================
-      // 🔁 5. MOVE PARTNERS
-      // ==============================
-      const partnerResult = await Partner.updateMany(
-        { rsmId: oldRsm._id },
-        { $set: { rsmId: newRsm._id } }
-      );
-
-      // ==============================
-      // 🔁 6. MOVE CUSTOMERS
-      // ==============================
-      const customerResult = await Customer.updateMany(
-        { rsmId: oldRsm._id },
-        { $set: { rsmId: newRsm._id } }
-      );
-
-      // ==============================
-      // 🔁 7. MOVE APPLICATIONS
-      // ==============================
-      const applicationResult = await Application.updateMany(
-        { rsmId: oldRsm._id },
-        { $set: { rsmId: newRsm._id } }
-      );
-
-      // ==============================
-      // ❌ 8. DEACTIVATE OLD RSM
-      // ==============================
-      const rsm = await User.findOneAndUpdate(
-        { _id: rsmId, role: ROLES.RSM },
-        { status: "SUSPENDED" },
-        { new: true }
-      );
-
-      // ==============================
-      // 📧 9. EMAIL OLD RSM
-      // ==============================
-      try {
-        await sendMail({
-          to: oldRsm.email,
-          subject: "Your RSM Account Has Been Deactivated",
-          html: `
-            <p>Dear ${oldRsm.firstName} ${oldRsm.lastName},</p>
-            <p>Your RSM account has been <b>deactivated</b>.</p>
-            <p><b>Employee ID:</b> ${oldRsm.employeeId || "-"}</p>
-            <br/>
-            <p>Regards,<br/>DhanSource Capital</p>
-          `,
-        });
-      } catch (err) {
-        console.error("❌ Mail error (old RSM):", err.message);
-      }
-
-      // ==============================
-      // 📧 10. EMAIL NEW RSM
-      // ==============================
-      try {
-        await sendMail({
-          to: newRsm.email,
-          subject: "New RM Responsibilities Assigned",
-          html: `
-            <p>Dear ${newRsm.firstName} ${newRsm.lastName},</p>
-            <p>You have been assigned new responsibilities.</p>
-            <ul>
-              <li>RMs: ${rmResult.modifiedCount}</li>
-              <li>Partners: ${partnerResult.modifiedCount}</li>
-              <li>Customers: ${customerResult.modifiedCount}</li>
-              <li>Applications: ${applicationResult.modifiedCount}</li>
-            </ul>
-            <br/>
-            <p>Regards,<br/>DhanSource Capital</p>
-          `,
-        });
-      } catch (err) {
-        console.error("❌ Mail error (new RSM):", err.message);
-      }
-
-      // ==============================
-      // ✅ 11. FINAL RESPONSE
-      // ==============================
-      res.json({
-        message: "RSM deactivated and all data reassigned successfully",
-        rsm,
-        reassigned: {
-          rms: rmResult.modifiedCount,
-          partners: partnerResult.modifiedCount,
-          customers: customerResult.modifiedCount,
-          applications: applicationResult.modifiedCount,
-        },
-        newRsmId: newRsm._id,
-      });
-    } catch (error) {
-      console.error("❌ Error in /rsm/deactivate:", error);
-      res.status(500).json({ message: error.message });
-    }
-  }
-);
 // Permanently delete an RM (only after deactivation)
 router.delete(
   "/rm/:rmId",
@@ -2533,71 +2207,9 @@ router.delete(
   }
 );
 
-router.post(
-  "/deactivate-partner",
-  auth,
-  requireRole(ROLES.SUPER_ADMIN),
-  async (req, res) => {
-    try {
-      const { oldPartnerId } = req.body;
-
-      if (!oldPartnerId) {
-        return res.status(400).json({ message: "oldPartnerId is required" });
-      }
-
-      const oldId = new mongoose.Types.ObjectId(oldPartnerId);
-
-      // 1️⃣ Validate old partner
-      const oldPartner = await User.findById(oldId);
-      if (!oldPartner || oldPartner.role !== ROLES.PARTNER) {
-        return res
-          .status(404)
-          .json({ message: "Old partner not found or not a partner" });
-      }
-
-      // 2️⃣ Deactivate old partner
-      const deactivatedPartner = await User.findByIdAndUpdate(
-        oldId,
-        { $set: { status: "SUSPENDED", updatedAt: new Date() } },
-        { new: true }
-      );
-      console.log(`Partner ${oldId} deactivated`);
-
-      // 3️⃣ Send email
-      try {
-        await sendMail({
-          to: deactivatedPartner.email,
-          subject: "Your Partner Account Has Been Deactivated",
-          html: `
-          <p>Dear ${deactivatedPartner.firstName} ${deactivatedPartner.lastName},</p>
-          <p>Your Partner account has been <b>deactivated</b>.</p>
-          <p>If you believe this is an error, contact support immediately.</p>
-        `,
-        });
-        console.log("Deactivation email sent");
-      } catch (err) {
-        console.error("Failed to send email:", err.message);
-      }
-
-      return res.json({
-        message: `Partner ${deactivatedPartner.firstName} ${deactivatedPartner.lastName} has been deactivated.`,
-        deactivatedPartner: {
-          id: deactivatedPartner._id,
-          name: `${deactivatedPartner.firstName} ${deactivatedPartner.lastName}`,
-          email: deactivatedPartner.email,
-        },
-      });
-    } catch (error) {
-      console.error("Error in /deactivate-partner:", error);
-      res
-        .status(500)
-        .json({ message: "Internal server error", error: error.message });
-    }
-  }
-);
 
 router.post(
-  "/partner/activate",
+  "/partner-activate",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
@@ -2639,7 +2251,6 @@ router.post(
 
       res.json({
         message: "Partner activated successfully and notified via email",
-        partner,
       });
     } catch (error) {
       console.error("Error in /partner/activate:", error);
@@ -3235,22 +2846,20 @@ router.get(
       // ⚠️ CRITICAL: If user is SUSPENDED, return zero targets and achievements
       if (user.status === "SUSPENDED") {
         return res.json({
-          data: {
-            profile: {
-              userId: user._id,
-              name: `${user.firstName} ${user.lastName}`,
-              role: user.role,
-              email: user.email,
-              phone: user.phone,
-              employeeId: user.employeeId || null,
-              status: user.status,
-            },
-            analytics: {
-              totals: {},
-              totalDisbursed: 0,
-              assignedTarget: { targetValue: 0, achievedValue: 0 },
-              performance: "0.00%",
-            },
+          profile: {
+            userId: user._id,
+            name: `${user.firstName} ${user.lastName}`,
+            role: user.role,
+            email: user.email,
+            phone: user.phone,
+            employeeId: user.employeeId || null,
+            status: user.status,
+          },
+          analytics: {
+            totals: {},
+            totalDisbursed: 0,
+            assignedTarget: { targetValue: 0, achievedValue: 0 },
+            performance: "0.00%",
           },
         });
       }
@@ -3562,18 +3171,16 @@ router.get(
 
       // Response - wrap in data object to match frontend expectations
       return res.json({
-        data: {
-          profile: base,
-          analytics: {
-            scope,
-            totals,
-            assignedTarget: assignedTargetValue,
-            totalDisbursed,
-            performance:
-              scope === ROLES.ASM || scope === ROLES.RSM || scope === ROLES.RM || scope === ROLES.PARTNER
-                ? `${performance}%`
-                : undefined,
-          },
+        profile: base,
+        analytics: {
+          scope,
+          totals,
+          assignedTarget: assignedTargetValue,
+          totalDisbursed,
+          performance:
+            scope === ROLES.ASM || scope === ROLES.RSM || scope === ROLES.RM || scope === ROLES.PARTNER
+              ? `${performance}%`
+              : undefined,
         },
       });
     } catch (err) {
@@ -5064,13 +4671,235 @@ router.post(
 // POST /api/admin/target/distribute-hierarchical
 // Top-Down Target Distribution: Admin sets total company target, system divides it down the hierarchy
 // Admin → ASM → RSM → RM → Partner
+router.get(
+  "/target/distribution-preview",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const month = Number(req.query.month);
+      const year = Number(req.query.year);
+
+      if (!month || !year) {
+        return res.status(400).json({ message: "month and year are required" });
+      }
+
+      if (month < 1 || month > 12) {
+        return res.status(400).json({ message: "Invalid month value" });
+      }
+
+      const [asms, rsms, rms, partners, targetDocs] = await Promise.all([
+        User.find({ role: ROLES.ASM }).select("_id").lean(),
+        User.find({ role: ROLES.RSM }).select("_id").lean(),
+        User.find({ role: ROLES.RM }).select("_id").lean(),
+        User.find({ role: ROLES.PARTNER }).select("_id").lean(),
+        Target.find({ month, year }).select("role disbursementTarget targetValue").lean(),
+      ]);
+
+      const sumByRole = (role) =>
+        targetDocs
+          .filter((t) => t.role === role)
+          .reduce(
+            (sum, t) => sum + Number(t.disbursementTarget || t.targetValue || 0),
+            0
+          );
+
+      const current = {
+        asmTotal: sumByRole(ROLES.ASM),
+        rsmTotal: sumByRole(ROLES.RSM),
+        rmTotal: sumByRole(ROLES.RM),
+        partnerTotal: sumByRole(ROLES.PARTNER),
+      };
+
+      res.json({
+        month,
+        year,
+        hierarchyCounts: {
+          asmCount: asms.length,
+          rsmCount: rsms.length,
+          rmCount: rms.length,
+          partnerCount: partners.length,
+        },
+        currentTotals: current,
+      });
+    } catch (err) {
+      console.error("Target distribution preview error:", err);
+      res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// POST /api/admin/target/assign-new-users
+// Assign targets only to users who don't have target entries for selected month/year.
+router.post(
+  "/target/assign-new-users",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { month, year } = req.body || {};
+      const targetMonth = Number(month);
+      const targetYear = Number(year);
+      const adminId = req.user.sub;
+
+      if (!targetMonth || !targetYear) {
+        return res.status(400).json({ message: "Month and year are required" });
+      }
+      if (targetMonth < 1 || targetMonth > 12) {
+        return res.status(400).json({ message: "Invalid month value" });
+      }
+
+      const [asms, rsms, rms, partners, targets] = await Promise.all([
+        User.find({ role: ROLES.ASM }).lean(),
+        User.find({ role: ROLES.RSM }).lean(),
+        User.find({ role: ROLES.RM }).lean(),
+        User.find({ role: ROLES.PARTNER }).lean(),
+        Target.find({
+          month: targetMonth,
+          year: targetYear,
+          role: { $in: [ROLES.ASM, ROLES.RSM, ROLES.RM, ROLES.PARTNER] },
+        }).lean(),
+      ]);
+
+      const targetMap = new Map(
+        targets.map((t) => [`${t.role}:${String(t.assignedTo)}`, t])
+      );
+
+      const avg = (rows, picker) => {
+        if (!rows.length) return 0;
+        const total = rows.reduce((sum, row) => sum + Number(picker(row) || 0), 0);
+        return Number((total / rows.length).toFixed(2));
+      };
+
+      const asmAvg = avg(
+        targets.filter((t) => t.role === ROLES.ASM),
+        (t) => t.disbursementTarget || t.targetValue
+      );
+      const rsmAvg = avg(
+        targets.filter((t) => t.role === ROLES.RSM),
+        (t) => t.disbursementTarget || t.targetValue
+      );
+      const rmAvg = avg(
+        targets.filter((t) => t.role === ROLES.RM),
+        (t) => t.disbursementTarget || t.targetValue
+      );
+      const partnerAvg = avg(
+        targets.filter((t) => t.role === ROLES.PARTNER),
+        (t) => t.disbursementTarget || t.targetValue
+      );
+      const partnerFileAvg = Math.max(
+        1,
+        Math.round(
+          avg(
+            targets.filter((t) => t.role === ROLES.PARTNER),
+            (t) => t.fileCountTarget || 0
+          )
+        )
+      );
+
+      const assignments = [];
+      const summary = {
+        asmAssigned: 0,
+        rsmAssigned: 0,
+        rmAssigned: 0,
+        partnerAssigned: 0,
+      };
+
+      for (const u of asms) {
+        if (targetMap.has(`${ROLES.ASM}:${String(u._id)}`)) continue;
+        const doc = await Target.create({
+          assignedBy: adminId,
+          assignedTo: u._id,
+          role: ROLES.ASM,
+          month: targetMonth,
+          year: targetYear,
+          fileCountTarget: 0,
+          disbursementTarget: asmAvg,
+          targetValue: asmAvg,
+          isCalculated: true,
+        });
+        assignments.push(doc);
+        summary.asmAssigned += 1;
+      }
+
+      for (const u of rsms) {
+        if (targetMap.has(`${ROLES.RSM}:${String(u._id)}`)) continue;
+        const doc = await Target.create({
+          assignedBy: adminId,
+          assignedTo: u._id,
+          role: ROLES.RSM,
+          month: targetMonth,
+          year: targetYear,
+          fileCountTarget: 0,
+          disbursementTarget: rsmAvg,
+          targetValue: rsmAvg,
+          isCalculated: true,
+        });
+        assignments.push(doc);
+        summary.rsmAssigned += 1;
+      }
+
+      for (const u of rms) {
+        if (targetMap.has(`${ROLES.RM}:${String(u._id)}`)) continue;
+        const doc = await Target.create({
+          assignedBy: adminId,
+          assignedTo: u._id,
+          role: ROLES.RM,
+          month: targetMonth,
+          year: targetYear,
+          fileCountTarget: 0,
+          disbursementTarget: rmAvg,
+          targetValue: rmAvg,
+          isCalculated: true,
+        });
+        assignments.push(doc);
+        summary.rmAssigned += 1;
+      }
+
+      for (const u of partners) {
+        if (targetMap.has(`${ROLES.PARTNER}:${String(u._id)}`)) continue;
+        const doc = await Target.create({
+          assignedBy: adminId,
+          assignedTo: u._id,
+          role: ROLES.PARTNER,
+          month: targetMonth,
+          year: targetYear,
+          fileCountTarget: partnerFileAvg,
+          disbursementTarget: partnerAvg,
+          targetValue: partnerAvg,
+          isCalculated: false,
+        });
+        assignments.push(doc);
+        summary.partnerAssigned += 1;
+      }
+
+      return res.status(201).json({
+        message: "Targets assigned to newly added users",
+        month: targetMonth,
+        year: targetYear,
+        totalNewAssignments: assignments.length,
+        summary,
+      });
+    } catch (err) {
+      console.error("Assign new users targets error:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
 router.post(
   "/target/distribute-hierarchical",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const { month, year, totalCompanyTarget, partnerFileCountTarget } = req.body;
+      const {
+        month,
+        year,
+        totalCompanyTarget,
+        partnerFileCountTarget,
+        assignmentMode = "replace",
+      } = req.body;
 
       if (!month || !year) {
         return res.status(400).json({ message: "Month and year are required" });
@@ -5096,11 +4925,29 @@ router.post(
         });
       }
 
+      if (!["replace", "add"].includes(String(assignmentMode))) {
+        return res.status(400).json({
+          message: "assignmentMode must be either 'replace' or 'add'",
+        });
+      }
+
       const adminId = req.user.sub;
       const targetMonth = Number(month);
       const targetYear = Number(year);
       const totalTarget = Number(totalCompanyTarget);
       const fileCountTarget = Number(partnerFileCountTarget);
+      const mode = String(assignmentMode);
+
+      const applyDisbursementByMode = (existingValue, incomingValue) => {
+        const existing = Number(existingValue || 0);
+        const incoming = Number(incomingValue || 0);
+        return mode === "add" ? existing + incoming : incoming;
+      };
+      const applyFileCountByMode = (existingValue, incomingValue) => {
+        const existing = Number(existingValue || 0);
+        const incoming = Number(incomingValue || 0);
+        return mode === "add" ? existing + incoming : incoming;
+      };
 
       if (targetMonth < 1 || targetMonth > 12) {
         return res.status(400).json({ message: "Invalid month value" });
@@ -5140,8 +4987,12 @@ router.post(
           });
 
           if (asmTargetDoc) {
-            asmTargetDoc.disbursementTarget = asmTarget;
-            asmTargetDoc.targetValue = asmTarget;
+            const finalAsmTarget = applyDisbursementByMode(
+              asmTargetDoc.disbursementTarget || asmTargetDoc.targetValue,
+              asmTarget
+            );
+            asmTargetDoc.disbursementTarget = finalAsmTarget;
+            asmTargetDoc.targetValue = finalAsmTarget;
             asmTargetDoc.fileCountTarget = 0;
             asmTargetDoc.assignedBy = adminId;
             asmTargetDoc.isCalculated = true;
@@ -5192,8 +5043,12 @@ router.post(
             });
 
             if (rsmTargetDoc) {
-              rsmTargetDoc.disbursementTarget = rsmTarget;
-              rsmTargetDoc.targetValue = rsmTarget;
+              const finalRsmTarget = applyDisbursementByMode(
+                rsmTargetDoc.disbursementTarget || rsmTargetDoc.targetValue,
+                rsmTarget
+              );
+              rsmTargetDoc.disbursementTarget = finalRsmTarget;
+              rsmTargetDoc.targetValue = finalRsmTarget;
               rsmTargetDoc.fileCountTarget = 0;
               rsmTargetDoc.assignedBy = adminId;
               rsmTargetDoc.isCalculated = true;
@@ -5236,8 +5091,12 @@ router.post(
               });
 
               if (rmTargetDoc) {
-                rmTargetDoc.disbursementTarget = rmTarget;
-                rmTargetDoc.targetValue = rmTarget;
+                const finalRmTarget = applyDisbursementByMode(
+                  rmTargetDoc.disbursementTarget || rmTargetDoc.targetValue,
+                  rmTarget
+                );
+                rmTargetDoc.disbursementTarget = finalRmTarget;
+                rmTargetDoc.targetValue = finalRmTarget;
                 rmTargetDoc.fileCountTarget = 0;
                 rmTargetDoc.assignedBy = adminId;
                 rmTargetDoc.isCalculated = true;
@@ -5273,9 +5132,17 @@ router.post(
               });
 
               if (partnerTarget) {
-                partnerTarget.fileCountTarget = fileCountTarget;
-                partnerTarget.disbursementTarget = partnerDisbursementTarget;
-                partnerTarget.targetValue = partnerDisbursementTarget;
+                const finalPartnerDisbursement = applyDisbursementByMode(
+                  partnerTarget.disbursementTarget || partnerTarget.targetValue,
+                  partnerDisbursementTarget
+                );
+                const finalPartnerFileCount = applyFileCountByMode(
+                  partnerTarget.fileCountTarget,
+                  fileCountTarget
+                );
+                partnerTarget.fileCountTarget = finalPartnerFileCount;
+                partnerTarget.disbursementTarget = finalPartnerDisbursement;
+                partnerTarget.targetValue = finalPartnerDisbursement;
                 partnerTarget.assignedBy = adminId;
                 partnerTarget.isCalculated = false;
                 await partnerTarget.save();
@@ -5305,8 +5172,12 @@ router.post(
             });
 
             if (rmTargetDoc) {
-              rmTargetDoc.disbursementTarget = rmActualTarget;
-              rmTargetDoc.targetValue = rmActualTarget;
+              const finalRmActualTarget = applyDisbursementByMode(
+                rmTargetDoc.disbursementTarget || rmTargetDoc.targetValue,
+                rmActualTarget
+              );
+              rmTargetDoc.disbursementTarget = finalRmActualTarget;
+              rmTargetDoc.targetValue = finalRmActualTarget;
               rmTargetDoc.fileCountTarget = 0;
               rmTargetDoc.assignedBy = adminId;
               rmTargetDoc.isCalculated = true;
@@ -5337,8 +5208,12 @@ router.post(
           });
 
           if (rsmTargetDoc) {
-            rsmTargetDoc.disbursementTarget = rsmActualTarget;
-            rsmTargetDoc.targetValue = rsmActualTarget;
+            const finalRsmActualTarget = applyDisbursementByMode(
+              rsmTargetDoc.disbursementTarget || rsmTargetDoc.targetValue,
+              rsmActualTarget
+            );
+            rsmTargetDoc.disbursementTarget = finalRsmActualTarget;
+            rsmTargetDoc.targetValue = finalRsmActualTarget;
             rsmTargetDoc.fileCountTarget = 0;
             rsmTargetDoc.assignedBy = adminId;
             rsmTargetDoc.isCalculated = true;
@@ -5369,8 +5244,12 @@ router.post(
         });
 
         if (asmTargetDoc) {
-          asmTargetDoc.disbursementTarget = asmActualTarget;
-          asmTargetDoc.targetValue = asmActualTarget;
+          const finalAsmActualTarget = applyDisbursementByMode(
+            asmTargetDoc.disbursementTarget || asmTargetDoc.targetValue,
+            asmActualTarget
+          );
+          asmTargetDoc.disbursementTarget = finalAsmActualTarget;
+          asmTargetDoc.targetValue = finalAsmActualTarget;
           asmTargetDoc.fileCountTarget = 0;
           asmTargetDoc.assignedBy = adminId;
           asmTargetDoc.isCalculated = true;
@@ -5392,9 +5271,13 @@ router.post(
       }
 
       res.status(201).json({
-        message: "Top-down hierarchical targets distributed successfully",
+        message:
+          mode === "add"
+            ? "Top-down hierarchical targets added successfully"
+            : "Top-down hierarchical targets distributed successfully",
         month: targetMonth,
         year: targetYear,
+        assignmentMode: mode,
         totalCompanyTarget: totalTarget,
         partnerFileCountTarget: fileCountTarget,
         distributionSummary,

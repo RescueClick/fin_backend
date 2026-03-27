@@ -14,6 +14,15 @@ import { Application } from "../models/Application.js";
 import { sendMail } from "../utils/sendMail.js";
 import { sendUserAccountEmail } from "../utils/emailService.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
+import {
+  buildReassignableApplicationFilter,
+  buildReassignmentAudit,
+  REASSIGNABLE_PAYOUT_STATUS,
+  REASSIGNABLE_INCENTIVE_STATUS,
+  LOCKED_PAYOUT_STATUS,
+  LOCKED_INCENTIVE_STATUS,
+} from "../utils/reassignmentPolicy.js";
+import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
 
 const router = Router();
 
@@ -1013,39 +1022,36 @@ router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.ASM), async (req, re
       ]
     });
 
-    // Wrap in data object to match universal format
     res.json({
-      data: {
-        profile: {
-          userId: rsm._id,
-          name: `${rsm.firstName} ${rsm.lastName}`,
-          email: rsm.email,
-          phone: rsm.phone || "N/A",
-          employeeId: rsm.employeeId || "N/A",
-          status: rsm.status || "ACTIVE",
+      profile: {
+        userId: rsm._id,
+        name: `${rsm.firstName} ${rsm.lastName}`,
+        email: rsm.email,
+        phone: rsm.phone || "N/A",
+        employeeId: rsm.employeeId || "N/A",
+        status: rsm.status || "ACTIVE",
+      },
+      analytics: {
+        scope: ROLES.RSM,
+        totals: {
+          rms: rmIds.length,
+          totalRMs: rmIds.length,
+          partners: partnerIds.length,
+          totalPartners: partnerIds.length,
+          totalApplications,
+          disbursedApplications,
+          inProcessApplications,
+          customers: customers.length,
         },
-        analytics: {
-          scope: ROLES.RSM,
-          totals: {
-            rms: rmIds.length,
-            totalRMs: rmIds.length,
-            partners: partnerIds.length,
-            totalPartners: partnerIds.length,
-            totalApplications,
-            disbursedApplications,
-            inProcessApplications,
-            customers: customers.length,
-          },
-          assignedTarget: {
-            month: now.toLocaleString('default', { month: 'long' }),
-            year: currentYear,
-            targetValue,
-            achievedValue,
-          },
-          totalDisbursed: totalRevenue, // Overall total disbursed
-          performance: targetValue > 0 ? `${((totalRevenue / targetValue) * 100).toFixed(2)}%` : "0.00%",
-          monthlyPerformance: monthlyAchieved,
+        assignedTarget: {
+          month: now.toLocaleString('default', { month: 'long' }),
+          year: currentYear,
+          targetValue,
+          achievedValue,
         },
+        totalDisbursed: totalRevenue, // Overall total disbursed
+        performance: targetValue > 0 ? `${((totalRevenue / targetValue) * 100).toFixed(2)}%` : "0.00%",
+        monthlyPerformance: monthlyAchieved,
       },
     });
   } catch (error) {
@@ -2200,10 +2206,11 @@ router.get(
 );
 
 router.post(
-  "/assign-partners-rm",
+  "/rm-deactivate",
   auth,
   requireRole(ROLES.ASM),
   async (req, res) => {
+    const session = await mongoose.startSession();
     try {
       const { oldRmId, newRmId } = req.body;
 
@@ -2211,40 +2218,60 @@ router.post(
         return res.status(400).json({ message: "Both RM IDs are required" });
       }
 
-      // 1️⃣ Find all partners under old RM
-      const partners = await User.find(
-        { role: ROLES.PARTNER, rmId: oldRmId },
-        "_id"
-      );
-      const partnerIds = partners.map((p) => p._id);
+      let partnerCount = 0;
+      let appModifiedCount = 0;
+      let oldRm;
+      let newRm;
+      let reassignmentAudit;
+      await session.withTransaction(async () => {
+        const partners = await User.find(
+          { role: ROLES.PARTNER, rmId: oldRmId },
+          "_id"
+        ).session(session);
+        const partnerIds = partners.map((p) => p._id);
+        partnerCount = partnerIds.length;
 
-      // 2️⃣ Reassign partners from old RM to new RM
-      await User.updateMany(
-        { role: ROLES.PARTNER, rmId: oldRmId },
-        { $set: { rmId: newRmId } }
-      );
-
-      // 3️⃣ Reassign customers under those partners to new RM
-      if (partnerIds.length > 0) {
         await User.updateMany(
-          { partnerId: { $in: partnerIds } },
-          { $set: { rmId: newRmId } }
+          { role: ROLES.PARTNER, rmId: oldRmId },
+          { $set: { rmId: newRmId } },
+          { session }
         );
-      }
 
-      // 4️⃣ Deactivate the old RM and get updated document
-      const oldRm = await User.findOneAndUpdate(
-        { _id: oldRmId, role: ROLES.RM },
-        { $set: { status: "SUSPENDED" } },
-        { new: true }
-      );
+        const appUpdate = await Application.updateMany(
+          buildReassignableApplicationFilter({ rmId: oldRmId }),
+          { $set: { rmId: newRmId } },
+          { session }
+        );
+        appModifiedCount = appUpdate.modifiedCount || 0;
 
-      const newRm = await User.findById(newRmId);
-      if (!newRm || newRm.role !== ROLES.RM) {
-        return res.status(404).json({ message: "New RM not found or invalid" });
-      }
+        if (partnerIds.length > 0) {
+          await User.updateMany(
+            { partnerId: { $in: partnerIds } },
+            { $set: { rmId: newRmId } },
+            { session }
+          );
+        }
 
-      // 5️⃣ Send deactivation email
+        oldRm = await User.findOneAndUpdate(
+          { _id: oldRmId, role: ROLES.RM },
+          { $set: { status: "SUSPENDED" } },
+          { new: true, session }
+        );
+
+        newRm = await User.findById(newRmId).session(session);
+        if (!newRm || newRm.role !== ROLES.RM) {
+          throw new Error("New RM not found or invalid");
+        }
+        reassignmentAudit = buildReassignmentAudit({
+          changedBy: req.user.sub,
+          oldUserId: oldRmId,
+          newUserId: newRmId,
+          action: "asm_rm_deactivate",
+        });
+        await persistReassignmentAudit(reassignmentAudit, req, session);
+      });
+
+      // 6️⃣ Send deactivation email
       if (oldRm) {
         try {
           await sendMail({
@@ -2295,11 +2322,17 @@ router.post(
 
       res.json({
         message:
-          "All Partners reassigned, customers under those partners moved to new RM, and old RM deactivated (mail sent)",
+          "RM deactivated and active workload reassigned successfully. Settled finance/history is preserved.",
+        reassignmentAudit,
       });
     } catch (error) {
+      if (error.message === "New RM not found or invalid") {
+        return res.status(404).json({ message: error.message });
+      }
       console.error("Error in /assign-partners-rm:", error);
       res.status(500).json({ message: error.message });
+    } finally {
+      await session.endSession();
     }
   }
 );
@@ -2424,12 +2457,13 @@ router.post(
 // );
 
 router.post(
-  "/deactivate-partner",
+  "/partner-deactivate",
   auth,
   requireRole(ROLES.ASM),
   async (req, res) => {
+    const session = await mongoose.startSession();
     try {
-      const { oldPartnerId } = req.body;
+      const { oldPartnerId, newPartnerId } = req.body;
 
       if (!oldPartnerId) {
         return res.status(400).json({ message: "oldPartnerId is required" });
@@ -2437,20 +2471,83 @@ router.post(
 
       const oldId = new mongoose.Types.ObjectId(oldPartnerId);
 
-      // 1️⃣ Validate old partner
-      const oldPartner = await User.findById(oldId);
-      if (!oldPartner || oldPartner.role !== ROLES.PARTNER) {
-        return res
-          .status(404)
-          .json({ message: "Old partner not found or not a partner" });
-      }
+      let reassignedCustomers = 0;
+      let reassignedApplications = 0;
+      let reassignedPayouts = 0;
+      let reassignedIncentives = 0;
+      let preservedPayoutsDone = 0;
+      let preservedIncentivesPaid = 0;
+      let deactivatedPartner = null;
+      let reassignmentAudit = null;
 
-      // 2️⃣ Deactivate old partner
-      const deactivatedPartner = await User.findByIdAndUpdate(
-        oldId,
-        { $set: { status: "SUSPENDED", updatedAt: new Date() } },
-        { new: true }
-      );
+      await session.withTransaction(async () => {
+        const oldPartner = await User.findById(oldId).session(session);
+        if (!oldPartner || oldPartner.role !== ROLES.PARTNER) {
+          throw new Error("Old partner not found or not a partner");
+        }
+
+        if (newPartnerId) {
+          const newId = new mongoose.Types.ObjectId(newPartnerId);
+          const newPartner = await User.findById(newId).session(session);
+          if (
+            !newPartner ||
+            newPartner.role !== ROLES.PARTNER ||
+            String(newPartner._id) === String(oldPartner._id)
+          ) {
+            throw new Error("Valid newPartnerId is required");
+          }
+
+          const customerUpdate = await User.updateMany(
+            { role: ROLES.CUSTOMER, partnerId: oldId },
+            { $set: { partnerId: newId } },
+            { session }
+          );
+          reassignedCustomers = customerUpdate.modifiedCount || 0;
+
+          const appUpdate = await Application.updateMany(
+            buildReassignableApplicationFilter({ partnerId: oldId }),
+            { $set: { partnerId: newId } },
+            { session }
+          );
+          reassignedApplications = appUpdate.modifiedCount || 0;
+
+          const payoutUpdate = await Payout.updateMany(
+            { partnerId: oldId, payOutStatus: REASSIGNABLE_PAYOUT_STATUS },
+            { $set: { partnerId: newId } },
+            { session }
+          );
+          reassignedPayouts = payoutUpdate.modifiedCount || 0;
+
+          const incentiveUpdate = await Incentive.updateMany(
+            { partnerId: oldId, status: REASSIGNABLE_INCENTIVE_STATUS },
+            { $set: { partnerId: newId } },
+            { session }
+          );
+          reassignedIncentives = incentiveUpdate.modifiedCount || 0;
+        }
+
+        deactivatedPartner = await User.findByIdAndUpdate(
+          oldId,
+          { $set: { status: "SUSPENDED", updatedAt: new Date() } },
+          { new: true, session }
+        );
+        preservedPayoutsDone = await Payout.countDocuments({
+          partnerId: oldId,
+          payOutStatus: LOCKED_PAYOUT_STATUS,
+        }).session(session);
+        preservedIncentivesPaid = await Incentive.countDocuments({
+          partnerId: oldId,
+          status: LOCKED_INCENTIVE_STATUS,
+        }).session(session);
+
+        reassignmentAudit = buildReassignmentAudit({
+          changedBy: req.user.sub,
+          oldUserId: oldPartnerId,
+          newUserId: newPartnerId || null,
+          action: "asm_partner_deactivate",
+        });
+        await persistReassignmentAudit(reassignmentAudit, req, session);
+      });
       console.log(`Partner ${oldId} deactivated`);
 
       // 3️⃣ Send email
@@ -2470,24 +2567,28 @@ router.post(
       }
 
       return res.json({
-        message: `Partner ${deactivatedPartner.firstName} ${deactivatedPartner.lastName} has been deactivated.`,
-        deactivatedPartner: {
-          id: deactivatedPartner._id,
-          name: `${deactivatedPartner.firstName} ${deactivatedPartner.lastName}`,
-          email: deactivatedPartner.email,
-        },
+        message: `Partner ${deactivatedPartner.firstName} ${deactivatedPartner.lastName} has been deactivated. Active workload moved, settled finance/history preserved.`,
+        reassignmentAudit,
       });
     } catch (error) {
+      if (error.message === "Old partner not found or not a partner") {
+        return res.status(404).json({ message: error.message });
+      }
+      if (error.message === "Valid newPartnerId is required") {
+        return res.status(400).json({ message: error.message });
+      }
       console.error("Error in /deactivate-partner:", error);
       res
         .status(500)
         .json({ message: "Internal server error", error: error.message });
+    } finally {
+      await session.endSession();
     }
   }
 );
 
 // Activate RM (ASM can activate RMs under their RSMs)
-router.post("/rm/activate", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.post("/rm-activate", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
     const { rmId } = req.body;
 
@@ -2544,7 +2645,6 @@ router.post("/rm/activate", auth, requireRole(ROLES.ASM), async (req, res) => {
 
     res.json({
       message: "RM activated successfully and notified via email",
-      rm: updatedRm,
     });
   } catch (error) {
     console.error("Error in /rm/activate:", error);
@@ -2552,175 +2652,9 @@ router.post("/rm/activate", auth, requireRole(ROLES.ASM), async (req, res) => {
   }
 });
 
-// Deactivate RM (ASM can deactivate RMs under their RSMs) - with automatic reassignment
-router.post("/rm/deactivate", auth, requireRole(ROLES.ASM), async (req, res) => {
-  try {
-    const { rmId } = req.body;
-
-    if (!rmId) {
-      return res.status(400).json({ message: "rmId is required" });
-    }
-
-    const asmId = req.user.sub;
-
-    // Get RSMs under this ASM
-    const rsms = await User.find({ role: ROLES.RSM, asmId }).select("_id").lean();
-    const rsmIds = rsms.map(r => r._id);
-
-    // Verify RM belongs to one of the RSMs under this ASM
-    const oldRm = await User.findOne({
-      _id: rmId,
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } }
-      ]
-    });
-
-    if (!oldRm) {
-      return res.status(404).json({ message: "RM not found or not under your management" });
-    }
-
-    // Find another active RM under the same RSM(s) or ASM
-    let newRm = null;
-    const oldRsmIds = [];
-    if (oldRm.personalRsmId) oldRsmIds.push(oldRm.personalRsmId);
-    if (oldRm.businessHomeRsmId) oldRsmIds.push(oldRm.businessHomeRsmId);
-
-    if (oldRsmIds.length > 0) {
-      // Find another active RM under the same RSM(s)
-      newRm = await User.findOne({
-        role: ROLES.RM,
-        status: "ACTIVE",
-        _id: { $ne: rmId },
-        $or: [
-          { personalRsmId: { $in: oldRsmIds } },
-          { businessHomeRsmId: { $in: oldRsmIds } }
-        ]
-      });
-    }
-
-    // If no RM found under same RSM, find any active RM under this ASM
-    if (!newRm) {
-      newRm = await User.findOne({
-        role: ROLES.RM,
-        status: "ACTIVE",
-        _id: { $ne: rmId },
-        $or: [
-          { personalRsmId: { $in: rsmIds } },
-          { businessHomeRsmId: { $in: rsmIds } }
-        ]
-      });
-    }
-
-    if (!newRm) {
-      return res.status(400).json({ 
-        message: "Cannot deactivate RM. No other active RM found under your management to reassign data." 
-      });
-    }
-
-    // 1️⃣ Reassign all Partners from old RM to new RM first
-    const partners = await User.find(
-      { role: ROLES.PARTNER, rmId: rmId },
-      "_id"
-    );
-    const partnerIds = partners.map((p) => p._id);
-    const partnersUpdated = await User.updateMany(
-      { role: ROLES.PARTNER, rmId: rmId },
-      { $set: { rmId: newRm._id } }
-    );
-
-    // 2️⃣ Reassign all Applications from old RM to new RM
-    // This includes both direct rmId assignments and applications via partners
-    const appsUpdated = await Application.updateMany(
-      {
-        $or: [
-          { rmId: rmId }, // Direct RM assignment
-          { partnerId: { $in: partnerIds } } // Applications from partners under old RM
-        ]
-      },
-      { $set: { rmId: newRm._id } }
-    );
-
-    // 3️⃣ Reassign all Customers of those Partners
-    let customersUpdated = 0;
-    if (partnerIds.length > 0) {
-      const customerUpdate = await User.updateMany(
-        { partnerId: { $in: partnerIds } },
-        { $set: { rmId: newRm._id } }
-      );
-      customersUpdated = customerUpdate.modifiedCount;
-    }
-
-    // 4️⃣ Deactivate the old RM
-    const deactivatedRm = await User.findByIdAndUpdate(
-      rmId,
-      { status: "SUSPENDED" },
-      { new: true }
-    );
-
-    // 📧 Send deactivation email to old RM
-    try {
-      await sendMail({
-        to: deactivatedRm.email,
-        subject: "Your RM Account Has Been Deactivated",
-        html: `
-          <p>Dear ${deactivatedRm.firstName} ${deactivatedRm.lastName},</p>
-          <p>Your RM account has been <b>deactivated</b> by your ASM.</p>
-          <p>All your Applications, Partners, and Customers have been reassigned to another RM.</p>
-          <p><b>Employee ID:</b> ${deactivatedRm.employeeId || "-"}<br/>
-          <b>RM Code:</b> ${deactivatedRm.rmCode || "-"}</p>
-          <p>If you believe this action was incorrect, please contact support.</p>
-          <br/>
-          <p>Regards,<br/>DhanSource Capital</p>
-        `,
-      });
-      console.log("📧 RM deactivation mail sent to:", deactivatedRm.email);
-    } catch (mailErr) {
-      console.error("❌ Failed to send RM deactivation email:", mailErr.message);
-    }
-
-    // 📧 Send notification email to new RM
-    try {
-      await sendMail({
-        to: newRm.email,
-        subject: "You Have Been Assigned New Data",
-        html: `
-          <p>Dear ${newRm.firstName} ${newRm.lastName},</p>
-          <p>You have been assigned new Applications, Partners, and Customers from a deactivated RM.</p>
-          <p><b>Employee ID:</b> ${newRm.employeeId || "-"}<br/>
-          <b>RM Code:</b> ${newRm.rmCode || "-"}</p>
-          <p>Please check your dashboard for details.</p>
-          <br/>
-          <p>Regards,<br/>DhanSource Capital</p>
-        `,
-      });
-      console.log("📧 Assignment mail sent to:", newRm.email);
-    } catch (mailErr) {
-      console.error("❌ Failed to send assignment email:", mailErr.message);
-    }
-
-    res.json({
-      message: "RM deactivated successfully. All data reassigned to another RM.",
-      reassigned: {
-        applications: appsUpdated.modifiedCount,
-        partners: partnersUpdated.modifiedCount,
-        customers: customersUpdated
-      },
-      newRm: {
-        id: newRm._id,
-        name: `${newRm.firstName} ${newRm.lastName}`,
-        employeeId: newRm.employeeId
-      }
-    });
-  } catch (error) {
-    console.error("Error in /rm/deactivate:", error);
-    res.status(500).json({ message: error.message });
-  }
-});
 
 router.post(
-  "/partner/activate",
+  "/partner-activate",
   auth,
   requireRole(ROLES.ASM),
   async (req, res) => {
@@ -2767,7 +2701,6 @@ router.post(
 
       res.json({
         message: "Partner activated successfully and notified via email",
-        partner,
       });
     } catch (error) {
       console.error("Error activating partner:", error);
@@ -3465,20 +3398,17 @@ router.get("/:id/analytics", auth, requireRole(ROLES.ASM), async (req, res) => {
     };
 
     // ============== RESPONSE =================
-    // Wrap in data object to match frontend expectations
     return res.json({
-      data: {
-        profile: base,
-        analytics: {
-          scope,
-          totals,
-          assignedTarget: assignedTargetValue,
-          totalDisbursed,
-          performance:
-            scope === ROLES.ASM || scope === ROLES.RM || scope === ROLES.PARTNER
-              ? `${performance}%`
-              : undefined,
-        },
+      profile: base,
+      analytics: {
+        scope,
+        totals,
+        assignedTarget: assignedTargetValue,
+        totalDisbursed,
+        performance:
+          scope === ROLES.ASM || scope === ROLES.RM || scope === ROLES.PARTNER
+            ? `${performance}%`
+            : undefined,
       },
     });
   } catch (err) {
@@ -3729,5 +3659,168 @@ router.get(
     }
   }
 );
+
+
+// POST /api/rsm/deactivate (ASM can deactivate RSM)
+router.post("/rsm-deactivate", auth, requireRole(ROLES.ASM), async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const rsmId = req.body?.rsmId || req.body?.oldRsmId;
+    const newRsmId = req.body?.newRsmId;
+
+    if (!rsmId) {
+      return res.status(400).json({ message: "rsmId is required" });
+    }
+
+    const asmId = req.user.sub;
+
+    let rsm;
+    let reassignedRms = 0;
+    let suspendedRsm;
+    let reassignmentAudit;
+    await session.withTransaction(async () => {
+      rsm = await User.findOne({ _id: rsmId, role: ROLES.RSM, asmId }).session(session);
+      if (!rsm) throw new Error("RSM not found or not under your management");
+
+      if (newRsmId) {
+        if (String(newRsmId) === String(rsmId)) {
+          throw new Error("newRsmId cannot be same as rsmId");
+        }
+        const newRsm = await User.findOne({
+          _id: newRsmId,
+          role: ROLES.RSM,
+          asmId,
+          status: "ACTIVE",
+          rsmType: rsm.rsmType,
+        }).session(session);
+        if (!newRsm) {
+          throw new Error("Valid active replacement RSM is required (same type, same ASM)");
+        }
+
+        const rmFilter =
+          rsm.rsmType === "PERSONAL"
+            ? { role: ROLES.RM, personalRsmId: rsm._id }
+            : rsm.rsmType === "BUSINESS_HOME"
+              ? { role: ROLES.RM, businessHomeRsmId: rsm._id }
+              : { role: ROLES.RM, $or: [{ personalRsmId: rsm._id }, { businessHomeRsmId: rsm._id }] };
+
+        const rmUpdate =
+          rsm.rsmType === "PERSONAL"
+            ? await User.updateMany(rmFilter, { $set: { personalRsmId: newRsm._id } }, { session })
+            : rsm.rsmType === "BUSINESS_HOME"
+              ? await User.updateMany(rmFilter, { $set: { businessHomeRsmId: newRsm._id } }, { session })
+              : await User.updateMany(rmFilter, { $set: { personalRsmId: newRsm._id, businessHomeRsmId: newRsm._id } }, { session });
+
+        reassignedRms = rmUpdate.modifiedCount || 0;
+      }
+
+      suspendedRsm = await User.findOneAndUpdate(
+        { _id: rsmId, role: ROLES.RSM, asmId },
+        { status: "SUSPENDED" },
+        { new: true, session }
+      );
+      reassignmentAudit = buildReassignmentAudit({
+        changedBy: req.user.sub,
+        oldUserId: rsmId,
+        newUserId: newRsmId || null,
+        action: "asm_rsm_deactivate",
+      });
+      await persistReassignmentAudit(reassignmentAudit, req, session);
+    });
+
+    // 📧 Send deactivation email
+    try {
+      await sendMail({
+        to: rsm.email,
+        subject: "Your RSM Account Has Been Deactivated",
+        html: `
+          <p>Dear ${rsm.firstName} ${rsm.lastName},</p>
+          <p>Your RSM account has been <b>deactivated</b> by your ASM.</p>
+          <p><b>Employee ID:</b> ${rsm.employeeId || "-"}<br/>
+          <b>RSM Type:</b> ${rsm.rsmType || "-"}</p>
+          <p>If you believe this action was incorrect, please contact support.</p>
+          <br/>
+          <p>Regards,<br/>DhanSource Capital</p>
+        `,
+      });
+      console.log("📧 RSM deactivation mail sent to:", rsm.email);
+    } catch (mailErr) {
+      console.error("❌ Failed to send RSM deactivation email:", mailErr.message);
+    }
+
+    res.json({
+      message: "RSM deactivated successfully and notified via email",
+      reassignmentAudit,
+    });
+  } catch (error) {
+    if (
+      error.message === "RSM not found or not under your management" ||
+      error.message === "newRsmId cannot be same as rsmId" ||
+      error.message === "Valid active replacement RSM is required (same type, same ASM)"
+    ) {
+      const code =
+        error.message === "RSM not found or not under your management"
+          ? 404
+          : 400;
+      return res.status(code).json({ message: error.message });
+    }
+    console.error("Error in /rsm/deactivate:", error);
+    res.status(500).json({ message: error.message });
+  } finally {
+    await session.endSession();
+  }
+});
+
+// POST /api/rsm/activate (ASM can activate RSM)
+router.post("/rsm-activate", auth, requireRole(ROLES.ASM), async (req, res) => {
+  try {
+    const { rsmId } = req.body;
+
+    if (!rsmId) {
+      return res.status(400).json({ message: "rsmId is required" });
+    }
+
+    const asmId = req.user.sub;
+
+    // Verify RSM belongs to this ASM
+    const rsm = await User.findOneAndUpdate(
+      { _id: rsmId, role: ROLES.RSM, asmId },
+      { status: "ACTIVE" },
+      { new: true }
+    );
+
+    if (!rsm) {
+      return res.status(404).json({ message: "RSM not found or not under your management" });
+    }
+
+    // 📧 Send activation email
+    try {
+      await sendMail({
+        to: rsm.email,
+        subject: "Your RSM Account Has Been Activated",
+        html: `
+          <p>Dear ${rsm.firstName} ${rsm.lastName},</p>
+          <p>We are pleased to inform you that your RSM account has been <b>activated</b> successfully.</p>
+          <p><b>Employee ID:</b> ${rsm.employeeId || "-"}<br/>
+          <b>RSM Type:</b> ${rsm.rsmType || "-"}</p>
+          <p>You can now log in and start managing your RMs and applications as usual.</p>
+          <br/>
+          <p>Regards,<br/>DhanSource Capital</p>
+        `,
+      });
+      console.log("📧 RSM activation mail sent to:", rsm.email);
+    } catch (mailErr) {
+      console.error("❌ Failed to send RSM activation email:", mailErr.message);
+    }
+
+    res.json({
+      message: "RSM activated successfully and notified via email",
+    });
+  } catch (error) {
+    console.error("Error in /rsm/activate:", error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 
 export default router;

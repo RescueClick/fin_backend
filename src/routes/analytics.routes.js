@@ -397,24 +397,22 @@ router.get(
       if (targetUser.status === "SUSPENDED") {
         const reportingChainSuspended = await buildReportingChain(targetUser);
         return res.json({
-          data: {
-            profile: {
-              userId: targetUser._id,
-              name: `${targetUser.firstName} ${targetUser.lastName}`,
-              role: targetUser.role,
-              email: targetUser.email,
-              phone: targetUser.phone || "N/A",
-              employeeId: targetUser.employeeId || "N/A",
-              status: targetUser.status,
-              reportingChain: reportingChainSuspended,
-            },
-            analytics: {
-              scope: targetUser.role,
-              totals: {},
-              totalDisbursed: 0,
-              assignedTarget: { targetValue: 0, achievedValue: 0 },
-              performance: "0.00%",
-            },
+          profile: {
+            userId: targetUser._id,
+            name: `${targetUser.firstName} ${targetUser.lastName}`,
+            role: targetUser.role,
+            email: targetUser.email,
+            phone: targetUser.phone || "N/A",
+            employeeId: targetUser.employeeId || "N/A",
+            status: targetUser.status,
+            reportingChain: reportingChainSuspended,
+          },
+          analytics: {
+            scope: targetUser.role,
+            totals: {},
+            totalDisbursed: 0,
+            assignedTarget: { targetValue: 0, achievedValue: 0 },
+            performance: "0.00%",
           },
         });
       }
@@ -890,20 +888,18 @@ router.get(
 
       // ==================== RESPONSE ====================
       return res.json({
-        data: {
-          profile: base,
-          analytics: {
-            scope,
-            totals,
-            assignedTarget: assignedTargetValue,
-            totalDisbursed,
-            totalIncentivesPaid,
-            monthlyPerformance,
-            performance:
-              scope === ROLES.ASM || scope === ROLES.RSM || scope === ROLES.RM || scope === ROLES.PARTNER
-                ? `${performance}%`
-                : undefined,
-          },
+        profile: base,
+        analytics: {
+          scope,
+          totals,
+          assignedTarget: assignedTargetValue,
+          totalDisbursed,
+          totalIncentivesPaid,
+          monthlyPerformance,
+          performance:
+            scope === ROLES.ASM || scope === ROLES.RSM || scope === ROLES.RM || scope === ROLES.PARTNER
+              ? `${performance}%`
+              : undefined,
         },
       });
     } catch (err) {
@@ -938,20 +934,18 @@ router.get("/:id/kpis", auth, async (req, res) => {
 
     if (targetUser.status === "SUSPENDED") {
       return res.json({
-        data: {
-          profile: {
-            userId: targetUser._id,
-            name: `${targetUser.firstName} ${targetUser.lastName}`,
-            role: targetUser.role,
-            status: targetUser.status,
-          },
-          kpis: {
-            funnel: {},
-            conversion: {},
-            statusDistribution: {},
-            financials: { payouts: {}, incentives: {} },
-            sla: {},
-          },
+        profile: {
+          userId: targetUser._id,
+          name: `${targetUser.firstName} ${targetUser.lastName}`,
+          role: targetUser.role,
+          status: targetUser.status,
+        },
+        kpis: {
+          funnel: {},
+          conversion: {},
+          statusDistribution: {},
+          financials: { payouts: {}, incentives: {} },
+          sla: {},
         },
       });
     }
@@ -1192,29 +1186,27 @@ router.get("/:id/kpis", auth, async (req, res) => {
     const sla = { disbursedSla, openCount, openStatuses, aging };
 
     return res.json({
-      data: {
-        profile: {
-          userId: targetUser._id,
-          name: `${targetUser.firstName} ${targetUser.lastName}`,
-          role: targetUser.role,
-          status: targetUser.status,
+      profile: {
+        userId: targetUser._id,
+        name: `${targetUser.firstName} ${targetUser.lastName}`,
+        role: targetUser.role,
+        status: targetUser.status,
+      },
+      kpis: {
+        scope: targetUser.role,
+        filters: {
+          start: startDate ? startDate.toISOString() : null,
+          end: endDate ? endDate.toISOString() : null,
+          loanType: req.query.loanType ? String(req.query.loanType) : null,
         },
-        kpis: {
-          scope: targetUser.role,
-          filters: {
-            start: startDate ? startDate.toISOString() : null,
-            end: endDate ? endDate.toISOString() : null,
-            loanType: req.query.loanType ? String(req.query.loanType) : null,
-          },
-          statusDistribution,
-          funnel,
-          conversion,
-          financials,
-          sla,
-          notes: {
-            lead: "Lead is not stored as a dedicated entity yet. Funnel starts from Application statuses.",
-            timeSlicing: "StatusDistribution/Funnel are time-sliced by Application.updatedAt (status change time).",
-          },
+        statusDistribution,
+        funnel,
+        conversion,
+        financials,
+        sla,
+        notes: {
+          lead: "Lead is not stored as a dedicated entity yet. Funnel starts from Application statuses.",
+          timeSlicing: "StatusDistribution/Funnel are time-sliced by Application.updatedAt (status change time).",
         },
       },
     });
