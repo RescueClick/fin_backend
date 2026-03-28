@@ -20,6 +20,7 @@ import { Incentive } from "../models/Incentive.js";
 import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { Config } from "../models/Config.js";
+import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 
 const validateApplicationPayload = ({
   customer = {},
@@ -516,15 +517,22 @@ router.post(
         });
       }
 
+      const normalizedPhone = normalizePhoneToTen(phone);
+      if (!/^\d{10}$/.test(normalizedPhone)) {
+        return res.status(400).json({
+          message: "Please enter a valid 10-digit phone number",
+        });
+      }
+
       const normalizedEmail = String(email).toLowerCase();
       const exists = await User.findOne({
-        $or: [{ email: normalizedEmail }, { phone }],
+        $or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
       })
         .select("email phone")
         .lean();
       if (exists) {
         const emailTaken = String(exists.email || "").toLowerCase() === normalizedEmail;
-        const phoneTaken = String(exists.phone || "") === String(phone || "");
+        const phoneTaken = String(exists.phone || "") === normalizedPhone;
 
         const field = emailTaken && phoneTaken ? "email,phone" : emailTaken ? "email" : "phone";
         const message =
@@ -590,7 +598,7 @@ router.post(
         firstName,
         middleName,
         lastName,
-        phone,
+        phone: normalizedPhone,
         dob,
         email: email.toLowerCase(),
         aadharNumber,

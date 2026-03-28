@@ -4,6 +4,7 @@ import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { ROLES, RSM_TYPES } from "../config/roles.js";
 import { assertValidRmRsmPair } from "../utils/rmRsmHierarchy.js";
+import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import { User } from "../models/User.js";
 import { makeRmCode, makeAsmCode } from "../utils/codes.js";
 import { Application } from "../models/Application.js";
@@ -393,6 +394,13 @@ router.post(
         });
       }
 
+      const normalizedPhone = normalizePhoneToTen(phone);
+      if (!/^\d{10}$/.test(normalizedPhone)) {
+        return res.status(400).json({
+          message: "Please enter a valid 10-digit phone number",
+        });
+      }
+
       if (!personalRsmId || !businessHomeRsmId) {
         return res.status(400).json({
           message: "Both personalRsmId and businessHomeRsmId are required",
@@ -402,13 +410,13 @@ router.post(
       // Check if email or phone already exists
       const normalizedEmail = String(email).toLowerCase();
       const exists = await User.findOne({
-        $or: [{ email: normalizedEmail }, { phone }],
+        $or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
       })
         .select("email phone")
         .lean();
       if (exists) {
         const emailTaken = String(exists.email || "").toLowerCase() === normalizedEmail;
-        const phoneTaken = String(exists.phone || "") === String(phone || "");
+        const phoneTaken = String(exists.phone || "") === normalizedPhone;
         const field = emailTaken && phoneTaken ? "email,phone" : emailTaken ? "email" : "phone";
         const message =
           emailTaken && phoneTaken
@@ -469,7 +477,7 @@ router.post(
         employeeId: await generateEmployeeId("RM"),
         firstName,
         lastName,
-        phone,
+        phone: normalizedPhone,
         region: region || asm?.region || "N/A", // Use provided region or inherit from ASM
         email: email.toLowerCase(),
         passwordHash: await argon2.hash(rawPassword),
@@ -793,7 +801,12 @@ router.get(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const list = await User.find({ role: ROLES.PARTNER })
+      // PENDING = awaiting admin verification / RM assignment — listed only via
+      // GET /admin/get-unassigned-partners (RM Partner screen), not the main directory.
+      const list = await User.find({
+        role: ROLES.PARTNER,
+        status: { $ne: "PENDING" },
+      })
         .select("-passwordHash -__v")
         .populate({
           path: "rmId", // populate RM details

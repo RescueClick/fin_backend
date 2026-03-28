@@ -43,8 +43,7 @@ const server = createServer(app);
 
 const allowedOrigins = [
   "http://localhost:5173",
-  "https://frontend-ifyy.vercel.app",
-  "https://trustlinefintech.com",
+  "https://dhansourcecapital.com",
 ];
 
 app.use(
