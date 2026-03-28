@@ -19,6 +19,7 @@ import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
 import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
+import { Config } from "../models/Config.js";
 
 const validateApplicationPayload = ({
   customer = {},
@@ -306,6 +307,28 @@ const mergeApplicationDocs = (existingDocs = [], newDocs = [], uploadedBy) => {
 
 const router = Router();
 
+/** Fallback when admin has not set a public-loan default partner code */
+const PUBLIC_LOAN_REFERRAL_FALLBACK = "PT-D4CTD8B2";
+
+// GET /api/partner/public-default-referral-code — no auth (public loan forms)
+router.get("/public-default-referral-code", async (req, res) => {
+  try {
+    const doc = await Config.findOne({
+      key: "PUBLIC_LOAN_DEFAULT_PARTNER_CODE",
+    }).lean();
+    const partnerCode =
+      doc?.value && typeof doc.value === "object" && doc.value.partnerCode
+        ? String(doc.value.partnerCode).trim()
+        : "";
+    res.json({
+      partnerCode: partnerCode || PUBLIC_LOAN_REFERRAL_FALLBACK,
+    });
+  } catch (err) {
+    console.error("public-default-referral-code:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 router.get("/loan-doc-rules", auth, async (req, res) => {
   try {
     const loanType = normalizeLoanType(req.query.loanType);
@@ -517,21 +540,33 @@ router.post(
       const rawPassword =
         password || `Pt@${Math.random().toString(36).slice(2, 10)}`;
 
-      let assignedRmId = null;
-      let status = "PENDING";
+      // Self-service partners always start PENDING under super admin until admin assigns an RM
+      const superAdmin = await User.findOne({ role: ROLES.SUPER_ADMIN })
+        .select("_id")
+        .lean();
+      if (!superAdmin) {
+        return res.status(503).json({
+          message:
+            "Registration is temporarily unavailable. Please contact support.",
+        });
+      }
+
+      const assignedRmId = superAdmin._id;
+      const status = "PENDING";
 
       if (rmCode) {
-        const rm = await User.findOne({ rmCode });
-        if (rm) {
-          assignedRmId = rm._id;
-          status = "ACTIVE";
-        } else {
-          const superAdmin = await User.findOne({ role: ROLES.SUPER_ADMIN });
-          if (superAdmin) assignedRmId = superAdmin._id;
+        const rm = await User.findOne({
+          rmCode: String(rmCode).trim(),
+          role: ROLES.RM,
+          status: "ACTIVE",
+        })
+          .select("_id")
+          .lean();
+        if (!rm) {
+          console.warn(
+            `Partner signup: invalid or inactive rmCode "${String(rmCode).trim()}"`
+          );
         }
-      } else {
-        const superAdmin = await User.findOne({ role: ROLES.SUPER_ADMIN });
-        if (superAdmin) assignedRmId = superAdmin._id;
       }
 
       const partnerId = req.partnerId || new mongoose.Types.ObjectId();
@@ -634,43 +669,49 @@ router.post(
         console.error("❌ Error creating admin notification:", notifErr);
       }
 
-      // 🔔 Create notification for assigned RM (if exists)
+      // 🔔 Notify RM only when this partner is actually assigned to an RM (not admin queue)
       if (assignedRmId) {
         try {
-          await createNotification(assignedRmId.toString(), {
-            type: "registration",
-            title: "New Partner Assigned",
-            message: `${partner.firstName} ${partner.lastName} (${partner.partnerCode}) has been assigned to you. Status: ${partner.status}`,
-            category: "partner",
-            priority: "normal",
-            data: {
-              partnerId: partner._id.toString(),
-              partnerCode: partner.partnerCode,
-              employeeId: partner.employeeId,
-              status: partner.status,
-            },
-            actionBy: {
-              _id: partner._id,
-              name: `${partner.firstName} ${partner.lastName}`,
-              role: ROLES.PARTNER,
-              email: partner.email,
-            },
-          });
-
-          // Emit socket event to RM
-          if (global.io) {
-            global.io.to(`rm_${assignedRmId.toString()}`).emit("newPartnerRegistered", {
-              partner: {
-                _id: partner._id,
-                firstName: partner.firstName,
-                lastName: partner.lastName,
-                email: partner.email,
-                status: partner.status,
+          const assignee = await User.findById(assignedRmId).select("role").lean();
+          if (assignee?.role === ROLES.RM) {
+            await createNotification(assignedRmId.toString(), {
+              type: "registration",
+              title: "New Partner Assigned",
+              message: `${partner.firstName} ${partner.lastName} (${partner.partnerCode}) has been assigned to you. Status: ${partner.status}`,
+              category: "partner",
+              priority: "normal",
+              data: {
+                partnerId: partner._id.toString(),
                 partnerCode: partner.partnerCode,
+                employeeId: partner.employeeId,
+                status: partner.status,
               },
-              timestamp: new Date(),
+              actionBy: {
+                _id: partner._id,
+                name: `${partner.firstName} ${partner.lastName}`,
+                role: ROLES.PARTNER,
+                email: partner.email,
+              },
             });
-            console.log("✅ Socket event emitted to RM for new partner registration");
+
+            if (global.io) {
+              global.io
+                .to(`rm_${assignedRmId.toString()}`)
+                .emit("newPartnerRegistered", {
+                  partner: {
+                    _id: partner._id,
+                    firstName: partner.firstName,
+                    lastName: partner.lastName,
+                    email: partner.email,
+                    status: partner.status,
+                    partnerCode: partner.partnerCode,
+                  },
+                  timestamp: new Date(),
+                });
+              console.log(
+                "✅ Socket event emitted to RM for new partner registration"
+              );
+            }
           }
         } catch (rmNotifErr) {
           console.error("❌ Error creating RM notification:", rmNotifErr);
@@ -756,7 +797,8 @@ router.post(
       }
 
       res.status(201).json({
-        message: "Partner signed up successfully and targets redistributed",
+        message:
+          "Partner registration submitted. An administrator will assign your RM and activate your account.",
         id: partner._id,
         partnerCode: partner.partnerCode,
         rmId: partner.rmId,

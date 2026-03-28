@@ -5,7 +5,11 @@ import { requireRole } from "../middleware/requireRole.js";
 import { ROLES } from "../config/roles.js";
 import { User } from "../models/User.js";
 import { makePartnerCode } from "../utils/codes.js";
-import { Application, APP_STATUSES } from "../models/Application.js";
+import {
+  Application,
+  APP_STATUSES,
+  findUploadedDocMatchingRequired,
+} from "../models/Application.js";
 import { Payout } from "../models/Payout.js";
 import fs from "fs";
 import path from "path";
@@ -39,6 +43,101 @@ import {
 } from "../utils/targetRebalanceService.js";
 
 const router = Router();
+
+/**
+ * Assign RSM/asm when moving to DOC_COMPLETE (same rules as POST /applications/:id/transition).
+ * Mutates app.rsmId and app.asmId.
+ */
+async function assignRsmForDocComplete(app, rmId) {
+  const rm = await User.findById(rmId).select("personalRsmId businessHomeRsmId");
+  if (!rm) {
+    return { ok: false, statusCode: 404, message: "RM not found" };
+  }
+
+  let targetRsmId = null;
+  if (app.loanType === "PERSONAL") {
+    targetRsmId = rm.personalRsmId;
+  } else if (
+    app.loanType === "BUSINESS" ||
+    app.loanType === "HOME_LOAN_SALARIED" ||
+    app.loanType === "HOME_LOAN_SELF_EMPLOYED"
+  ) {
+    targetRsmId = rm.businessHomeRsmId;
+  } else {
+    return { ok: false, statusCode: 400, message: `Unknown loan type: ${app.loanType}` };
+  }
+
+  if (!targetRsmId) {
+    return {
+      ok: false,
+      statusCode: 400,
+      message: `RM is not assigned to an RSM for loan type ${app.loanType}. Please contact admin to assign RSM.`,
+    };
+  }
+
+  const rsm = await User.findById(targetRsmId).select("asmId rsmType firstName lastName employeeId");
+  if (!rsm) {
+    return { ok: false, statusCode: 404, message: "Assigned RSM not found" };
+  }
+
+  app.rsmId = targetRsmId;
+  app.asmId = rsm.asmId;
+  return { ok: true };
+}
+
+/**
+ * After RM updates document verification, align application status with docs (SUBMITTED/DOC_INCOMPLETE → DOC_COMPLETE when all verified; SUBMITTED → DOC_INCOMPLETE when any doc is rejected).
+ */
+async function syncApplicationStatusAfterDocUpdate(app, rmId) {
+  const oldStatus = app.status;
+
+  if (!(app.status === "SUBMITTED" || app.status === "DOC_INCOMPLETE")) {
+    return { statusChanged: false, oldStatus, newStatus: oldStatus };
+  }
+
+  const allVerified = app.areAllDocumentsVerified();
+  const anyRejected = (app.docs || []).some((d) => d.status === "REJECTED");
+
+  if (allVerified) {
+    if (oldStatus === "DOC_COMPLETE") {
+      return { statusChanged: false, oldStatus, newStatus: oldStatus };
+    }
+    const assign = await assignRsmForDocComplete(app, rmId);
+    if (!assign.ok) {
+      const err = new Error(assign.message);
+      err.statusCode = assign.statusCode;
+      throw err;
+    }
+    app.transition("DOC_COMPLETE", rmId, "All required documents verified");
+    return { statusChanged: true, oldStatus, newStatus: "DOC_COMPLETE" };
+  }
+
+  if (anyRejected && oldStatus === "SUBMITTED") {
+    app.transition("DOC_INCOMPLETE", rmId, "Document rejected — re-upload required");
+    return { statusChanged: true, oldStatus, newStatus: "DOC_INCOMPLETE" };
+  }
+
+  return { statusChanged: false, oldStatus, newStatus: oldStatus };
+}
+
+async function maybeEmitApplicationStatusAfterDocWorkflow(io, app, workflowMeta, actionBy) {
+  if (!workflowMeta?.statusChanged || !io) return;
+  try {
+    await app.populate("partnerId", "firstName lastName email employeeId");
+    await app.populate("customerId", "firstName middleName lastName email phone");
+    await app.populate("rmId", "firstName lastName email employeeId asmId");
+    await app.populate("asmId", "firstName lastName email employeeId");
+    await emitApplicationStatusChanged(
+      io,
+      app,
+      workflowMeta.oldStatus,
+      workflowMeta.newStatus,
+      actionBy
+    );
+  } catch (e) {
+    console.error("Error emitting application status after doc update:", e);
+  }
+}
 
 // Log route registration for debugging
 console.log("✅ RM routes loaded - POST /applications/:id/docs/:docType/update-status route registered");
@@ -239,7 +338,11 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
     const rmId = req.user.sub;
 
-    const partners = await User.find({ role: ROLES.PARTNER, rmId })
+    const partners = await User.find({
+      role: ROLES.PARTNER,
+      rmId,
+      status: { $ne: "PENDING" },
+    })
       .select("-passwordHash")
       .lean();
 
@@ -624,7 +727,11 @@ router.get(
       const rmId = req.user.sub;
 
       // Fetch partners assigned to this RM
-      const partners = await User.find({ role: ROLES.PARTNER, rmId })
+      const partners = await User.find({
+        role: ROLES.PARTNER,
+        rmId,
+        status: { $ne: "PENDING" },
+      })
         .select("employeeId firstName lastName phone email status")
         .lean();
 
@@ -799,12 +906,10 @@ router.post(
         const missingDocs = [];
         const unverifiedDocsSet = new Set();
         
-        // Check for missing or unverified documents
+        // Check for missing or unverified documents (alias-aware: BANK_STATEMENT ↔ BANK_STATEMENT_1, etc.)
         for (const docType of requiredDocTypes) {
-          const doc = uploadedDocs.find(
-            (d) => d.docType?.toUpperCase() === docType.toUpperCase()
-          );
-          
+          const doc = findUploadedDocMatchingRequired(uploadedDocs, docType);
+
           if (!doc) {
             missingDocs.push(docType);
           } else if (doc.status !== "VERIFIED") {
@@ -2157,6 +2262,16 @@ router.put(
       // When RM verifies an UPDATED document, it becomes VERIFIED
       // When RM rejects an UPDATED document, it becomes REJECTED (partner needs to re-upload again)
 
+      let workflowMeta = { statusChanged: false, oldStatus: app.status, newStatus: app.status };
+      try {
+        workflowMeta = await syncApplicationStatusAfterDocUpdate(app, rmId);
+      } catch (syncErr) {
+        console.error("syncApplicationStatusAfterDocUpdate failed:", syncErr);
+        return res.status(syncErr.statusCode || 500).json({
+          message: syncErr.message || "Could not update application status",
+        });
+      }
+
       await app.save();
 
       // Emit socket notification with action tracking
@@ -2204,6 +2319,8 @@ router.put(
           );
           
           console.log("✅ Document status socket emission completed");
+
+          await maybeEmitApplicationStatusAfterDocWorkflow(io, app, workflowMeta, req.user.sub);
         } else {
           console.error("❌ Socket io instance not available (global.io is null)");
         }
@@ -2261,13 +2378,17 @@ router.post(
         });
       }
 
+      const rmIdPost = req.user.sub;
+      const partnersPost = await User.find({ rmId: rmIdPost, role: ROLES.PARTNER }).select("_id").lean();
+      const partnerIdsPost = partnersPost.map((p) => p._id);
+
       const app = await Application.findOne({
         _id: id,
-        rmId: req.user.sub,
+        $or: [{ rmId: rmIdPost }, { partnerId: { $in: partnerIdsPost } }],
       });
 
       if (!app) {
-        console.log("Application not found", { id, rmId: req.user.sub });
+        console.log("Application not found", { id, rmId: rmIdPost });
         return res.status(404).json({
           message: "Application not found or not assigned to this RM",
         });
@@ -2307,6 +2428,16 @@ router.post(
       
       if (!app.docs[docIndex].uploadedAt) {
         app.docs[docIndex].uploadedAt = new Date();
+      }
+
+      let workflowMetaPost = { statusChanged: false, oldStatus: app.status, newStatus: app.status };
+      try {
+        workflowMetaPost = await syncApplicationStatusAfterDocUpdate(app, rmIdPost);
+      } catch (syncErr) {
+        console.error("syncApplicationStatusAfterDocUpdate failed (POST):", syncErr);
+        return res.status(syncErr.statusCode || 500).json({
+          message: syncErr.message || "Could not update application status",
+        });
       }
 
       await app.save();
@@ -2383,6 +2514,8 @@ router.post(
           );
           
           console.log("✅ Document status socket emission completed");
+
+          await maybeEmitApplicationStatusAfterDocWorkflow(io, app, workflowMetaPost, req.user.sub);
         } else {
           console.error("❌ Socket io instance not available (global.io is null)");
         }
@@ -2396,6 +2529,7 @@ router.post(
         message: "Document status updated successfully",
         document: app.docs[docIndex],
         applicationStatus: app.status,
+        allDocumentsVerified: app.areAllDocumentsVerified(),
       });
     } catch (err) {
       console.error("Error updating document status (POST):", err);

@@ -33,8 +33,157 @@ import {
   deriveCurrentTargetContext,
   rebalanceHierarchyTargetsReplace,
 } from "../utils/targetRebalanceService.js";
+import {
+  normalizeRsmTypeValue,
+  rmReportingLineMatch,
+} from "../utils/rmRsmHierarchy.js";
 
 const router = Router();
+
+// --- RSM visibility: normalize profile + align loan types with PERSONAL vs BUSINESS_HOME ---
+
+function toObjectId(id) {
+  try {
+    return mongoose.Types.ObjectId.isValid(String(id))
+      ? new mongoose.Types.ObjectId(String(id))
+      : id;
+  } catch {
+    return id;
+  }
+}
+
+/** RMs on this RSM's reporting line only (personal slot vs business/home slot). */
+async function loadRsmReportingScope(rsmId) {
+  const rsm = await User.findById(rsmId).select("rsmType").lean();
+  return rmReportingLineMatch(rsmId, normalizeRsmTypeValue(rsm?.rsmType));
+}
+
+function loanTypeMatchesRsmRole(loanType, rsmTypeNorm) {
+  if (!rsmTypeNorm) return true;
+  if (rsmTypeNorm === RSM_TYPES.PERSONAL) return loanType === "PERSONAL";
+  if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
+    return ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType);
+  }
+  return true;
+}
+
+function loanTypeFilterForRsmType(rsmTypeNorm) {
+  if (rsmTypeNorm === RSM_TYPES.PERSONAL) return { loanType: "PERSONAL" };
+  if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
+    return {
+      loanType: { $in: ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"] },
+    };
+  }
+  return {};
+}
+
+async function eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm) {
+  const base = { role: ROLES.RM };
+  if (rsmTypeNorm === RSM_TYPES.PERSONAL) {
+    return User.find({ ...base, personalRsmId: rsmObjectId }).distinct("_id");
+  }
+  if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
+    return User.find({ ...base, businessHomeRsmId: rsmObjectId }).distinct("_id");
+  }
+  const [personal, business] = await Promise.all([
+    User.find({ ...base, personalRsmId: rsmObjectId }).distinct("_id"),
+    User.find({ ...base, businessHomeRsmId: rsmObjectId }).distinct("_id"),
+  ]);
+  const seen = new Set([...personal, ...business].map((id) => id.toString()));
+  return [...seen].map((id) => new mongoose.Types.ObjectId(id));
+}
+
+function expectedRsmIdForApplication(app) {
+  const rm = app.rmId;
+  if (!rm) return null;
+  if (app.loanType === "PERSONAL") return rm.personalRsmId || null;
+  if (
+    ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(
+      app.loanType
+    )
+  ) {
+    return rm.businessHomeRsmId || null;
+  }
+  return null;
+}
+
+/**
+ * Fix DOC_COMPLETE rows: set rsmId/asmId from RM's personalRsmId / businessHomeRsmId when missing or wrong.
+ * Ensures each RSM sees files for their RMs according to loan type.
+ */
+async function repairDocCompleteRoutingForRsm(rsmUserId) {
+  const rsmObjectId = toObjectId(rsmUserId);
+  const rsm = await User.findById(rsmUserId).select("rsmType asmId").lean();
+  if (!rsm) return;
+
+  const rsmTypeNorm = normalizeRsmTypeValue(rsm.rsmType);
+  const loanFilter = loanTypeFilterForRsmType(rsmTypeNorm);
+  const eligibleRmIds = await eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm);
+  if (!eligibleRmIds.length) return;
+
+  const candidates = await Application.find({
+    status: "DOC_COMPLETE",
+    rmId: { $in: eligibleRmIds },
+    ...loanFilter,
+  })
+    .select("_id appNo rsmId rmId loanType")
+    .populate("rmId", "personalRsmId businessHomeRsmId")
+    .lean();
+
+  const me = rsmObjectId.toString();
+
+  for (const row of candidates) {
+    const appLike = { ...row, rmId: row.rmId };
+    const expected = expectedRsmIdForApplication(appLike);
+    if (!expected || expected.toString() !== me) continue;
+
+    const cur = row.rsmId ? row.rsmId.toString() : null;
+    if (cur === me) continue;
+
+    await Application.updateOne(
+      { _id: row._id },
+      { $set: { rsmId: rsmObjectId, asmId: rsm.asmId || null } }
+    );
+  }
+}
+
+/**
+ * Load application for detail/doc download: trust rsmId if already this RSM; else allow DOC_COMPLETE
+ * when RM mapping says this RSM owns the loan type, and fix routing in DB.
+ */
+async function loadApplicationForRsm(applicationId, rsmUserId) {
+  const rsmObjectId = toObjectId(rsmUserId);
+  const rsmProfile = await User.findById(rsmUserId).select("rsmType asmId").lean();
+  if (!rsmProfile) return null;
+
+  const rsmTypeNorm = normalizeRsmTypeValue(rsmProfile.rsmType);
+  const app = await Application.findById(applicationId).populate(
+    "rmId",
+    "personalRsmId businessHomeRsmId"
+  );
+  if (!app || !app.rmId) return null;
+
+  if (!loanTypeMatchesRsmRole(app.loanType, rsmTypeNorm)) return null;
+
+  const meStr = rsmObjectId.toString();
+  const assignedStr = app.rsmId ? app.rsmId.toString() : null;
+
+  if (assignedStr === meStr) {
+    return app;
+  }
+
+  const expected = expectedRsmIdForApplication(app);
+  const mappingSaysUs = expected?.toString() === meStr;
+
+  if (mappingSaysUs && app.status === "DOC_COMPLETE") {
+    app.rsmId = rsmObjectId;
+    app.asmId = rsmProfile.asmId || null;
+    await app.save();
+    return app;
+  }
+
+  return null;
+}
 
 // GET /api/rsm/my-rsms  (ASM only)
 // List RSMs under the logged-in ASM
@@ -185,18 +334,15 @@ router.post(
 );
 
 // GET /api/rsm/my-rms
-// List RMs under this RSM (both Personal and Business/Home)
+// RMs on this RSM's line only: PERSONAL RSM → personalRsmId; BUSINESS_HOME → businessHomeRsmId
 router.get("/my-rms", auth, requireRole(ROLES.RSM), async (req, res) => {
   try {
     const rsmId = req.user.sub;
+    const scope = await loadRsmReportingScope(rsmId);
 
-    // Find RMs assigned to this RSM (either personalRsmId or businessHomeRsmId)
     const rms = await User.find({
       role: ROLES.RM,
-      $or: [
-        { personalRsmId: rsmId },
-        { businessHomeRsmId: rsmId }
-      ]
+      ...scope,
     })
       .select("-passwordHash -__v")
       .lean();
@@ -246,6 +392,8 @@ router.post(
 
       if (!APP_STATUSES.includes(to))
         return res.status(400).json({ message: "Invalid status" });
+
+      await repairDocCompleteRoutingForRsm(rsmId);
 
       // Find application assigned to this RSM
       const app = await Application.findOne({
@@ -421,148 +569,37 @@ router.get("/applications", auth, requireRole(ROLES.RSM), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const { status } = req.query;
+    const rsmObjectId = toObjectId(rsmId);
 
-    // ✅ Convert rsmId to ObjectId to ensure proper matching
-    let rsmObjectId;
-    try {
-      rsmObjectId = mongoose.Types.ObjectId.isValid(rsmId) 
-        ? new mongoose.Types.ObjectId(rsmId) 
-        : rsmId;
-    } catch (err) {
-      console.error("Error converting rsmId to ObjectId:", err);
-      rsmObjectId = rsmId;
-    }
-
-    // ✅ Get RSM details to verify rsmType and filter by loan type
     const rsm = await User.findById(rsmId).select("rsmType").lean();
     if (!rsm) {
       return res.status(404).json({ message: "RSM not found" });
     }
 
-    // ✅ Filter by loan type based on RSM type
-    // PERSONAL RSM → only PERSONAL loans
-    // BUSINESS_HOME RSM → BUSINESS, HOME_LOAN_SALARIED, HOME_LOAN_SELF_EMPLOYED loans
-    // If rsmType is not set, show all applications with this rsmId (for backward compatibility)
-    let loanTypeFilter = {};
-    if (rsm.rsmType === RSM_TYPES.PERSONAL) {
-      loanTypeFilter = { loanType: "PERSONAL" };
-      console.log(`   🔍 Filtering for PERSONAL loans only (RSM Type: ${rsm.rsmType})`);
-    } else if (rsm.rsmType === RSM_TYPES.BUSINESS_HOME) {
-      loanTypeFilter = { loanType: { $in: ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"] } };
-      console.log(`   🔍 Filtering for BUSINESS/HOME loans only (RSM Type: ${rsm.rsmType})`);
+    const rsmTypeNorm = normalizeRsmTypeValue(rsm.rsmType);
+    const loanTypeFilter = loanTypeFilterForRsmType(rsmTypeNorm);
+
+    if (rsmTypeNorm) {
+      console.log(`🔍 RSM ${rsmId} list: type ${rsmTypeNorm} (raw: ${JSON.stringify(rsm.rsmType)})`);
     } else {
-      // If rsmType is not set, don't filter by loan type - show all applications assigned to this RSM
-      console.log(`   ⚠️ RSM has no rsmType set (${rsm.rsmType}), showing ALL applications with this rsmId (no loan type filter)`);
+      console.log(
+        `⚠️ RSM ${rsmId} has no usable rsmType (${rsm.rsmType}); listing all loans for this rsmId`
+      );
     }
 
-    // ✅ RSM should see all applications assigned to them (rsmId matches)
-    const filter = { 
+    // Fix DOC_COMPLETE rows: missing or wrong rsmId vs RM personal/business RSM mapping
+    await repairDocCompleteRoutingForRsm(rsmId);
+
+    const filter = {
       rsmId: rsmObjectId,
-      ...loanTypeFilter
+      ...loanTypeFilter,
     };
-    
-    // If status filter is provided, use it; otherwise show all applications assigned to this RSM
     if (status) {
       filter.status = status;
     }
-    // Note: We don't restrict by status by default - RSM should see all applications assigned to them
-    // Typically these will be DOC_COMPLETE or beyond, but we allow flexibility
 
-    console.log(`🔍 RSM ${rsmId} (Type: ${rsm.rsmType}, ObjectId: ${rsmObjectId}) query filter:`, JSON.stringify(filter, null, 2));
+    console.log(`🔍 RSM applications filter:`, JSON.stringify(filter));
 
-    // ✅ BACKFILL: Find DOC_COMPLETE applications without rsmId and assign them to this RSM if they match
-    // This handles cases where applications were set to DOC_COMPLETE before the routing logic was added
-    let backfilledCount = 0;
-    
-    // First, find all DOC_COMPLETE applications without rsmId (regardless of loan type for now)
-    const docCompleteWithoutRsm = await Application.find({
-      status: "DOC_COMPLETE",
-      $or: [
-        { rsmId: { $exists: false } },
-        { rsmId: null }
-      ]
-    })
-      .populate("rmId", "personalRsmId businessHomeRsmId")
-      .select("_id appNo loanType rmId")
-      .lean();
-
-    console.log(`   🔍 Found ${docCompleteWithoutRsm.length} DOC_COMPLETE applications without rsmId (all loan types)`);
-    
-    if (docCompleteWithoutRsm.length > 0) {
-      console.log(`   🔄 Attempting backfill for RSM ${rsmId} (Type: ${rsm.rsmType})...`);
-      
-      for (const app of docCompleteWithoutRsm) {
-        if (!app.rmId) {
-          console.log(`   ⚠️ Application ${app.appNo} has no RM assigned, skipping`);
-          continue;
-        }
-        
-        // Determine which RSM should handle this based on RM's assignment
-        let shouldAssignToThisRsm = false;
-        const rmPersonalRsmId = app.rmId.personalRsmId?.toString();
-        const rmBusinessHomeRsmId = app.rmId.businessHomeRsmId?.toString();
-        const currentRsmIdStr = rsmObjectId.toString();
-        
-        console.log(`   🔍 Checking app ${app.appNo} (${app.loanType}): RM personalRsmId=${rmPersonalRsmId}, businessHomeRsmId=${rmBusinessHomeRsmId}, current RSM=${currentRsmIdStr}`);
-        
-        if (app.loanType === "PERSONAL") {
-          if (rmPersonalRsmId === currentRsmIdStr) {
-            shouldAssignToThisRsm = true;
-            console.log(`   ✅ Match: PERSONAL loan matches this RSM`);
-          } else {
-            console.log(`   ❌ No match: PERSONAL loan RSM (${rmPersonalRsmId}) != current RSM (${currentRsmIdStr})`);
-          }
-        } else if (
-          ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(app.loanType)
-        ) {
-          if (rmBusinessHomeRsmId === currentRsmIdStr) {
-            shouldAssignToThisRsm = true;
-            console.log(`   ✅ Match: ${app.loanType} loan matches this RSM`);
-          } else {
-            console.log(`   ❌ No match: ${app.loanType} loan RSM (${rmBusinessHomeRsmId}) != current RSM (${currentRsmIdStr})`);
-          }
-        } else {
-          console.log(`   ⚠️ Unknown loan type: ${app.loanType}`);
-        }
-        
-        if (shouldAssignToThisRsm) {
-          // Get ASM from RSM
-          const rsmWithAsm = await User.findById(rsmObjectId).select("asmId").lean();
-          const asmId = rsmWithAsm?.asmId || null;
-          
-          await Application.updateOne(
-            { _id: app._id },
-            { 
-              $set: { 
-                rsmId: rsmObjectId,
-                asmId: asmId
-              }
-            }
-          );
-          backfilledCount++;
-          console.log(`   ✅ Backfilled application ${app.appNo} (${app.loanType}) → RSM ${rsmId} (ASM: ${asmId})`);
-        }
-      }
-      
-      console.log(`   📊 Backfilled ${backfilledCount} applications for RSM ${rsmId}`);
-      
-      // Also check for applications that couldn't be backfilled because RM doesn't have RSM assigned
-      const unassignedApps = docCompleteWithoutRsm.filter(app => {
-        if (!app.rmId) return false;
-        if (app.loanType === "PERSONAL" && !app.rmId.personalRsmId) return true;
-        if (["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(app.loanType) && !app.rmId.businessHomeRsmId) return true;
-        return false;
-      });
-      
-      if (unassignedApps.length > 0) {
-        console.log(`   ⚠️ WARNING: ${unassignedApps.length} DOC_COMPLETE applications cannot be assigned because their RM doesn't have an RSM assigned:`);
-        unassignedApps.forEach(app => {
-          console.log(`      - ${app.appNo} (${app.loanType}): RM ${app.rmId._id || app.rmId} missing ${app.loanType === "PERSONAL" ? "personalRsmId" : "businessHomeRsmId"}`);
-        });
-      }
-    }
-
-    // ✅ Fetch applications with documents included so RSM can see all document details
     let applications = await Application.find(filter)
       .populate("customerId", "firstName lastName email phone employeeId")
       .populate("partnerId", "firstName lastName employeeId")
@@ -571,93 +608,9 @@ router.get("/applications", auth, requireRole(ROLES.RSM), async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    console.log(`✅ RSM ${rsmId} (Type: ${rsm.rsmType}) fetched ${applications.length} applications after backfill`);
-    
-    // If we backfilled applications, they should now appear in the query
-    // But if still no results, let's check if there are any applications with this rsmId (without loan type filter)
-    if (applications.length === 0 && backfilledCount === 0) {
-      console.log(`   🔍 No applications found with filter. Checking all applications with rsmId=${rsmObjectId} (no loan type filter)...`);
-      const allAppsWithRsmId = await Application.find({ rsmId: rsmObjectId })
-        .select("appNo status loanType rsmId")
-        .lean();
-      console.log(`   📊 Found ${allAppsWithRsmId.length} total applications with rsmId=${rsmObjectId}`);
-      if (allAppsWithRsmId.length > 0) {
-        console.log(`   📋 Applications:`, allAppsWithRsmId.map(a => `${a.appNo}: ${a.status} (${a.loanType})`));
-        // If RSM has rsmType set but we found apps with different loan types, that's the issue
-        if (rsm.rsmType) {
-          const matchingLoanTypes = allAppsWithRsmId.filter(a => 
-            (rsm.rsmType === RSM_TYPES.PERSONAL && a.loanType === "PERSONAL") ||
-            (rsm.rsmType === RSM_TYPES.BUSINESS_HOME && ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(a.loanType))
-          );
-          console.log(`   ⚠️ Only ${matchingLoanTypes.length} applications match RSM's loan type filter`);
-        }
-      }
-    }
-    if (applications.length > 0) {
-      const statusCounts = applications.reduce((acc, app) => {
-        acc[app.status] = (acc[app.status] || 0) + 1;
-        return acc;
-      }, {});
-      const loanTypeCounts = applications.reduce((acc, app) => {
-        acc[app.loanType] = (acc[app.loanType] || 0) + 1;
-        return acc;
-      }, {});
-      console.log(`   Status breakdown:`, statusCounts);
-      console.log(`   Loan type breakdown:`, loanTypeCounts);
-      console.log(`   DOC_COMPLETE applications: ${statusCounts.DOC_COMPLETE || 0}`);
-    } else {
-      // Debug: Check if there are any applications with this rsmId but different status
-      const allApps = await Application.find({ rsmId: rsmObjectId }).select("appNo status rsmId loanType").lean();
-      console.log(`   ⚠️ Found ${allApps.length} total applications with rsmId=${rsmId} (ObjectId: ${rsmObjectId}):`, allApps.map(a => `${a.appNo || a._id}: ${a.status} (loanType: ${a.loanType}, rsmId: ${a.rsmId})`));
-      
-      // Check if loan type filter is excluding applications
-      if (rsm.rsmType === RSM_TYPES.PERSONAL) {
-        const personalApps = allApps.filter(a => a.loanType === "PERSONAL");
-        console.log(`   📊 Personal loan applications with this rsmId: ${personalApps.length}`);
-        if (personalApps.length > 0) {
-          console.log(`   📋 Personal loan apps:`, personalApps.map(a => `${a.appNo}: ${a.status}`));
-        }
-        if (allApps.length > personalApps.length) {
-          console.log(`   ⚠️ WARNING: ${allApps.length - personalApps.length} non-PERSONAL applications found but filtered out`);
-        }
-      } else if (rsm.rsmType === RSM_TYPES.BUSINESS_HOME) {
-        const businessHomeApps = allApps.filter(a => ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(a.loanType));
-        console.log(`   📊 Business/Home loan applications with this rsmId: ${businessHomeApps.length}`);
-        if (businessHomeApps.length > 0) {
-          console.log(`   📋 Business/Home loan apps:`, businessHomeApps.map(a => `${a.appNo}: ${a.status} (${a.loanType})`));
-        }
-        if (allApps.length > businessHomeApps.length) {
-          console.log(`   ⚠️ WARNING: ${allApps.length - businessHomeApps.length} non-BUSINESS/HOME applications found but filtered out`);
-        }
-      }
-      
-      // Also check for DOC_COMPLETE applications that might not have rsmId set yet
-      const docCompleteApps = await Application.find({ 
-        status: "DOC_COMPLETE",
-        $or: [
-          { rsmId: { $exists: false } },
-          { rsmId: null }
-        ]
-      }).select("appNo status loanType rmId").lean();
-      if (docCompleteApps.length > 0) {
-        console.log(`   ⚠️ Found ${docCompleteApps.length} DOC_COMPLETE applications without rsmId assigned`);
-      }
-      
-      // Check all DOC_COMPLETE applications to see their rsmId values
-      const allDocComplete = await Application.find({ status: "DOC_COMPLETE" })
-        .select("appNo status rsmId loanType")
-        .lean();
-      console.log(`   📊 Total DOC_COMPLETE applications: ${allDocComplete.length}`);
-      if (allDocComplete.length > 0) {
-        const rsmIdCounts = {};
-        allDocComplete.forEach(app => {
-          const rsmIdStr = app.rsmId ? app.rsmId.toString() : "null";
-          rsmIdCounts[rsmIdStr] = (rsmIdCounts[rsmIdStr] || 0) + 1;
-        });
-        console.log(`   📊 DOC_COMPLETE applications by rsmId:`, rsmIdCounts);
-        console.log(`   🔍 Looking for rsmId: ${rsmId} (ObjectId: ${rsmObjectId.toString()})`);
-      }
-    }
+    console.log(
+      `✅ RSM ${rsmId} fetched ${applications.length} applications (after routing repair)`
+    );
 
     // Attach payout info (only status + amount) to each application
     const appIds = applications.map((app) => app._id);
@@ -693,11 +646,14 @@ router.get("/applications/:id", auth, requireRole(ROLES.RSM), async (req, res) =
     const rsmId = req.user.sub;
     const { id } = req.params;
 
-    // Find application assigned to this RSM
-    const application = await Application.findOne({
-      _id: id,
-      rsmId: rsmId,
-    })
+    const access = await loadApplicationForRsm(id, rsmId);
+    if (!access) {
+      return res.status(404).json({
+        message: "Application not found or not assigned to this RSM",
+      });
+    }
+
+    const application = await Application.findById(id)
       .populate("customerId", "firstName lastName email phone employeeId")
       .populate("partnerId", "firstName lastName email phone employeeId")
       .populate("rmId", "firstName lastName email phone employeeId")
@@ -738,11 +694,12 @@ router.get(
       const { id, docType } = req.params;
       const rsmId = req.user.sub;
 
-      // Find application assigned to this RSM
-      const app = await Application.findOne({
-        _id: id,
-        rsmId: rsmId,
-      }).lean();
+      const access = await loadApplicationForRsm(id, rsmId);
+      if (!access) {
+        return res.status(404).json({ message: "Application not found or not assigned to this RSM" });
+      }
+
+      const app = await Application.findById(id).lean();
 
       if (!app) {
         return res.status(404).json({ message: "Application not found or not assigned to this RSM" });
@@ -915,20 +872,29 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
     const rsm = await User.findOne({ _id: rsmId, role: ROLES.RSM }).lean();
     if (!rsm) return res.status(404).json({ message: "RSM not found" });
 
-    // Get all RMs under this RSM (via personalRsmId OR businessHomeRsmId)
-    const rms = await User.find({
+    const rsmTypeNorm = normalizeRsmTypeValue(rsm.rsmType);
+    await repairDocCompleteRoutingForRsm(rsmId);
+    const ltFilter = loanTypeFilterForRsmType(rsmTypeNorm);
+    const appScope = { rsmId, ...ltFilter };
+
+    // RMs for this RSM: only the chain matching this RSM's type when set
+    let rmScope = {
       role: ROLES.RM,
-      $or: [
-        { personalRsmId: rsmId },
-        { businessHomeRsmId: rsmId }
-      ]
-    }).lean();
+      $or: [{ personalRsmId: rsmId }, { businessHomeRsmId: rsmId }],
+    };
+    if (rsmTypeNorm === RSM_TYPES.PERSONAL) {
+      rmScope = { role: ROLES.RM, personalRsmId: rsmId };
+    } else if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
+      rmScope = { role: ROLES.RM, businessHomeRsmId: rsmId };
+    }
+    const rms = await User.find(rmScope).lean();
     const rmIds = rms.map((rm) => rm._id);
 
-    // All partners under these RMs
+    // All partners under these RMs (exclude admin-queue pending signups)
     const partners = await User.find({
       rmId: { $in: rmIds },
       role: ROLES.PARTNER,
+      status: { $ne: "PENDING" },
     }).lean();
     const partnerIds = partners.map((p) => p._id);
 
@@ -941,29 +907,27 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       status: "ACTIVE",
     });
 
-    const customers = await Application.distinct("customerId", {
-      rsmId: rsmId,
-    });
+    const customers = await Application.distinct("customerId", appScope);
     const totalCustomers = customers.length;
 
     // Applications by status
     const inProcessApplications = await Application.countDocuments({
-      rsmId: rsmId,
+      ...appScope,
       status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] },
     });
 
     const pendingApplications = await Application.countDocuments({
-      rsmId: rsmId,
+      ...appScope,
       status: "DOC_COMPLETE",
     });
 
     const disbursedApplications = await Application.countDocuments({
-      rsmId: rsmId,
+      ...appScope,
       status: "DISBURSED",
     });
 
     const rejectedApplications = await Application.countDocuments({
-      rsmId: rsmId,
+      ...appScope,
       status: "REJECTED",
     });
 
@@ -973,6 +937,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
         $match: {
           rsmId: new mongoose.Types.ObjectId(rsmId),
           status: "DISBURSED",
+          ...ltFilter,
         },
       },
       {
@@ -1012,6 +977,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
         $match: {
           rsmId: new mongoose.Types.ObjectId(rsmId),
           status: "DISBURSED",
+          ...ltFilter,
           updatedAt: {
             $gte: currentMonthStart,
             $lt: currentMonthEnd,
@@ -1045,6 +1011,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
         $match: {
           rsmId: new mongoose.Types.ObjectId(rsmId),
           status: "DISBURSED",
+          ...ltFilter,
           updatedAt: { $gte: startOfYear },
         },
       },
@@ -1084,6 +1051,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
         $match: {
           rmId: { $in: rmIds.map((id) => new mongoose.Types.ObjectId(id)) },
           status: "DISBURSED",
+          ...ltFilter,
         },
       },
       {
@@ -1115,7 +1083,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
 
     // Recent Applications for Pipeline (last 10 applications)
     const recentApplications = await Application.find({
-      rsmId: rsmId,
+      ...appScope,
       status: { $in: ["DOC_COMPLETE", "UNDER_REVIEW", "APPROVED", "AGREEMENT"] },
     })
       .populate("customerId", "firstName lastName phone")
@@ -1375,25 +1343,23 @@ router.get("/rm/:rmId/analytics", auth, requireRole(ROLES.RSM), async (req, res)
   try {
     const rsmId = req.user.sub;
     const { rmId } = req.params;
+    const scope = await loadRsmReportingScope(rsmId);
 
-    // Verify RM belongs to this RSM
     const rm = await User.findOne({
       _id: rmId,
       role: ROLES.RM,
-      $or: [
-        { personalRsmId: rsmId },
-        { businessHomeRsmId: rsmId }
-      ]
+      ...scope,
     }).lean();
     
     if (!rm) {
       return res.status(404).json({ message: "RM not found or not under this RSM" });
     }
 
-    // Get partners under this RM
+    // Get partners under this RM (exclude admin-queue pending signups)
     const partners = await User.find({
       rmId,
       role: ROLES.PARTNER,
+      status: { $ne: "PENDING" },
     }).lean();
 
     // Applications assigned to this RM (or from partners under this RM)
@@ -1555,15 +1521,12 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM), async (req, res
     const rsmId = req.user.sub;
     const { rmId } = req.params;
     const { status, remarks } = req.body;
+    const scope = await loadRsmReportingScope(rsmId);
 
-    // Verify RM belongs to this RSM
     const rm = await User.findOne({
       _id: rmId,
       role: ROLES.RM,
-      $or: [
-        { personalRsmId: rsmId },
-        { businessHomeRsmId: rsmId }
-      ]
+      ...scope,
     });
     
     if (!rm) {
@@ -1604,14 +1567,11 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM), async (req, res
 router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM), async (req, res) => {
   try {
     const rsmId = req.user.sub;
+    const scope = await loadRsmReportingScope(rsmId);
 
-    // Get all RMs under this RSM
     const rms = await User.find({
       role: ROLES.RM,
-      $or: [
-        { personalRsmId: rsmId },
-        { businessHomeRsmId: rsmId }
-      ]
+      ...scope,
     }).lean();
     const rmIds = rms.map((rm) => rm._id);
 
@@ -1683,15 +1643,12 @@ router.post("/rm-activate", auth, requireRole(ROLES.RSM), async (req, res) => {
     }
 
     const rsmId = req.user.sub;
+    const scope = await loadRsmReportingScope(rsmId);
 
-    // Verify RM belongs to this RSM (either personalRsmId or businessHomeRsmId)
     const rm = await User.findOne({
       _id: rmId,
       role: ROLES.RM,
-      $or: [
-        { personalRsmId: rsmId },
-        { businessHomeRsmId: rsmId }
-      ]
+      ...scope,
     });
 
     if (!rm) {
@@ -1746,6 +1703,7 @@ router.post("/rm-deactivate", auth, requireRole(ROLES.RSM), async (req, res) => 
     }
 
     const rsmId = req.user.sub;
+    const scope = await loadRsmReportingScope(rsmId);
 
     let newRm;
     let deactivatedRm;
@@ -1757,10 +1715,7 @@ router.post("/rm-deactivate", auth, requireRole(ROLES.RSM), async (req, res) => 
       const oldRm = await User.findOne({
         _id: rmId,
         role: ROLES.RM,
-        $or: [
-          { personalRsmId: rsmId },
-          { businessHomeRsmId: rsmId }
-        ]
+        ...scope,
       }).session(session);
 
       if (!oldRm) {
@@ -1771,6 +1726,7 @@ router.post("/rm-deactivate", auth, requireRole(ROLES.RSM), async (req, res) => 
         role: ROLES.RM,
         status: "ACTIVE",
         _id: newRmId,
+        ...scope,
       }).session(session);
       if (!newRm) {
         throw new Error("Cannot deactivate RM. The selected replacement active RM was not found.");
@@ -1893,14 +1849,11 @@ router.get("/partners/targets", auth, requireRole(ROLES.RSM), async (req, res) =
   try {
     const rsmId = req.user.sub;
     const { year, month } = req.query;
+    const scope = await loadRsmReportingScope(rsmId);
 
-    // Get all RMs under this RSM
     const rms = await User.find({
       role: ROLES.RM,
-      $or: [
-        { personalRsmId: rsmId },
-        { businessHomeRsmId: rsmId }
-      ]
+      ...scope,
     }).lean();
     const rmIds = rms.map((rm) => rm._id);
 
@@ -1908,6 +1861,7 @@ router.get("/partners/targets", auth, requireRole(ROLES.RSM), async (req, res) =
     const partners = await User.find({
       role: ROLES.PARTNER,
       rmId: { $in: rmIds },
+      status: { $ne: "PENDING" },
     }).select("firstName lastName employeeId email phone rmId").lean();
 
     const partnerIds = partners.map((p) => p._id);
@@ -1994,9 +1948,10 @@ router.post("/partner-deactivate", auth, requireRole(ROLES.RSM), async (req, res
       return res.status(400).json({ message: "oldPartnerId is required" });
     }
 
+    const scope = await loadRsmReportingScope(rsmId);
     const rms = await User.find({
       role: ROLES.RM,
-      $or: [{ personalRsmId: rsmId }, { businessHomeRsmId: rsmId }],
+      ...scope,
     })
       .select("_id")
       .session(session);

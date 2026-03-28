@@ -3,6 +3,7 @@ import argon2 from "argon2";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { ROLES, RSM_TYPES } from "../config/roles.js";
+import { assertValidRmRsmPair } from "../utils/rmRsmHierarchy.js";
 import { User } from "../models/User.js";
 import { makeRmCode, makeAsmCode } from "../utils/codes.js";
 import { Application } from "../models/Application.js";
@@ -449,6 +450,14 @@ router.post(
         });
       }
 
+      const pairCheck = await assertValidRmRsmPair(
+        personalRsm._id,
+        businessHomeRsm._id
+      );
+      if (!pairCheck.ok) {
+        return res.status(400).json({ message: pairCheck.message });
+      }
+
       const rawPassword =
         password || `Rm@${Math.random().toString(36).slice(2, 10)}`;
 
@@ -835,10 +844,11 @@ router.get(
         return res.status(404).json({ message: "Admin not found" });
       }
 
-      // Partners currently under Admin (rmId = admin._id)
+      // Partners awaiting RM assignment (queued under admin)
       const partners = await User.find({
         role: ROLES.PARTNER,
         rmId: admin._id, // explicitly under Admin
+        status: "PENDING",
       })
         .select("-passwordHash -__v")
         .lean();
@@ -901,6 +911,27 @@ router.post(
       partner.rmId = rm._id;
       partner.status = "ACTIVE";
       await partner.save();
+
+      try {
+        const now = new Date();
+        const month = now.getMonth() + 1;
+        const year = now.getFullYear();
+        const context = await deriveCurrentTargetContext(month, year);
+        if (Number(context.totalCompanyTarget) > 0) {
+          await rebalanceHierarchyTargetsReplace({
+            month,
+            year,
+            totalCompanyTarget: context.totalCompanyTarget,
+            partnerFileCountTarget: context.partnerFileCountTarget,
+            assignedBy: context.assignedBy || req.user.sub,
+          });
+        }
+      } catch (rebalanceErr) {
+        console.error(
+          "assign-admin-partner-to-rm: target rebalance failed:",
+          rebalanceErr.message
+        );
+      }
 
       // Send email to Partner using professional email service
       let partnerEmailSent = false;
@@ -4240,6 +4271,107 @@ router.post("/target-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, 
     res.status(500).json({ message: "Server error", error: err.message });
   }
 });
+
+// ==================== PUBLIC LOAN DEFAULT PARTNER REFERRAL ====================
+const PUBLIC_LOAN_REFERRAL_FALLBACK = "PT-D4CTD8B2";
+
+// GET /api/admin/public-loan-default-partner
+router.get(
+  "/public-loan-default-partner",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { Config } = await import("../models/Config.js");
+      const doc = await Config.findOne({
+        key: "PUBLIC_LOAN_DEFAULT_PARTNER_CODE",
+      }).lean();
+      const value = doc?.value && typeof doc.value === "object" ? doc.value : {};
+      const partnerId = value.partnerId ? String(value.partnerId) : null;
+      const partnerCode = value.partnerCode ? String(value.partnerCode).trim() : "";
+
+      let partner = null;
+      if (partnerId && mongoose.isValidObjectId(partnerId)) {
+        partner = await User.findOne({
+          _id: partnerId,
+          role: ROLES.PARTNER,
+        })
+          .select("firstName lastName partnerCode status employeeId email")
+          .lean();
+      }
+
+      res.json({
+        partnerId: partner?._id?.toString() || partnerId,
+        partnerCode: partner?.partnerCode || partnerCode || PUBLIC_LOAN_REFERRAL_FALLBACK,
+        partnerName: partner
+          ? `${partner.firstName || ""} ${partner.lastName || ""}`.trim()
+          : null,
+        partnerStatus: partner?.status || null,
+        fallbackUsed: !partner?.partnerCode && !partnerCode,
+      });
+    } catch (err) {
+      console.error("public-loan-default-partner GET:", err);
+      res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// PUT /api/admin/public-loan-default-partner  body: { partnerId: string }
+router.put(
+  "/public-loan-default-partner",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const partnerId = req.body?.partnerId;
+      if (!partnerId || !mongoose.isValidObjectId(String(partnerId))) {
+        return res.status(400).json({ message: "Valid partnerId is required" });
+      }
+
+      const partner = await User.findOne({
+        _id: partnerId,
+        role: ROLES.PARTNER,
+        status: "ACTIVE",
+      })
+        .select("firstName lastName partnerCode")
+        .lean();
+
+      if (!partner?.partnerCode) {
+        return res.status(400).json({
+          message:
+            "Partner not found, not active, or missing partner code. Only active partners with a code can be used.",
+        });
+      }
+
+      const { Config } = await import("../models/Config.js");
+      let config = await Config.findOne({ key: "PUBLIC_LOAN_DEFAULT_PARTNER_CODE" });
+      const payload = {
+        partnerId: String(partner._id),
+        partnerCode: partner.partnerCode.trim(),
+      };
+
+      if (config) {
+        config.value = payload;
+        await config.save();
+      } else {
+        config = await Config.create({
+          key: "PUBLIC_LOAN_DEFAULT_PARTNER_CODE",
+          value: payload,
+        });
+      }
+
+      res.json({
+        message: "Default public loan referral partner updated",
+        partnerId: payload.partnerId,
+        partnerCode: payload.partnerCode,
+        partnerName: `${partner.firstName || ""} ${partner.lastName || ""}`.trim(),
+      });
+    } catch (err) {
+      console.error("public-loan-default-partner PUT:", err);
+      res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
 
 // ==================== PARTNER TARGET MANAGEMENT (Admin) ====================
 

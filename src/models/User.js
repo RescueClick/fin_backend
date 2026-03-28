@@ -77,7 +77,7 @@ const userSchema = new mongoose.Schema(
     adminId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     // For RSM: parent ASM
     asmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    // For RM: parent RSMs (split by loan type)
+    // For RM: two bosses max — one PERSONAL-type RSM, one BUSINESS_HOME-type RSM (never the same person twice)
     personalRsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     businessHomeRsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     // For Partner / Customer: parent RM / Partner

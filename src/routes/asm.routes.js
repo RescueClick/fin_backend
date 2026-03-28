@@ -243,7 +243,10 @@ router.get("/get-partners", auth, requireRole(ROLES.ASM), async (req, res) => {
     const asmId = req.user.sub; // ✅ logged-in ASM ID
 
     // Fetch only partners whose RM belongs to this ASM
-    const list = await User.find({ role: ROLES.PARTNER })
+    const list = await User.find({
+      role: ROLES.PARTNER,
+      status: { $ne: "PENDING" },
+    })
       .select("-passwordHash -__v")
       .populate({
         path: "rmId", // populate RM details
@@ -391,7 +394,11 @@ router.get(
       const asmId = req.user.sub;
       const { rmId } = req.params;
 
-      const partners = await User.find({ role: ROLES.PARTNER, rmId })
+      const partners = await User.find({
+        role: ROLES.PARTNER,
+        rmId,
+        status: { $ne: "PENDING" },
+      })
         .select("-passwordHash -__v")
         .populate({
           path: "rmId",
@@ -455,6 +462,7 @@ router.get(
       const partners = await User.find({
         role: ROLES.PARTNER,
         rmId: { $in: rmIds },
+        status: { $ne: "PENDING" },
       })
         .select("-passwordHash -__v")
         .populate({

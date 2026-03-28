@@ -215,6 +215,40 @@ const ApplicationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+/**
+ * Canonical doc type for verification (must match partner.routes normalizeIncomingDocType).
+ * Ensures e.g. BANK_STATEMENT requirement matches uploaded BANK_STATEMENT_1.
+ */
+const DOC_TYPE_VERIFY_ALIASES = {
+  AADHAAR_FRONT: "AADHAR_FRONT",
+  AADHAAR_BACK: "AADHAR_BACK",
+  PASSPORT_PHOTO: "PHOTO",
+  OTHER_DOC: "OTHER_DOCS",
+  FORM16: "FORM_16_26AS",
+  FORM_16: "FORM_16_26AS",
+  FORM16_26AS: "FORM_16_26AS",
+  "26AS": "FORM_16_26AS",
+  COMPANY_ID: "COMPANY_ID_CARD",
+  COMPANY_IDCARD: "COMPANY_ID_CARD",
+  GST: "GST_DOCUMENT",
+  GST_DOC: "GST_DOCUMENT",
+  GST_CERTIFICATE: "GST_DOCUMENT",
+  BANK_STATEMENT: "BANK_STATEMENT_1",
+  CO_APPLICANT_PASSPORT_PHOTO: "CO_APPLICANT_SELFIE",
+};
+
+export function canonicalDocTypeForVerification(docType) {
+  const key = String(docType || "").trim().toUpperCase();
+  return DOC_TYPE_VERIFY_ALIASES[key] || key;
+}
+
+/** Find an uploaded doc that satisfies a required doc slot (alias-aware). */
+export function findUploadedDocMatchingRequired(uploadedDocs, requiredType) {
+  const reqCanon = canonicalDocTypeForVerification(requiredType);
+  return (uploadedDocs || []).find(
+    (d) => canonicalDocTypeForVerification(d.docType) === reqCanon
+  );
+}
 
 // Helper function to get required document types based on loan type
 ApplicationSchema.methods.getRequiredDocTypes = function() {
@@ -239,10 +273,8 @@ ApplicationSchema.methods.areAllDocumentsVerified = function() {
   
   // Check if all required documents exist and are verified
   for (const docType of requiredDocTypes) {
-    const doc = uploadedDocs.find(
-      (d) => d.docType?.toUpperCase() === docType.toUpperCase()
-    );
-    
+    const doc = findUploadedDocMatchingRequired(uploadedDocs, docType);
+
     // Document must exist and be verified
     if (!doc || doc.status !== "VERIFIED") {
       return false;

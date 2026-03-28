@@ -7,7 +7,7 @@ const configSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
-      enum: ["PARTNER_TARGET_POLICY"],
+      enum: ["PARTNER_TARGET_POLICY", "PUBLIC_LOAN_DEFAULT_PARTNER_CODE"],
     },
     value: {
       type: mongoose.Schema.Types.Mixed,
