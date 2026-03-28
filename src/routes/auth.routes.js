@@ -172,6 +172,11 @@ router.post(
 
       // Get current user info for parent tracking
       const currentUser = await User.findById(currentUserId).select("firstName lastName email role");
+      if (!currentUser) {
+        return res.status(401).json({
+          message: "Your session is invalid (actor not found). Please log in again.",
+        });
+      }
 
       // Issue token for the target user with parent info
       const token = signAccessToken({
