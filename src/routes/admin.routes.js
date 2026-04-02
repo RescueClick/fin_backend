@@ -2212,6 +2212,56 @@ router.post(
   }
 );
 
+// Permanently delete an RSM (only after deactivation)
+router.delete(
+  "/rsm/:rsmId",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { rsmId } = req.params;
+
+      if (!mongoose.Types.ObjectId.isValid(rsmId)) {
+        return res.status(400).json({ message: "Invalid RSM id" });
+      }
+
+      const rsm = await User.findOne({ _id: rsmId, role: ROLES.RSM });
+      if (!rsm) {
+        return res.status(404).json({ message: "RSM not found" });
+      }
+
+      if (rsm.status === "ACTIVE") {
+        return res
+          .status(400)
+          .json({ message: "Deactivate RSM before deleting the account" });
+      }
+
+      const rmStillLinked = await User.countDocuments({
+        role: ROLES.RM,
+        $or: [{ personalRsmId: rsmId }, { businessHomeRsmId: rsmId }],
+      });
+      if (rmStillLinked > 0) {
+        return res.status(400).json({
+          message:
+            "Cannot delete RSM while RMs are still assigned. Reassign them first.",
+        });
+      }
+
+      await Target.deleteMany({ assignedTo: rsm._id });
+      await User.deleteOne({ _id: rsm._id });
+
+      res.json({
+        message: "RSM account deleted permanently",
+        id: rsm._id,
+        email: rsm.email,
+      });
+    } catch (error) {
+      console.error("Error deleting RSM:", error);
+      res.status(500).json({ message: "Failed to delete RSM" });
+    }
+  }
+);
+
 // Permanently delete an RM (only after deactivation)
 router.delete(
   "/rm/:rmId",
