@@ -28,6 +28,8 @@ import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendApplicationStatusEmail, sendDocumentStatusEmail } from "../utils/emailService.js";
 import axios from "axios";
 import { emitDocumentStatusChanged, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
+import { getReferralWebBaseUrl, appendPartnerShareUtm } from "../config/branding.js";
+import { PARTNER_REGISTRATION_PATH_SEGMENT } from "../constants/publicReferral.js";
 import {
   buildReassignableApplicationFilter,
   buildReassignmentAudit,
@@ -158,6 +160,7 @@ router.post(
         lastName,
         phone,
         dob,
+        joinDate,
         email,
         region,
         aadharNumber,
@@ -249,6 +252,7 @@ router.post(
         role: ROLES.PARTNER,
         partnerCode: makePartnerCode(),
         rmId: req.user.sub,
+        joinDate: joinDate ? new Date(joinDate) : new Date(),
         status: "ACTIVE",
         docs,
       });
@@ -3021,10 +3025,12 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
       return res.status(404).json({ message: "RM not found" });
     }
 
-    // ✅ Generate referral link using rmCode
-    const referralLink = `${
-      process.env.BASE_URL || "http://localhost:" + process.env.PORT
-    }/api/rm/partner/register-by-rmcode?ref=${rm.rmCode}`;
+    // Shareable web link: partner signup with RM code prefilled (?ref=RM-…)
+    const referralLink = appendPartnerShareUtm(
+      `${getReferralWebBaseUrl()}/${PARTNER_REGISTRATION_PATH_SEGMENT}?ref=${encodeURIComponent(rm.rmCode || "")}`,
+      "web"
+    );
+    const partnerRegisterApiPath = `/api/auth/partner/register-by-rmcode?ref=${encodeURIComponent(rm.rmCode || "")}`;
 
     res.json({
       employeeId: rm.employeeId,
@@ -3040,8 +3046,9 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
       rmCode: rm.rmCode,
       JoiningDate: rm.createdAt,
 
-      // ✅ new field
       referralLink,
+      /** Direct API reference only (POST JSON) — prefer sharing `referralLink` */
+      partnerRegisterApiPath,
 
       // Flattened ASM details
       asmId: rm.asmId?._id || null,

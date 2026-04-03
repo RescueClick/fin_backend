@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import multer from "multer";
 import { isApiError } from "../utils/apiError.js";
 
 function normalizeMongooseValidationError(err) {
@@ -48,6 +49,15 @@ export function errorHandler(err, req, res, _next) {
     code = "INVALID_ID";
     message = "Invalid identifier";
     details = [{ path: err.path, value: err.value }];
+  } else if (err instanceof multer.MulterError) {
+    statusCode = 400;
+    code = "UPLOAD_ERROR";
+    if (err.code === "LIMIT_FILE_SIZE") {
+      message =
+        "File exceeds the maximum size allowed for this upload. Use a smaller or compressed file.";
+    } else {
+      message = err.message || "File upload error";
+    }
   }
 
   if (!isProd) {

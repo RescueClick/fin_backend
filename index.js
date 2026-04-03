@@ -15,6 +15,7 @@ import contactRoutes from "./src/routes/contact.routes.js";
 import customerRoutes from "./src/routes/customer.routes.js";
 import notificationRoutes from "./src/routes/notification.routes.js";
 import analyticsRoutes from "./src/routes/analytics.routes.js";
+import referralRoutes from "./src/routes/referral.routes.js";
 import { connectDB } from "./src/db/db.js";
 import dotenv from "dotenv";
 import path from "path";
@@ -44,6 +45,7 @@ const server = createServer(app);
 const allowedOrigins = [
   "http://localhost:5173",
   "https://dhansourcecapital.com",
+  "https://www.dhansourcecapital.com",
 ];
 
 app.use(
@@ -162,6 +164,26 @@ app.get("/test-email", (_, res) => {
   });
 });
 
+// Public referral invite landing page (works before Play Store listing)
+app.get("/invite.js", (_, res) => {
+  const jsPath = path.join(__dirname, "invite.js");
+  res.setHeader("Content-Type", "application/javascript");
+  res.sendFile(jsPath, (err) => {
+    if (err) {
+      res.status(404).json({ error: "Invite JS not found" });
+    }
+  });
+});
+
+app.get("/invite", (_, res) => {
+  const htmlPath = path.join(__dirname, "invite.html");
+  res.sendFile(htmlPath, (err) => {
+    if (err) {
+      res.status(404).json({ error: "Invite page not found" });
+    }
+  });
+});
+
 app.get("/health", (_, res) => res.json({ status: "ok" }));
 
 // API Routes (registered after static file routes)
@@ -175,6 +197,7 @@ app.use("/api/customer", customerRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/analytics", analyticsRoutes); // Universal Analytics API
+app.use("/api/referral", referralRoutes); // Customer/partner: my referral code, referrals, earnings
 
 // Public email test endpoint (no auth required for testing)
 app.post("/api/test-email", async (req, res) => {

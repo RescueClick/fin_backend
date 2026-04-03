@@ -23,6 +23,7 @@ import {
   LOCKED_INCENTIVE_STATUS,
 } from "../utils/reassignmentPolicy.js";
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
+import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
 
 const router = Router();
 
@@ -43,6 +44,7 @@ router.post(
         phone,
         email,
         dob,
+        joinDate,
         region,
         password,
         rsmType,
@@ -95,6 +97,7 @@ router.post(
         role: ROLES.RSM,
         employeeId: await generateEmployeeId("RSM"),
         dob,
+        joinDate: joinDate ? new Date(joinDate) : new Date(),
         region,
         asmId,
         rsmType,
@@ -2829,6 +2832,8 @@ router.post(
         });
       }
 
+      emitTargetUpdatedForDoc(global.io, target);
+
       res.status(201).json({
         message: "Target assigned to partner successfully",
         target,
@@ -2943,6 +2948,8 @@ router.post(
           bulkAssignments.push(newTarget);
         }
       }
+
+      emitTargetUpdatesForDocs(global.io, bulkAssignments);
 
       res.status(201).json({
         message: "Bulk target assigned successfully to all Partners under this ASM",

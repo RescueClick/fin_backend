@@ -6,6 +6,12 @@ import { Application } from "../models/Application.js";
 import { User } from "../models/User.js";
 import argon2 from "argon2";
 import { upload } from "../middleware/upload.js"; // the multer config above;
+import {
+  oversizeDocBatchViolation,
+  formatOversizeMessage,
+  deleteS3ObjectsForUploadedFiles,
+  normalizeDocTypeForLimits,
+} from "../utils/docUploadLimits.js";
 
 const router = Router();
 /** Partner views own applications (with status & docs) */
@@ -137,8 +143,16 @@ router.post(
         ? [req.body.docTypes]
         : [];
 
+      if (req.files?.length) {
+        const viol = oversizeDocBatchViolation(req.files, docTypes);
+        if (viol) {
+          await deleteS3ObjectsForUploadedFiles(req.files);
+          return res.status(400).json({ message: formatOversizeMessage(viol) });
+        }
+      }
+
       const docs = req.files.map((file, index) => ({
-        docType: docTypes[index] || "UNKNOWN",
+        docType: normalizeDocTypeForLimits(docTypes[index] || "UNKNOWN"),
         url: (() => {
           if (!file.location) {
             throw new Error("S3 upload failed: missing file location");

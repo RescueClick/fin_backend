@@ -801,6 +801,45 @@ export const sendDeleteAccountRequestEmail = async (user, reason = "", source = 
 /**
  * Send confirmation email to user after account deletion
  */
+/**
+ * Notify partner by email when admin rejects their delete-account request
+ */
+export const sendDeleteAccountRejectionEmail = async (user) => {
+  const content = `
+    <h2>Dear ${user.firstName || ""} ${user.lastName || ""},</h2>
+    <p>We have reviewed your request to delete your ${COMPANY_NAME} partner account.</p>
+
+    <div class="alert alert-info">
+      <strong>Outcome:</strong> Your deletion request was <strong>not approved</strong> at this time. Your partner account remains active and you can continue using the platform as usual.
+    </div>
+
+    <div class="info-box">
+      <h3 style="margin-top: 0; color: #12B99C;">What this means</h3>
+      <p style="margin: 0;">
+        No changes were made to your login or account data based on this request. If you still wish to close your account,
+        you may submit a new request later or contact our support team with any questions.
+      </p>
+    </div>
+
+    <p style="margin-top: 24px;">
+      If you did not submit this request, please secure your account and contact support immediately.
+    </p>
+  `;
+
+  try {
+    await sendMail({
+      to: user.email,
+      subject: `Update on your ${COMPANY_NAME} account deletion request`,
+      html: getEmailTemplate("Delete Request Not Approved", content),
+    });
+    console.log("✅ Delete account rejection email sent to:", user.email);
+    return true;
+  } catch (error) {
+    console.error("❌ Failed to send delete account rejection email:", error);
+    return false;
+  }
+};
+
 export const sendDeleteAccountConfirmationEmail = async (user) => {
   const content = `
     <h2>Dear ${user.firstName || ""} ${user.lastName || ""},</h2>

@@ -7,7 +7,11 @@ const configSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
-      enum: ["PARTNER_TARGET_POLICY", "PUBLIC_LOAN_DEFAULT_PARTNER_CODE"],
+      enum: [
+        "PARTNER_TARGET_POLICY",
+        "PUBLIC_LOAN_DEFAULT_PARTNER_CODE",
+        "REFERRAL_REWARD_AMOUNTS",
+      ],
     },
     value: {
       type: mongoose.Schema.Types.Mixed,

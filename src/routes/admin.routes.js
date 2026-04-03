@@ -12,10 +12,15 @@ import { Payout } from "../models/Payout.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { Target } from "../models/Target.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
-import { sendDeleteAccountConfirmationEmail } from "../utils/emailService.js";
+import {
+  sendDeleteAccountConfirmationEmail,
+  sendDeleteAccountRejectionEmail,
+} from "../utils/emailService.js";
+import { createNotification, generateNotificationId } from "../utils/notificationService.js";
 import { bannerUpload } from "../middleware/bannerUpload.js";
 import { Banner } from "../models/Banner.js";
 import { Incentive } from "../models/Incentive.js";
+import { ReferralReward } from "../models/ReferralReward.js";
 import { BankMaster } from "../models/BankMaster.js";
 import { upload } from "../middleware/upload.js";
 import mongoose from "mongoose";
@@ -32,6 +37,7 @@ import {
 import { sendPayoutEmail } from "../utils/emailService.js";
 import { sendIncentiveEmail } from "../utils/emailService.js";
 import { emitPayoutStatusChanged, emitIncentiveStatusChanged } from "../utils/socketEmitter.js";
+import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import {
   buildReassignableApplicationFilter,
@@ -46,6 +52,8 @@ import {
   deriveCurrentTargetContext,
   rebalanceHierarchyTargetsReplace,
 } from "../utils/targetRebalanceService.js";
+import { PUBLIC_LOAN_REFERRAL_FALLBACK_PARTNER_CODE as PUBLIC_LOAN_REFERRAL_FALLBACK } from "../constants/publicReferral.js";
+import { getReferralRewardAmounts } from "../utils/referralService.js";
 
 const router = Router();
 
@@ -281,7 +289,7 @@ router.post(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res, next) => {
     try {
-      const { firstName, lastName, phone, email, dob, region, password } =
+      const { firstName, lastName, phone, email, dob, joinDate, region, password } =
         req.body || {};
 
       if (!firstName || !lastName || !email || !phone) {
@@ -321,6 +329,7 @@ router.post(
         employeeId: await generateEmployeeId("ASM"),
         asmCode: makeAsmCode(),
         dob,
+        joinDate: joinDate ? new Date(joinDate) : new Date(),
         region,
         adminId: req.user.sub, // link to the admin creating ASM
       });
@@ -382,6 +391,7 @@ router.post(
         phone,
         email,
         dob,
+        joinDate,
         region,
         password,
         personalRsmId,
@@ -487,6 +497,7 @@ router.post(
         personalRsmId: personalRsm._id, // link to Personal Loan RSM
         businessHomeRsmId: businessHomeRsm._id, // link to Business/Home Loan RSM
         dob,
+        joinDate: joinDate ? new Date(joinDate) : new Date(),
       });
 
       // Send mail with credentials using professional email service
@@ -554,6 +565,7 @@ router.post(
         phone,
         email,
         dob,
+        joinDate,
         region,
         password,
         asmId,
@@ -610,6 +622,7 @@ router.post(
         role: ROLES.RSM,
         employeeId: await generateEmployeeId("RSM"),
         dob,
+        joinDate: joinDate ? new Date(joinDate) : new Date(),
         region: asm.region || region,
         asmId: asm._id,
         rsmType,
@@ -3445,6 +3458,48 @@ router.patch(
         });
       }
 
+      // On first transition to REJECTED, email + in-app notification to partner
+      if (previousStatus !== "REJECTED" && status === "REJECTED") {
+        const rejectUserId = requestDoc.user?.toString?.() || String(requestDoc.user);
+        setImmediate(async () => {
+          try {
+            const user = await User.findById(requestDoc.user).lean();
+            if (user?.email && !String(user.email).endsWith("@deleted.local")) {
+              await sendDeleteAccountRejectionEmail(user);
+            }
+          } catch (err) {
+            console.error(
+              "Failed to send delete account rejection email:",
+              err.message
+            );
+          }
+        });
+        setImmediate(async () => {
+          try {
+            await createNotification(rejectUserId, {
+              type: "warning",
+              title: "Delete account request not approved",
+              message:
+                "Your request to delete your partner account was reviewed and not approved. Your account stays active. Contact support if you need help.",
+              data: {
+                deleteAccountRequestId: requestDoc._id.toString(),
+                status: "REJECTED",
+              },
+              notificationId: generateNotificationId({
+                type: "delete_account_rejected",
+                userId: rejectUserId,
+                timestamp: Date.now(),
+              }),
+            });
+          } catch (err) {
+            console.error(
+              "Failed to create delete account rejection notification:",
+              err.message
+            );
+          }
+        });
+      }
+
       const populated = await requestDoc.populate(
         "user",
         "firstName lastName email phone employeeId role status"
@@ -4286,7 +4341,6 @@ router.post("/target-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, 
 });
 
 // ==================== PUBLIC LOAN DEFAULT PARTNER REFERRAL ====================
-const PUBLIC_LOAN_REFERRAL_FALLBACK = "PT-D4CTD8B2";
 
 // GET /api/admin/public-loan-default-partner
 router.get(
@@ -4522,6 +4576,8 @@ router.post("/target/assign-partner", auth, requireRole(ROLES.SUPER_ADMIN), asyn
         disbursementTarget: Number(disbursementTarget),
       });
     }
+
+    emitTargetUpdatedForDoc(global.io, target);
 
     res.status(201).json({
       message: "Target assigned to partner successfully",
@@ -4882,10 +4938,11 @@ router.post(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const { month, year } = req.body || {};
+      const { month, year, prorateByJoinDate = true } = req.body || {};
       const targetMonth = Number(month);
       const targetYear = Number(year);
       const adminId = req.user.sub;
+      const shouldProrate = Boolean(prorateByJoinDate);
 
       if (!targetMonth || !targetYear) {
         return res.status(400).json({ message: "Month and year are required" });
@@ -4893,6 +4950,17 @@ router.post(
       if (targetMonth < 1 || targetMonth > 12) {
         return res.status(400).json({ message: "Invalid month value" });
       }
+
+      const daysInTargetMonth = new Date(targetYear, targetMonth, 0).getDate();
+      const monthStart = new Date(targetYear, targetMonth - 1, 1);
+      const monthEnd = new Date(targetYear, targetMonth, 0);
+      const calcProrationRatio = (joinDate) => {
+        if (!shouldProrate) return 1;
+        if (!(joinDate instanceof Date) || Number.isNaN(joinDate.getTime())) return 1;
+        if (joinDate < monthStart || joinDate > monthEnd) return 1;
+        const remainingDays = Math.max(1, daysInTargetMonth - joinDate.getDate() + 1);
+        return Number((remainingDays / daysInTargetMonth).toFixed(6));
+      };
 
       const [asms, rsms, rms, partners, targets] = await Promise.all([
         User.find({ role: ROLES.ASM }).lean(),
@@ -4949,9 +5017,13 @@ router.post(
         rmAssigned: 0,
         partnerAssigned: 0,
       };
+      const assignmentBreakdown = [];
 
       for (const u of asms) {
         if (targetMap.has(`${ROLES.ASM}:${String(u._id)}`)) continue;
+        const effectiveJoinDate = u.joinDate || u.createdAt;
+        const ratio = calcProrationRatio(effectiveJoinDate);
+        const proratedTarget = Number((asmAvg * ratio).toFixed(2));
         const doc = await Target.create({
           assignedBy: adminId,
           assignedTo: u._id,
@@ -4959,16 +5031,27 @@ router.post(
           month: targetMonth,
           year: targetYear,
           fileCountTarget: 0,
-          disbursementTarget: asmAvg,
-          targetValue: asmAvg,
+          disbursementTarget: proratedTarget,
+          targetValue: proratedTarget,
           isCalculated: true,
         });
         assignments.push(doc);
+        assignmentBreakdown.push({
+          userId: u._id,
+          role: ROLES.ASM,
+          joinDate: effectiveJoinDate,
+          prorationRatio: ratio,
+          assignedDisbursementTarget: proratedTarget,
+          assignedFileCountTarget: 0,
+        });
         summary.asmAssigned += 1;
       }
 
       for (const u of rsms) {
         if (targetMap.has(`${ROLES.RSM}:${String(u._id)}`)) continue;
+        const effectiveJoinDate = u.joinDate || u.createdAt;
+        const ratio = calcProrationRatio(effectiveJoinDate);
+        const proratedTarget = Number((rsmAvg * ratio).toFixed(2));
         const doc = await Target.create({
           assignedBy: adminId,
           assignedTo: u._id,
@@ -4976,16 +5059,27 @@ router.post(
           month: targetMonth,
           year: targetYear,
           fileCountTarget: 0,
-          disbursementTarget: rsmAvg,
-          targetValue: rsmAvg,
+          disbursementTarget: proratedTarget,
+          targetValue: proratedTarget,
           isCalculated: true,
         });
         assignments.push(doc);
+        assignmentBreakdown.push({
+          userId: u._id,
+          role: ROLES.RSM,
+          joinDate: effectiveJoinDate,
+          prorationRatio: ratio,
+          assignedDisbursementTarget: proratedTarget,
+          assignedFileCountTarget: 0,
+        });
         summary.rsmAssigned += 1;
       }
 
       for (const u of rms) {
         if (targetMap.has(`${ROLES.RM}:${String(u._id)}`)) continue;
+        const effectiveJoinDate = u.joinDate || u.createdAt;
+        const ratio = calcProrationRatio(effectiveJoinDate);
+        const proratedTarget = Number((rmAvg * ratio).toFixed(2));
         const doc = await Target.create({
           assignedBy: adminId,
           assignedTo: u._id,
@@ -4993,37 +5087,64 @@ router.post(
           month: targetMonth,
           year: targetYear,
           fileCountTarget: 0,
-          disbursementTarget: rmAvg,
-          targetValue: rmAvg,
+          disbursementTarget: proratedTarget,
+          targetValue: proratedTarget,
           isCalculated: true,
         });
         assignments.push(doc);
+        assignmentBreakdown.push({
+          userId: u._id,
+          role: ROLES.RM,
+          joinDate: effectiveJoinDate,
+          prorationRatio: ratio,
+          assignedDisbursementTarget: proratedTarget,
+          assignedFileCountTarget: 0,
+        });
         summary.rmAssigned += 1;
       }
 
       for (const u of partners) {
         if (targetMap.has(`${ROLES.PARTNER}:${String(u._id)}`)) continue;
+        const effectiveJoinDate = u.joinDate || u.createdAt;
+        const ratio = calcProrationRatio(effectiveJoinDate);
+        const proratedDisbursementTarget = Number((partnerAvg * ratio).toFixed(2));
+        const proratedFileCountTarget = Math.max(
+          1,
+          Math.round(partnerFileAvg * ratio)
+        );
         const doc = await Target.create({
           assignedBy: adminId,
           assignedTo: u._id,
           role: ROLES.PARTNER,
           month: targetMonth,
           year: targetYear,
-          fileCountTarget: partnerFileAvg,
-          disbursementTarget: partnerAvg,
-          targetValue: partnerAvg,
+          fileCountTarget: proratedFileCountTarget,
+          disbursementTarget: proratedDisbursementTarget,
+          targetValue: proratedDisbursementTarget,
           isCalculated: false,
         });
         assignments.push(doc);
+        assignmentBreakdown.push({
+          userId: u._id,
+          role: ROLES.PARTNER,
+          joinDate: effectiveJoinDate,
+          prorationRatio: ratio,
+          assignedDisbursementTarget: proratedDisbursementTarget,
+          assignedFileCountTarget: proratedFileCountTarget,
+        });
         summary.partnerAssigned += 1;
       }
 
+      emitTargetUpdatesForDocs(global.io, assignments);
+
       return res.status(201).json({
-        message: "Targets assigned to newly added users",
+        message: `Targets assigned to newly added users${shouldProrate ? " with proration" : ""}`,
         month: targetMonth,
         year: targetYear,
+        prorateByJoinDate: shouldProrate,
         totalNewAssignments: assignments.length,
         summary,
+        assignmentBreakdown,
       });
     } catch (err) {
       console.error("Assign new users targets error:", err);
@@ -5415,6 +5536,8 @@ router.post(
         assignments.push(asmTargetDoc);
       }
 
+      emitTargetUpdatesForDocs(global.io, assignments);
+
       res.status(201).json({
         message:
           mode === "add"
@@ -5438,6 +5561,306 @@ router.post(
     } catch (err) {
       console.error("Top-down hierarchical target distribution error:", err);
       res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// --- Referral reward amounts (Super Admin; stored in Config) ---
+
+router.get(
+  "/referral-reward-amounts",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { Config } = await import("../models/Config.js");
+      const doc = await Config.findOne({ key: "REFERRAL_REWARD_AMOUNTS" }).lean();
+      const amounts = await getReferralRewardAmounts();
+      res.json({
+        disbursedReward: amounts.disbursedReward,
+        signupReward: amounts.signupReward,
+        savedInDatabase: amounts.savedInDatabase,
+        savedValue: doc?.value && typeof doc.value === "object" ? doc.value : null,
+      });
+    } catch (err) {
+      console.error("referral-reward-amounts GET:", err);
+      res.status(500).json({ message: err.message || "Server error" });
+    }
+  }
+);
+
+router.put(
+  "/referral-reward-amounts",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const current = await getReferralRewardAmounts();
+      const dRaw = req.body?.disbursedReward;
+      const sRaw = req.body?.signupReward;
+      const disbursedReward =
+        dRaw === undefined || dRaw === null || dRaw === ""
+          ? current.disbursedReward
+          : Number(dRaw);
+      const signupReward =
+        sRaw === undefined || sRaw === null || sRaw === ""
+          ? current.signupReward
+          : Number(sRaw);
+
+      if (!Number.isFinite(disbursedReward) || disbursedReward <= 0) {
+        return res.status(400).json({
+          message: "disbursedReward must be a positive number (INR)",
+        });
+      }
+      if (!Number.isFinite(signupReward) || signupReward <= 0) {
+        return res.status(400).json({
+          message: "signupReward must be a positive number (INR)",
+        });
+      }
+
+      const { Config } = await import("../models/Config.js");
+      const payload = { disbursedReward, signupReward };
+      let doc = await Config.findOne({ key: "REFERRAL_REWARD_AMOUNTS" });
+      if (doc) {
+        doc.value = payload;
+        await doc.save();
+      } else {
+        await Config.create({
+          key: "REFERRAL_REWARD_AMOUNTS",
+          value: payload,
+        });
+      }
+
+      res.json({
+        message: "Referral reward amounts updated",
+        disbursedReward,
+        signupReward,
+      });
+    } catch (err) {
+      console.error("referral-reward-amounts PUT:", err);
+      res.status(500).json({ message: err.message || "Server error" });
+    }
+  }
+);
+
+// --- Referral rewards (admin) — same lifecycle as incentives: PENDING → APPROVED → PAID ---
+
+router.get(
+  "/referral-rewards/summary",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const agg = await ReferralReward.aggregate([
+        {
+          $group: {
+            _id: "$status",
+            count: { $sum: 1 },
+            totalAmount: { $sum: "$amount" },
+          },
+        },
+      ]);
+      const byStatus = {
+        PENDING: { count: 0, totalAmount: 0 },
+        APPROVED: { count: 0, totalAmount: 0 },
+        PAID: { count: 0, totalAmount: 0 },
+        CANCELLED: { count: 0, totalAmount: 0 },
+      };
+      for (const row of agg) {
+        if (row._id && byStatus[row._id] != null) {
+          byStatus[row._id] = {
+            count: row.count,
+            totalAmount: row.totalAmount || 0,
+          };
+        }
+      }
+      res.json({ byStatus });
+    } catch (err) {
+      console.error("admin referral-rewards summary:", err);
+      res.status(500).json({ message: err.message || "Server error" });
+    }
+  }
+);
+
+router.get(
+  "/referral-rewards",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+      const skip = (page - 1) * limit;
+      const filter = {};
+      if (req.query.status && ["PENDING", "APPROVED", "PAID", "CANCELLED"].includes(req.query.status)) {
+        filter.status = req.query.status;
+      }
+      if (req.query.eventType && ["SIGNUP", "DISBURSED"].includes(req.query.eventType)) {
+        filter.eventType = req.query.eventType;
+      }
+      if (req.query.referrerId && mongoose.Types.ObjectId.isValid(req.query.referrerId)) {
+        filter.referrerId = req.query.referrerId;
+      }
+
+      const [items, total] = await Promise.all([
+        ReferralReward.find(filter)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .populate("referrerId", "firstName lastName email phone referralCode employeeId role partnerCode")
+          .populate(
+            "referredUserId",
+            "firstName lastName email phone employeeId partnerCode role"
+          )
+          .populate("applicationId", "appNo status loanType approvedLoanAmount")
+          .populate("approvedBy", "firstName lastName email")
+          .populate("paidBy", "firstName lastName email")
+          .lean(),
+        ReferralReward.countDocuments(filter),
+      ]);
+
+      res.json({
+        rewards: items,
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit) || 1,
+      });
+    } catch (err) {
+      console.error("admin referral-rewards list:", err);
+      res.status(500).json({ message: err.message || "Server error" });
+    }
+  }
+);
+
+router.patch(
+  "/referral-rewards/:id",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const reward = await ReferralReward.findById(req.params.id);
+      if (!reward) return res.status(404).json({ message: "Reward not found" });
+      if (!["PENDING", "APPROVED"].includes(reward.status)) {
+        return res.status(400).json({
+          message: "Can only edit when status is PENDING or APPROVED",
+        });
+      }
+      if (req.body?.amount != null) {
+        const amt = Number(req.body.amount);
+        if (!Number.isFinite(amt) || amt <= 0) {
+          return res.status(400).json({ message: "amount must be a positive number" });
+        }
+        reward.amount = amt;
+      }
+      if (req.body?.note != null) reward.note = String(req.body.note).trim();
+      await reward.save();
+      res.json({ message: "Referral reward updated", reward });
+    } catch (err) {
+      console.error("admin referral reward PATCH:", err);
+      res.status(500).json({ message: err.message || "Server error" });
+    }
+  }
+);
+
+router.patch(
+  "/referral-rewards/:id/approve",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const adminId = req.user.sub;
+      const reward = await ReferralReward.findById(req.params.id);
+      if (!reward) return res.status(404).json({ message: "Reward not found" });
+      if (reward.status !== "PENDING") {
+        return res.status(400).json({ message: `Cannot approve reward with status ${reward.status}` });
+      }
+      reward.status = "APPROVED";
+      reward.approvedAt = new Date();
+      reward.approvedBy = adminId;
+      if (req.body?.note) reward.note = String(req.body.note).trim();
+      await reward.save();
+      res.json({ message: "Referral reward approved", reward });
+    } catch (err) {
+      console.error("admin referral approve:", err);
+      res.status(500).json({ message: err.message || "Server error" });
+    }
+  }
+);
+
+router.patch(
+  "/referral-rewards/:id/pay",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const adminId = req.user.sub;
+      const reward = await ReferralReward.findById(req.params.id);
+      if (!reward) return res.status(404).json({ message: "Reward not found" });
+      if (reward.status === "PAID") {
+        return res.status(400).json({ message: "Reward already paid" });
+      }
+      if (reward.status === "CANCELLED") {
+        return res.status(400).json({ message: "Cannot pay a cancelled reward" });
+      }
+      if (reward.status !== "APPROVED") {
+        return res.status(400).json({
+          message: "Approve this reward first, then mark as paid (like payouts/incentives).",
+        });
+      }
+      reward.status = "PAID";
+      reward.paidAt = new Date();
+      reward.paidBy = adminId;
+      if (req.body?.paymentReference != null) {
+        reward.paymentReference = String(req.body.paymentReference).trim();
+      }
+      if (req.body?.note) reward.note = String(req.body.note).trim();
+
+      await reward.save();
+
+      if (reward.eventType === "DISBURSED" && reward.referredUserId) {
+        const paidTarget = await User.findById(reward.referredUserId)
+          .select("role")
+          .lean();
+        if (paidTarget?.role === ROLES.CUSTOMER) {
+          await User.findByIdAndUpdate(reward.referredUserId, {
+            referralRewardStatus: "PAID",
+          });
+        }
+      }
+
+      res.json({ message: "Referral reward marked as paid", reward });
+    } catch (err) {
+      console.error("admin referral pay:", err);
+      res.status(500).json({ message: err.message || "Server error" });
+    }
+  }
+);
+
+router.patch(
+  "/referral-rewards/:id/cancel",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const reward = await ReferralReward.findById(req.params.id);
+      if (!reward) return res.status(404).json({ message: "Reward not found" });
+      if (reward.status === "PAID") {
+        return res.status(400).json({ message: "Cannot cancel a paid reward" });
+      }
+      if (reward.status === "CANCELLED") {
+        return res.status(400).json({ message: "Already cancelled" });
+      }
+      if (!["PENDING", "APPROVED"].includes(reward.status)) {
+        return res.status(400).json({ message: `Cannot cancel from status ${reward.status}` });
+      }
+      reward.status = "CANCELLED";
+      if (req.body?.note) reward.note = String(req.body.note).trim();
+      await reward.save();
+      res.json({ message: "Referral reward cancelled", reward });
+    } catch (err) {
+      console.error("admin referral cancel:", err);
+      res.status(500).json({ message: err.message || "Server error" });
     }
   }
 );

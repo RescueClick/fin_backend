@@ -210,7 +210,7 @@ router.post(
   requireRole(ROLES.RSM),
   async (req, res) => {
     try {
-      const { firstName, lastName, phone, dob, region, email, password, assignToRsmType } = req.body || {};
+      const { firstName, lastName, phone, dob, joinDate, region, email, password, assignToRsmType } = req.body || {};
       const rsmId = req.user.sub; // RSM creating the RM
 
       if (!firstName || !lastName || !email || !phone) {
@@ -265,6 +265,7 @@ router.post(
         lastName,
         phone,
         dob,
+        joinDate: joinDate ? new Date(joinDate) : new Date(),
         region,
         email: email.toLowerCase(),
         passwordHash: await argon2.hash(rawPassword),
@@ -469,6 +470,8 @@ router.post(
       }
 
       await app.save();
+
+      // Partner→partner disbursal referral rewards: handled in Application post("save") hook
 
       // Emit socket notification
       try {

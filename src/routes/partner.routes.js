@@ -6,6 +6,19 @@ import { Application } from "../models/Application.js";
 import { User } from "../models/User.js";
 import argon2 from "argon2";
 import { upload } from "../middleware/upload.js"; // the multer config above;
+import {
+  oversizeDocBatchViolation,
+  oversizeSingleDocViolation,
+  formatOversizeMessage,
+  deleteS3ObjectsForUploadedFiles,
+} from "../utils/docUploadLimits.js";
+import {
+  normalizeDocTypeKey,
+  normalizeIncomingDocType,
+  getMandatoryDocRules,
+  findMissingMandatoryDocs,
+  serializeMandatoryDocRules,
+} from "../utils/loanMandatoryDocRules.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { Banner } from "../models/Banner.js";
 import { Payout } from "../models/Payout.js";
@@ -17,10 +30,35 @@ import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendPartnerRegistrationEmail, sendLoanApplicationEmail, sendDeleteAccountRequestEmail } from "../utils/emailService.js";
 import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
+import { ReferralReward } from "../models/ReferralReward.js";
 import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { Config } from "../models/Config.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
+import {
+  getReferralWebBaseUrl,
+  getInviteBaseUrl,
+  getPartnerAppPlayStoreUrl,
+  appendPartnerShareUtm,
+  canonicalPartnerReferralCode,
+} from "../config/branding.js";
+import {
+  PUBLIC_LOAN_REFERRAL_FALLBACK_PARTNER_CODE,
+  PARTNER_REGISTRATION_PATH_SEGMENT,
+} from "../constants/publicReferral.js";
+
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function firstNonEmptyTrimmed(values) {
+  for (const v of values) {
+    if (v == null) continue;
+    const t = String(v).trim();
+    if (t) return t;
+  }
+  return "";
+}
 
 const validateApplicationPayload = ({
   customer = {},
@@ -122,7 +160,6 @@ const validateApplicationPayload = ({
   return errors;
 };
 
-const normalizeDocTypeKey = (docType) => String(docType || "").trim().toUpperCase();
 const ACTIVE_APPLICATION_STATUSES = [
   "DRAFT",
   "SUBMITTED",
@@ -135,93 +172,6 @@ const ACTIVE_APPLICATION_STATUSES = [
   "AGREEMENT",
 ];
 
-const normalizeIncomingDocType = (docType) => {
-  const key = normalizeDocTypeKey(docType);
-  const aliases = {
-    AADHAAR_FRONT: "AADHAR_FRONT",
-    AADHAAR_BACK: "AADHAR_BACK",
-    PASSPORT_PHOTO: "PHOTO",
-    OTHER_DOC: "OTHER_DOCS",
-    FORM16: "FORM_16_26AS",
-    FORM_16: "FORM_16_26AS",
-    FORM16_26AS: "FORM_16_26AS",
-    "26AS": "FORM_16_26AS",
-    COMPANY_ID: "COMPANY_ID_CARD",
-    COMPANY_IDCARD: "COMPANY_ID_CARD",
-    GST: "GST_DOCUMENT",
-    GST_DOC: "GST_DOCUMENT",
-    GST_CERTIFICATE: "GST_DOCUMENT",
-    BANK_STATEMENT: "BANK_STATEMENT_1",
-    CO_APPLICANT_PASSPORT_PHOTO: "CO_APPLICANT_SELFIE",
-  };
-  return aliases[key] || key;
-};
-
-const getMandatoryDocRules = (loanType, customer = {}) => {
-  const isFemale = String(customer?.gender || "").toLowerCase() === "female";
-
-  if (loanType === "PERSONAL") {
-    return [
-      "AADHAR_FRONT",
-      "AADHAR_BACK",
-      "PAN",
-      { anyOf: ["PHOTO", "SELFIE"], label: "PHOTO_OR_SELFIE" },
-      "OTHER_DOCS",
-      { anyOf: ["ADDRESS_PROOF", "LIGHT_BILL", "UTILITY_BILL", "RENT_AGREEMENT"], label: "ADDRESS_PROOF" },
-      "COMPANY_ID_CARD",
-      "SALARY_SLIP_1",
-      "SALARY_SLIP_2",
-      "SALARY_SLIP_3",
-      "FORM_16_26AS",
-      "BANK_STATEMENT_1",
-      "BANK_STATEMENT_2",
-    ];
-  }
-
-  if (loanType === "HOME_LOAN_SALARIED") {
-    return [
-      "AADHAR_FRONT",
-      "AADHAR_BACK",
-      "PAN",
-      { anyOf: ["PHOTO", "SELFIE"], label: "PHOTO_OR_SELFIE" },
-      "OTHER_DOCS",
-      { anyOf: ["ADDRESS_PROOF", "LIGHT_BILL", "UTILITY_BILL", "RENT_AGREEMENT"], label: "ADDRESS_PROOF" },
-      "COMPANY_ID_CARD",
-      "SALARY_SLIP_1",
-      "SALARY_SLIP_2",
-      "SALARY_SLIP_3",
-      "FORM_16_26AS",
-      "BANK_STATEMENT_1",
-      "BANK_STATEMENT_2",
-    ];
-  }
-
-  const rules = [
-    { anyOf: ["ADDRESS_PROOF", "LIGHT_BILL", "UTILITY_BILL", "RENT_AGREEMENT"], label: "ADDRESS_PROOF" },
-    "AADHAR_FRONT",
-    "AADHAR_BACK",
-    "BUSINESS_OTHER_DOCS",
-    "PAN",
-    { anyOf: ["PHOTO", "SELFIE"], label: "PHOTO_OR_SELFIE" },
-    "SHOP_ACT",
-    "UDHYAM_AADHAR",
-    "ITR",
-    "GST_DOCUMENT",
-    "SHOP_PHOTO",
-    "BANK_STATEMENT_1",
-    "BANK_STATEMENT_2",
-  ];
-
-  if (isFemale && (loanType === "BUSINESS" || loanType === "HOME_LOAN_SELF_EMPLOYED")) {
-    rules.push("CO_APPLICANT_AADHAR_FRONT");
-    rules.push("CO_APPLICANT_AADHAR_BACK");
-    rules.push("CO_APPLICANT_PAN");
-    rules.push({ anyOf: ["CO_APPLICANT_SELFIE"], label: "CO_APPLICANT_SELFIE_OR_PHOTO" });
-  }
-
-  return rules;
-};
-
 const normalizeLoanType = (loanType) => {
   const key = String(loanType || "").trim().toUpperCase();
   const aliases = {
@@ -229,39 +179,6 @@ const normalizeLoanType = (loanType) => {
     BUSINESS_LOAN: "BUSINESS",
   };
   return aliases[key] || key;
-};
-
-const serializeMandatoryDocRules = (rules = []) =>
-  rules.map((rule) => {
-    if (typeof rule === "string") {
-      return { key: rule, acceptedDocTypes: [rule] };
-    }
-
-    const acceptedDocTypes = Array.isArray(rule?.anyOf)
-      ? rule.anyOf
-      : [];
-    return {
-      key: String(rule?.label || acceptedDocTypes.join("_OR_") || "").toUpperCase(),
-      acceptedDocTypes,
-    };
-  });
-
-const findMissingMandatoryDocs = (loanType, customer, docs = []) => {
-  const uploadedTypes = new Set(docs.map((d) => normalizeIncomingDocType(d.docType)));
-  const rules = getMandatoryDocRules(loanType, customer);
-  const missing = [];
-
-  for (const rule of rules) {
-    if (typeof rule === "string") {
-      if (!uploadedTypes.has(rule)) missing.push(rule);
-      continue;
-    }
-    if (rule?.anyOf && !rule.anyOf.some((t) => uploadedTypes.has(t))) {
-      missing.push(rule.label || rule.anyOf.join("_OR_"));
-    }
-  }
-
-  return missing;
 };
 
 // Preserve multiple files of the same docType while still replacing existing re-uploads.
@@ -308,9 +225,6 @@ const mergeApplicationDocs = (existingDocs = [], newDocs = [], uploadedBy) => {
 
 const router = Router();
 
-/** Fallback when admin has not set a public-loan default partner code */
-const PUBLIC_LOAN_REFERRAL_FALLBACK = "PT-D4CTD8B2";
-
 // GET /api/partner/public-default-referral-code — no auth (public loan forms)
 router.get("/public-default-referral-code", async (req, res) => {
   try {
@@ -322,7 +236,8 @@ router.get("/public-default-referral-code", async (req, res) => {
         ? String(doc.value.partnerCode).trim()
         : "";
     res.json({
-      partnerCode: partnerCode || PUBLIC_LOAN_REFERRAL_FALLBACK,
+      partnerCode:
+        partnerCode || PUBLIC_LOAN_REFERRAL_FALLBACK_PARTNER_CODE,
     });
   } catch (err) {
     console.error("public-default-referral-code:", err);
@@ -424,7 +339,7 @@ router.post(
         accountNumber,
         ifscCode,
         password,
-        rmCode,
+        joinDate,
       } = partnerData;
 
       // Validate and format date of birth
@@ -559,21 +474,53 @@ router.post(
         });
       }
 
-      const assignedRmId = superAdmin._id;
+      let assignedRmId = superAdmin._id;
       const status = "PENDING";
+      let referringPartnerId = null;
 
-      if (rmCode) {
-        const rm = await User.findOne({
-          rmCode: String(rmCode).trim(),
-          role: ROLES.RM,
-          status: "ACTIVE",
-        })
-          .select("_id")
-          .lean();
-        if (!rm) {
-          console.warn(
-            `Partner signup: invalid or inactive rmCode "${String(rmCode).trim()}"`
-          );
+      const referralInputRaw = firstNonEmptyTrimmed([
+        partnerData.partnerReferralCode,
+        partnerData.referralCode,
+        partnerData.rmCode,
+        partnerData.rmcode,
+      ]);
+
+      if (referralInputRaw) {
+        const trimmed = referralInputRaw.trim();
+        const upper = trimmed.toUpperCase();
+        if (upper.startsWith("RM-")) {
+          const rm = await User.findOne({
+            rmCode: trimmed,
+            role: ROLES.RM,
+            status: "ACTIVE",
+          })
+            .select("_id")
+            .lean();
+          if (!rm) {
+            return res.status(400).json({
+              message: "Invalid or inactive RM code",
+            });
+          }
+          assignedRmId = rm._id;
+        } else {
+          const referringPartner = await User.findOne({
+            partnerCode: {
+              $regex: new RegExp(`^${escapeRegex(trimmed)}$`, "i"),
+            },
+            role: ROLES.PARTNER,
+            status: "ACTIVE",
+          })
+            .select("_id rmId")
+            .lean();
+          if (!referringPartner) {
+            return res.status(400).json({
+              message: "Invalid or inactive partner referral code",
+            });
+          }
+          referringPartnerId = referringPartner._id;
+          if (referringPartner.rmId) {
+            assignedRmId = referringPartner.rmId;
+          }
         }
       }
 
@@ -617,8 +564,11 @@ router.post(
         role: ROLES.PARTNER,
         partnerCode: makePartnerCode(),
         rmId: assignedRmId,
+        joinDate: joinDate ? new Date(joinDate) : new Date(),
         status,
         docs,
+        referredBy: referringPartnerId || undefined,
+        referralRewardStatus: "NONE",
       });
 
       // 📧 Send activation email to partner using email service
@@ -718,6 +668,75 @@ router.post(
                 });
               console.log(
                 "✅ Socket event emitted to RM for new partner registration"
+              );
+            }
+
+            const line = await getReportingLineFromRmId(assignedRmId.toString());
+            const regDataAsm = {
+              partnerId: partner._id.toString(),
+              partnerCode: partner.partnerCode,
+              employeeId: partner.employeeId,
+              status: partner.status,
+            };
+            const partnerSock = {
+              _id: partner._id,
+              firstName: partner.firstName,
+              lastName: partner.lastName,
+              email: partner.email,
+              status: partner.status,
+              partnerCode: partner.partnerCode,
+              employeeId: partner.employeeId,
+            };
+            const regTitle = "New Partner Registration";
+            const regMsgAsm = `${partner.firstName} ${partner.lastName} (${partner.email}) registered. Status: ${partner.status}`;
+            if (line.asmId && global.io) {
+              const nidAsm = generateNotificationId({
+                applicationId: partner._id.toString(),
+                timestamp: Date.now(),
+                userId: line.asmId,
+                type: "registration",
+              });
+              await createNotification(line.asmId, {
+                type: "registration",
+                title: regTitle,
+                message: regMsgAsm,
+                category: "partner",
+                priority: "normal",
+                data: regDataAsm,
+                notificationId: nidAsm,
+              });
+              global.io.to(`asm_${line.asmId}`).emit("newPartnerRegistered", {
+                partner: partnerSock,
+                notificationId: nidAsm,
+                timestamp: new Date(),
+              });
+            }
+            for (const rsmId of line.rsmIds) {
+              if (!global.io) continue;
+              const nidRsm = generateNotificationId({
+                applicationId: partner._id.toString(),
+                timestamp: Date.now(),
+                userId: rsmId,
+                type: "registration",
+              });
+              await createNotification(rsmId, {
+                type: "registration",
+                title: regTitle,
+                message: regMsgAsm,
+                category: "partner",
+                priority: "normal",
+                data: regDataAsm,
+                notificationId: nidRsm,
+              });
+              global.io.to(`rsm_${rsmId}`).emit("newPartnerRegistered", {
+                partner: partnerSock,
+                notificationId: nidRsm,
+                timestamp: new Date(),
+              });
+            }
+            if (line.asmId || line.rsmIds.length) {
+              console.log(
+                "✅ ASM/RSM notifications emitted for new partner registration"
               );
             }
           }
@@ -911,6 +930,8 @@ router.post(
               passwordHash: await argon2.hash(customer.password || tempPassword),
               role: ROLES.CUSTOMER,
               status: "ACTIVE",
+              referredBy: referralPartner?._id || undefined,
+              referralRewardStatus: referralPartner?._id ? "PENDING" : "NONE",
             });
             created = true;
             console.log(`✅ Customer created with unique employeeId: ${employeeId}`);
@@ -938,6 +959,14 @@ router.post(
         : req.body.docTypes
         ? [req.body.docTypes]
         : [];
+
+      if (req.files?.length) {
+        const viol = oversizeDocBatchViolation(req.files, docTypes);
+        if (viol) {
+          await deleteS3ObjectsForUploadedFiles(req.files);
+          return res.status(400).json({ message: formatOversizeMessage(viol) });
+        }
+      }
 
       const newDocs = req.files.map((file, index) => {
         if (!file.location) {
@@ -1325,6 +1354,8 @@ router.post(
               passwordHash: await argon2.hash(customer.password || tempPassword),
               role: ROLES.CUSTOMER,
               status: "ACTIVE",
+              referredBy: referralPartner?._id || undefined,
+              referralRewardStatus: referralPartner?._id ? "PENDING" : "NONE",
             });
             created = true;
             console.log(`✅ Customer created with unique employeeId: ${employeeId}`);
@@ -1352,6 +1383,14 @@ router.post(
         : req.body.docTypes
         ? [req.body.docTypes]
         : [];
+
+      if (req.files?.length) {
+        const viol = oversizeDocBatchViolation(req.files, docTypes);
+        if (viol) {
+          await deleteS3ObjectsForUploadedFiles(req.files);
+          return res.status(400).json({ message: formatOversizeMessage(viol) });
+        }
+      }
 
       const newDocs = req.files.map((file, index) => {
         if (!file.location) {
@@ -2611,6 +2650,78 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       .reduce((sum, inv) => sum + (inv.amount || 0), 0);
 
     // ------------------
+    // 8.1️⃣ Referral rewards (partner→partner): current month summary + preview
+    // ------------------
+    const refMonthStart = new Date(currentYear, currentMonth - 1, 1);
+    const refMonthEnd = new Date(currentYear, currentMonth, 1);
+    const referralRewardMatch = {
+      referrerId: new mongoose.Types.ObjectId(partnerId),
+      createdAt: { $gte: refMonthStart, $lt: refMonthEnd },
+    };
+
+    const referralRewardStatusAgg = await ReferralReward.aggregate([
+      { $match: referralRewardMatch },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 },
+          totalAmount: { $sum: "$amount" },
+        },
+      },
+    ]);
+
+    const referralRewardsByStatus = {
+      PENDING: { count: 0, totalAmount: 0 },
+      APPROVED: { count: 0, totalAmount: 0 },
+      PAID: { count: 0, totalAmount: 0 },
+      CANCELLED: { count: 0, totalAmount: 0 },
+    };
+    for (const row of referralRewardStatusAgg) {
+      const key = row._id;
+      if (referralRewardsByStatus[key]) {
+        referralRewardsByStatus[key] = {
+          count: row.count || 0,
+          totalAmount: row.totalAmount || 0,
+        };
+      }
+    }
+
+    const referralRewardsPreviewRaw = await ReferralReward.find({
+      referrerId: partnerId,
+      createdAt: { $gte: refMonthStart, $lt: refMonthEnd },
+    })
+      .sort({ createdAt: -1 })
+      .limit(8)
+      .populate("referredUserId", "firstName lastName partnerCode")
+      .populate("applicationId", "appNo loanType")
+      .lean();
+
+    const referralRewardsPreview = referralRewardsPreviewRaw.map((r) => {
+      const u = r.referredUserId;
+      const name = u
+        ? [u.firstName, u.lastName].filter(Boolean).join(" ") || "—"
+        : "—";
+      const code = u?.partnerCode ? String(u.partnerCode).trim() : "";
+      const downlineLabel = code ? `${name} · ${code}` : name;
+      return {
+        _id: r._id,
+        amount: r.amount,
+        status: r.status,
+        eventType: r.eventType,
+        createdAt: r.createdAt,
+        downlineLabel,
+        appNo: r.applicationId?.appNo || null,
+      };
+    });
+
+    const referralRewardsMonthTotal = Object.values(referralRewardsByStatus).reduce(
+      (s, x) => s + (Number(x.totalAmount) || 0),
+      0
+    );
+    const referralRewardsPaidTotal =
+      referralRewardsByStatus.PAID.totalAmount || 0;
+
+    // ------------------
     // 9️⃣ Response
     // ------------------
     res.json({
@@ -2651,6 +2762,14 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       incentives,
       totalIncentivePaid,
       pendingIncentiveAmount,
+      referralRewards: {
+        month: currentMonth,
+        year: currentYear,
+        monthTotal: referralRewardsMonthTotal,
+        paidTotal: referralRewardsPaidTotal,
+        byStatus: referralRewardsByStatus,
+        preview: referralRewardsPreview,
+      },
     });
   } catch (err) {
     console.error("Partner dashboard error:", err);
@@ -2773,7 +2892,7 @@ router.get(
 //       verification: partner.verification,
 //       referralCode: partner.referralCode,
 //       referralLink: `${
-//         process.env.CLIENT_URL || "https://trustlinefintech.com"
+//         process.env.CLIENT_URL || "https://dhansourcecapital.com"
 //       }/register?ref=${partner?.partnerCode}`,
 //       status: partner.status,
 
@@ -2879,6 +2998,26 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     const profilePic =
       docs.find((doc) => doc.docType === "SELFIE")?.url || null;
 
+    /** Single public code for ?ref=, /invite?code=, and JSON (always prefer PT-… when present). */
+    const partnerRefForShare = canonicalPartnerReferralCode(
+      partner?.partnerCode,
+      partner?.referralCode
+    );
+
+    if (
+      partnerRefForShare &&
+      /^PT-/i.test(partnerRefForShare) &&
+      (String(partner.referralCode || "").trim() !== partnerRefForShare ||
+        String(partner.partnerCode || "").trim() !== partnerRefForShare)
+    ) {
+      await User.updateOne(
+        { _id: partner._id },
+        { $set: { partnerCode: partnerRefForShare, referralCode: partnerRefForShare } }
+      );
+    }
+
+    const displayPublicCode = partnerRefForShare || null;
+
     res.json({
       employeeId: partner.employeeId,
       firstName: partner.firstName,
@@ -2895,10 +3034,27 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       experience: partner.experience,
       region: partner.region,
       verification: partner.verification,
-      referralCode: partner.referralCode,
-      referralLink: `${
-        process.env.CLIENT_URL || "https://trustlinefintech.com"
-      }/LoginPage?ref=${partner?.partnerCode}`,
+      partnerCode: displayPublicCode,
+      referralCode: displayPublicCode,
+      /** Google Play URL for partner app (env PARTNER_APP_PLAY_STORE_URL; placeholder until app is published) */
+      playStoreUrl: getPartnerAppPlayStoreUrl(),
+      /** Partner self-registration — same code as app invite; UTM for analytics */
+      referralLink: partnerRefForShare
+        ? appendPartnerShareUtm(
+            `${getReferralWebBaseUrl()}/${PARTNER_REGISTRATION_PATH_SEGMENT}?ref=${encodeURIComponent(partnerRefForShare)}`,
+            "web"
+          )
+        : appendPartnerShareUtm(
+            `${getReferralWebBaseUrl()}/${PARTNER_REGISTRATION_PATH_SEGMENT}`,
+            "web"
+          ),
+      /** App invite landing — same code as ?ref= (legacy DB had partnerCode vs referralCode split). */
+      appInviteLink: partnerRefForShare
+        ? appendPartnerShareUtm(
+            `${getInviteBaseUrl()}/invite?code=${encodeURIComponent(partnerRefForShare)}`,
+            "invite"
+          )
+        : null,
       status: partner.status,
 
       // Bank/KYC Details
@@ -3599,6 +3755,81 @@ router.get(
   }
 );
 
+// REFERRAL REWARDS — partner→partner (you earn as upline when downline’s loan disburses)
+// GET /api/partner/referral-rewards/history?month=&year=&status=
+router.get(
+  "/referral-rewards/history",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      let { month, year, status } = req.query;
+
+      const now = new Date();
+      const currentMonth = now.getMonth() + 1;
+      const currentYear = now.getFullYear();
+
+      month = month ? Number(month) : currentMonth;
+      year = year ? Number(year) : currentYear;
+
+      if (Number.isNaN(month) || month < 1 || month > 12) {
+        return res.status(400).json({ message: "Invalid month. Use 1-12." });
+      }
+      if (Number.isNaN(year) || year < 2000) {
+        return res.status(400).json({ message: "Invalid year." });
+      }
+
+      const monthStart = new Date(year, month - 1, 1);
+      const monthEnd = new Date(year, month, 1);
+
+      const filter = {
+        referrerId: partnerId,
+        createdAt: { $gte: monthStart, $lt: monthEnd },
+      };
+      if (
+        status &&
+        ["PENDING", "APPROVED", "PAID", "CANCELLED"].includes(String(status))
+      ) {
+        filter.status = status;
+      }
+
+      const rewards = await ReferralReward.find(filter)
+        .populate(
+          "referredUserId",
+          "firstName lastName partnerCode employeeId"
+        )
+        .populate(
+          "applicationId",
+          "appNo loanType approvedLoanAmount status"
+        )
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const totalAmount = rewards.reduce(
+        (s, r) => s + (Number(r.amount) || 0),
+        0
+      );
+      const paidTotal = rewards
+        .filter((r) => r.status === "PAID")
+        .reduce((s, r) => s + (Number(r.amount) || 0), 0);
+
+      return res.json({
+        month,
+        year,
+        totalAmount,
+        paidTotal,
+        rewards,
+      });
+    } catch (err) {
+      console.error("Error fetching referral reward history:", err);
+      return res
+        .status(500)
+        .json({ message: "Error fetching referral rewards" });
+    }
+  }
+);
+
 // ✅ Upload document for an application
 router.post(
   "/applications/:id/documents",
@@ -3646,6 +3877,12 @@ router.post(
           receivedFields: Object.keys(req.body || {}),
           contentType: req.headers['content-type'],
         });
+      }
+
+      const violSingle = oversizeSingleDocViolation(req.file, docType);
+      if (violSingle) {
+        await deleteS3ObjectsForUploadedFiles([req.file]);
+        return res.status(400).json({ message: formatOversizeMessage(violSingle) });
       }
 
       // Find application belonging to this partner
@@ -3943,6 +4180,59 @@ router.post(
       console.error("Error creating delete account request:", err);
       return res.status(500).json({
         message: "Server error while creating delete account request",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// Partner: current delete-account request status (for settings UI)
+router.get(
+  "/delete-account-request/status",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+
+      const pending = await DeleteAccountRequest.findOne({
+        user: partnerId,
+        status: "PENDING",
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      if (pending) {
+        return res.json({
+          hasRequest: true,
+          status: "PENDING",
+          requestId: pending._id,
+          reason: pending.reason || "",
+          submittedAt: pending.createdAt,
+          processedAt: null,
+        });
+      }
+
+      const latest = await DeleteAccountRequest.findOne({ user: partnerId })
+        .sort({ updatedAt: -1 })
+        .lean();
+
+      if (!latest) {
+        return res.json({ hasRequest: false, status: null });
+      }
+
+      return res.json({
+        hasRequest: true,
+        status: latest.status,
+        requestId: latest._id,
+        reason: latest.reason || "",
+        submittedAt: latest.createdAt,
+        processedAt: latest.processedAt || null,
+      });
+    } catch (err) {
+      console.error("Error fetching delete account request status:", err);
+      return res.status(500).json({
+        message: "Server error while fetching delete account status",
         error: err.message,
       });
     }

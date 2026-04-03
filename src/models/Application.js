@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { createDisbursedReferralReward } from "../utils/referralService.js";
 
 // =================== CONSTANTS ===================
 export const APP_STATUSES = [
@@ -310,6 +311,59 @@ ApplicationSchema.methods.transition = function (to, byUserId, note) {
   this.status = to;
 };
 
+/**
+ * When `status` is part of this save, record prior status for post-save referral hook.
+ * `_referralDisburseTrigger` is set only if `status` was modified on this save.
+ */
+ApplicationSchema.pre("save", async function (next) {
+  this.$locals = this.$locals || {};
+  delete this.$locals.previousStatus;
+  delete this.$locals._referralDisburseTrigger;
+
+  if (!this.isModified("status")) {
+    return next();
+  }
+
+  this.$locals._referralDisburseTrigger = true;
+
+  if (this.isNew) {
+    this.$locals.previousStatus = null;
+    return next();
+  }
+
+  try {
+    const existing = await mongoose.models.Application.findById(this._id)
+      .select("status")
+      .lean();
+    this.$locals.previousStatus = existing?.status ?? null;
+  } catch (err) {
+    return next(err);
+  }
+  next();
+});
+
+/**
+ * Partner→partner disbursal rewards: run whenever an application **becomes** DISBURSED
+ * via `save()` (RSM today; RM/admin later). Skips re-saves that don’t touch `status`.
+ * Idempotent: referralService dedupes by referredUserId + applicationId + DISBURSED.
+ *
+ * Note: bulk `updateMany` / `findByIdAndUpdate` on Application bypass mongoose save hooks;
+ * if those ever set DISBURSED, call `createDisbursedReferralReward` explicitly afterward.
+ */
+ApplicationSchema.post("save", async function (doc) {
+  if (doc.deletedAt) return;
+  if (!doc.$locals?._referralDisburseTrigger || doc.status !== "DISBURSED") return;
+  if (doc.$locals.previousStatus === "DISBURSED") return;
+
+  try {
+    await createDisbursedReferralReward({ application: doc });
+  } catch (err) {
+    console.error(
+      "[referral] createDisbursedReferralReward on DISBURSED save failed:",
+      err?.message || err
+    );
+  }
+});
 
 // TTL index
 ApplicationSchema.index({ deletedAt: 1 }, { expireAfterSeconds: 0 })

@@ -67,6 +67,7 @@ const userSchema = new mongoose.Schema(
 
     // Role & hierarchy
     role: { type: String, enum: ALL_ROLES, required: true },
+    joinDate: { type: Date, default: Date.now },
     status: {
       type: String,
       enum: ["ACTIVE", "PENDING", "SUSPENDED"],
@@ -95,6 +96,14 @@ const userSchema = new mongoose.Schema(
     asmCode: { type: String, unique: true, sparse: true },
     rmCode: { type: String, unique: true, sparse: true },
     partnerCode: { type: String, unique: true, sparse: true },
+    referralCode: { type: String, unique: true, sparse: true, index: true },
+    referredBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    referralRewardStatus: {
+      type: String,
+      enum: ["NONE", "PENDING", "EARNED", "PAID"],
+      default: "NONE",
+    },
+    referralRewardAt: { type: Date },
     aadharNumber: { type: String }, // backward compatibility
     panNumber: { type: String },
 
@@ -120,6 +129,39 @@ const userSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+function buildReferralCodeCandidate(userDoc) {
+  const namePart = String(userDoc.firstName || "USER")
+    .replace(/[^A-Za-z]/g, "")
+    .toUpperCase()
+    .slice(0, 4)
+    .padEnd(4, "X");
+  const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+  return `DS${namePart}${rand}`;
+}
+
+userSchema.pre("validate", async function (next) {
+  // Partners already have a public channel code `partnerCode` (PT-…). Keep `referralCode`
+  // identical so app invite links (?code=) and web (?ref=) refer to the same value.
+  if (this.role === ROLES.PARTNER && this.partnerCode) {
+    this.referralCode = String(this.partnerCode).trim();
+    return next();
+  }
+  if (this.referralCode || !this.firstName) return next();
+  try {
+    for (let i = 0; i < 8; i++) {
+      const candidate = buildReferralCodeCandidate(this);
+      const exists = await this.constructor.exists({ referralCode: candidate });
+      if (!exists) {
+        this.referralCode = candidate;
+        return next();
+      }
+    }
+    return next(new Error("Unable to generate unique referral code"));
+  } catch (err) {
+    return next(err);
+  }
+});
 
 userSchema.set("toJSON", {
   virtuals: true,

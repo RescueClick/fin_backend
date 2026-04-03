@@ -33,9 +33,12 @@ const fileFilter = (req, file, cb) => {
   return cb(new Error("Only JPG, PNG, and PDF files are allowed"), false);
 };
 
+/** Partner self-registration KYC; keep in sync with web/app validation (5MB). */
+const MAX_PARTNER_DOC_BYTES = 5 * 1024 * 1024;
+
 export const partnerUpload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 20 * 1024 * 1024 },
+  limits: { fileSize: MAX_PARTNER_DOC_BYTES },
 });
 

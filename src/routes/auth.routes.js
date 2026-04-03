@@ -6,12 +6,14 @@ import { ROLES } from "../config/roles.js";
 import crypto from "crypto";
 import { sendMail } from "../utils/sendMail.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
-import { getClientBaseUrl } from "../config/branding.js";
+import { getClientBaseUrl, canonicalPartnerReferralCode } from "../config/branding.js";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { ApiError } from "../utils/apiError.js";
 import { sendSuccess } from "../utils/apiResponse.js";
+import { generateEmployeeId } from "../utils/generateEmployeeId.js";
+import { getActivePartnerByPartnerCode } from "../utils/referralService.js";
 
 const router = Router();
 
@@ -94,6 +96,25 @@ router.post(
       asmId: user.asmId ? String(user.asmId) : undefined,
     });
 
+    let partnerCodeOut = user.partnerCode;
+    let referralCodeOut = user.referralCode;
+    if (user.role === ROLES.PARTNER) {
+      const pub = canonicalPartnerReferralCode(user.partnerCode, user.referralCode);
+      if (pub) {
+        const mismatch =
+          String(user.partnerCode || "").trim() !== pub ||
+          String(user.referralCode || "").trim() !== pub;
+        if (mismatch && /^PT-/i.test(pub)) {
+          await User.updateOne(
+            { _id: user._id },
+            { $set: { partnerCode: pub, referralCode: pub } }
+          );
+        }
+        partnerCodeOut = pub;
+        referralCodeOut = pub;
+      }
+    }
+
     return sendSuccess(res, {
       message: "Login successful",
       data: {
@@ -110,7 +131,9 @@ router.post(
           rmId: user.rmId,
           asmCode: user.asmCode,
           rmCode: user.rmCode,
-          partnerCode: user.partnerCode,
+          partnerCode: partnerCodeOut,
+          referralCode: referralCodeOut,
+          referredBy: user.referredBy,
         },
       },
     });
@@ -254,6 +277,103 @@ router.post("/partner/register-by-rmcode", async (req, res) => {
     partnerCode: partner.partnerCode,
   });
 });
+
+router.post(
+  "/referral/validate",
+  asyncHandler(async (req, res) => {
+    const { referralCode } = req.body || {};
+    if (!referralCode) {
+      throw new ApiError(400, "referralCode is required", { code: "VALIDATION_ERROR" });
+    }
+
+    const owner = await getActivePartnerByPartnerCode(referralCode);
+    if (!owner) {
+      throw new ApiError(404, "Invalid or inactive partner code", { code: "REFERRAL_NOT_FOUND" });
+    }
+
+    return sendSuccess(res, {
+      message: "Partner code is valid",
+      data: { owner },
+    });
+  })
+);
+
+router.post(
+  "/customer/signup",
+  asyncHandler(async (req, res) => {
+    const {
+      firstName,
+      lastName,
+      email,
+      phone,
+      password,
+      referralCode,
+    } = req.body || {};
+
+    if (referralCode != null && String(referralCode).trim() !== "") {
+      throw new ApiError(
+        400,
+        "Referral codes apply to channel partner registration only, not customer accounts.",
+        { code: "REFERRAL_CUSTOMER_NOT_ALLOWED" }
+      );
+    }
+
+    if (!firstName || !lastName || !email || !phone || !password) {
+      throw new ApiError(
+        400,
+        "firstName, lastName, email, phone and password are required",
+        { code: "VALIDATION_ERROR" }
+      );
+    }
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedPhone = String(phone).replace(/\D/g, "").slice(-10);
+    if (!/^\S+@\S+\.\S+$/.test(normalizedEmail)) {
+      throw new ApiError(400, "Invalid email format", { code: "VALIDATION_ERROR" });
+    }
+    if (!/^\d{10}$/.test(normalizedPhone)) {
+      throw new ApiError(400, "Phone must be a valid 10-digit number", { code: "VALIDATION_ERROR" });
+    }
+
+    const duplicate = await User.findOne({
+      $or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
+    })
+      .select("_id")
+      .lean();
+    if (duplicate) {
+      throw new ApiError(409, "Email or phone already in use", { code: "DUPLICATE_USER" });
+    }
+
+    const customer = await User.create({
+      employeeId: await generateEmployeeId("CUSTOMER"),
+      firstName,
+      lastName,
+      email: normalizedEmail,
+      phone: normalizedPhone,
+      passwordHash: await argon2.hash(String(password)),
+      role: ROLES.CUSTOMER,
+      status: "ACTIVE",
+      referralRewardStatus: "NONE",
+    });
+
+    return sendSuccess(res, {
+      statusCode: 201,
+      message: "Customer signup successful",
+      data: {
+        customer: {
+          id: customer._id,
+          firstName: customer.firstName,
+          lastName: customer.lastName,
+          email: customer.email,
+          phone: customer.phone,
+          role: customer.role,
+          referralCode: customer.referralCode,
+          referredBy: customer.referredBy,
+        },
+      },
+    });
+  })
+);
 
 /**
  * Request password reset (secure version)

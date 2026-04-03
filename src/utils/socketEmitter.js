@@ -1,6 +1,43 @@
 // Utility to emit socket events from routes
 // Import this in your route files to emit socket events
 import { createNotification, generateNotificationId } from "./notificationService.js";
+import { getReportingLineFromRmId } from "./reportingLine.js";
+
+/** Notifies RM + ASM + RSM line for a partner's linked RM (payouts, incentives, new customers, etc.). */
+async function notifyPartnerReportingLine(io, partnerIdStr, { type, title, message, data, eventName, buildPayload }) {
+  if (!io || !partnerIdStr) return;
+  try {
+    const { User } = await import("../models/User.js");
+    const partnerUser = await User.findById(partnerIdStr).select("rmId").lean();
+    if (!partnerUser?.rmId) return;
+    const rmIdStr = String(partnerUser.rmId);
+    const line = await getReportingLineFromRmId(rmIdStr);
+    const targets = [
+      { userId: rmIdStr, room: `rm_${rmIdStr}` },
+      ...(line.asmId ? [{ userId: line.asmId, room: `asm_${line.asmId}` }] : []),
+      ...line.rsmIds.map((id) => ({ userId: id, room: `rsm_${id}` })),
+    ];
+    for (const { userId, room } of targets) {
+      const notificationId = generateNotificationId({
+        applicationId: partnerIdStr,
+        timestamp: Date.now(),
+        userId,
+        type,
+      });
+      await createNotification(userId, {
+        type,
+        title,
+        message,
+        data,
+        notificationId,
+        timestamp: new Date(),
+      });
+      io.to(room).emit(eventName, buildPayload(notificationId));
+    }
+  } catch (e) {
+    console.error("notifyPartnerReportingLine:", e);
+  }
+}
 
 export const emitApplicationStatusChanged = async (io, application, oldStatus, newStatus, actionBy = null) => {
   if (!io || !application) {
@@ -65,7 +102,8 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
         .populate("partnerId", "firstName lastName email employeeId")
         .populate("rmId", "firstName lastName email employeeId asmId")
         .populate("asmId", "firstName lastName email employeeId")
-        .select("appNo loanType appliedLoanAmount approvedLoanAmount status asmId")
+        .populate("rsmId", "firstName lastName email employeeId")
+        .select("appNo loanType appliedLoanAmount approvedLoanAmount status asmId rsmId")
         .lean();
     } catch (err) {
       console.error("Error fetching application:", err);
@@ -90,6 +128,13 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     } catch (err) {
       console.error("Error fetching RM ASM:", err);
     }
+  }
+
+  let rsmId = null;
+  if (appData?.rsmId) {
+    rsmId = appData.rsmId._id ? appData.rsmId._id.toString() : String(appData.rsmId);
+  } else if (application?.rsmId) {
+    rsmId = application.rsmId._id ? application.rsmId._id.toString() : String(application.rsmId);
   }
 
   // Get action performer details if provided
@@ -376,6 +421,60 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     });
   }
 
+  const rsmPerformedAction = rsmId && actionByData && String(rsmId) === String(actionByData._id);
+
+  if (rsmId && !rsmPerformedAction) {
+    const rsmRoom = `rsm_${String(rsmId)}`;
+    const notificationIdRsm = generateNotificationId({
+      applicationId: application._id,
+      status: newStatus,
+      timestamp: Date.now(),
+      userId: String(rsmId),
+      type: "application",
+    });
+
+    await createNotification(String(rsmId), {
+      type: "application",
+      title: "Application Status Changed (Your file)",
+      message: actionMessage,
+      data: {
+        applicationId: application._id,
+        appNo: appData?.appNo,
+        loanType: appData?.loanType,
+        customerName: appData?.customerId
+          ? `${appData.customerId.firstName || ""} ${appData.customerId.middleName || ""} ${appData.customerId.lastName || ""}`.trim()
+          : null,
+        rmName: appData?.rmId ? `${appData.rmId.firstName || ""} ${appData.rmId.lastName || ""}`.trim() : null,
+        status: newStatus,
+        oldStatus,
+        actionBy: actionByData,
+      },
+      actionBy: actionByData,
+      loanInfo: {
+        appNo: appData?.appNo,
+        loanType: appData?.loanType,
+        customerName: appData?.customerId
+          ? `${appData.customerId.firstName || ""} ${appData.customerId.middleName || ""} ${appData.customerId.lastName || ""}`.trim()
+          : null,
+      },
+      notificationId: notificationIdRsm,
+      timestamp: new Date(),
+    });
+
+    io.to(rsmRoom).emit("applicationUpdated", {
+      applicationId: application._id,
+      status: newStatus,
+      oldStatus,
+      actionBy: actionByData,
+      message: actionMessage,
+      notificationId: notificationIdRsm,
+      application: appData || application,
+      timestamp: new Date(),
+    });
+  } else if (rsmPerformedAction) {
+    console.log(`⏭️ Skipping RSM notification — RSM / acting user tied to this change`);
+  }
+
   // Notify Admin and SUPER_ADMIN - Save to MongoDB for all admin users first
   console.log("📨 Creating notifications for Admin and SUPER_ADMIN");
   
@@ -464,26 +563,37 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
   console.log("✅ emitApplicationStatusChanged: All notifications sent");
 };
 
-export const emitDocumentUploaded = (io, applicationId, docType, partnerId, customerId) => {
+export const emitDocumentUploaded = async (io, applicationId, docType, partnerId, customerId) => {
   if (!io) return;
 
-  // Notify RM
-  io.to(`rm_${partnerId}`).emit("documentUploaded", {
-    applicationId,
-    docType,
-    partnerId,
-    customerId,
-    timestamp: new Date(),
-  });
+  const payloadBase = { applicationId, docType, partnerId, customerId, timestamp: new Date() };
+  let rmId = null;
+  let asmIdResolved = null;
+  let rsmIds = [];
 
-  // Notify Admin
-  io.to("admin").emit("documentUploaded", {
-    applicationId,
-    docType,
-    partnerId,
-    customerId,
-    timestamp: new Date(),
-  });
+  try {
+    const { Application } = await import("../models/Application.js");
+    const app = await Application.findById(applicationId).select("rmId asmId rsmId").lean();
+    if (app?.rmId) rmId = String(app.rmId);
+    if (app?.asmId) asmIdResolved = String(app.asmId);
+    if (app?.rsmId) rsmIds = [String(app.rsmId)];
+    if (rmId && (!asmIdResolved || rsmIds.length === 0)) {
+      const line = await getReportingLineFromRmId(rmId);
+      if (!asmIdResolved && line.asmId) asmIdResolved = line.asmId;
+      if (rsmIds.length === 0) rsmIds = line.rsmIds;
+    }
+  } catch (err) {
+    console.error("emitDocumentUploaded: load application", err);
+  }
+
+  if (rmId) io.to(`rm_${rmId}`).emit("documentUploaded", payloadBase);
+  if (asmIdResolved) io.to(`asm_${asmIdResolved}`).emit("documentUploaded", payloadBase);
+  for (const rid of rsmIds) {
+    io.to(`rsm_${rid}`).emit("documentUploaded", payloadBase);
+  }
+
+  io.to("admin").emit("documentUploaded", payloadBase);
+  io.to("super_admin").emit("documentUploaded", payloadBase);
 };
 
 export const emitDocumentStatusChanged = async (io, applicationId, docType, status, updatedBy, partnerId, customerId, actionBy = null, application = null) => {
@@ -534,7 +644,7 @@ export const emitDocumentStatusChanged = async (io, applicationId, docType, stat
         .populate("customerId", "firstName middleName lastName email phone")
         .populate("partnerId", "firstName lastName email employeeId")
         .populate("rmId", "firstName lastName asmId")
-        .select("appNo loanType appliedLoanAmount status rmId asmId partnerId customerId")
+        .select("appNo loanType appliedLoanAmount status rmId asmId rsmId partnerId customerId")
         .lean();
       // Extract ASM ID from RM if available
       if (appData?.rmId?.asmId) {
@@ -624,6 +734,16 @@ export const emitDocumentStatusChanged = async (io, applicationId, docType, stat
   
   if (rmPerformedAction) {
     console.log(`⏭️ RM ${actionByData._id} performed this document status change themselves - skipping RM notification`);
+  }
+
+  const rsmIdFromApp =
+    appData?.rsmId?._id?.toString() || appData?.rsmId?.toString() || null;
+  const rsmPerformedAction =
+    rsmIdFromApp && actionByData && String(rsmIdFromApp) === String(actionByData._id);
+  if (rsmPerformedAction) {
+    console.log(
+      `⏭️ RSM ${actionByData._id} performed this document status change — skipping RSM notification`,
+    );
   }
 
   const statusMessages = {
@@ -965,10 +1085,145 @@ export const emitDocumentStatusChanged = async (io, applicationId, docType, stat
     });
   }
 
-  // DO NOT notify RM of their own actions - RM actions go to Admin, ASM, Partner, Customer only
-  // RM should not receive notifications for actions they perform themselves
-  // This check is already done above at the beginning of the function
-  // No need to do anything here as rmPerformedAction is already checked
+  if (rmIdFromApp && !rmPerformedAction) {
+    const rmRoom = `rm_${String(rmIdFromApp)}`;
+    const notificationIdRm = generateNotificationId({
+      applicationId,
+      docType,
+      status,
+      timestamp: Date.now(),
+      userId: rmIdFromApp,
+      type: "document",
+    });
+
+    await createNotification(rmIdFromApp, {
+      type: "document",
+      title: "Document Status Changed",
+      message: actionMessage,
+      data: {
+        applicationId,
+        appNo: appData?.appNo,
+        loanType: appData?.loanType,
+        customerName: appData?.customerId
+          ? `${appData.customerId.firstName || ""} ${appData.customerId.middleName || ""} ${appData.customerId.lastName || ""}`.trim()
+          : null,
+        docType,
+        status,
+        actionBy: actionByData,
+      },
+      actionBy: actionByData,
+      loanInfo: {
+        appNo: appData?.appNo,
+        loanType: appData?.loanType,
+        customerName: appData?.customerId
+          ? `${appData.customerId.firstName || ""} ${appData.customerId.middleName || ""} ${appData.customerId.lastName || ""}`.trim()
+          : null,
+        docType,
+      },
+      notificationId: notificationIdRm,
+      timestamp: new Date(),
+    });
+
+    io.to(rmRoom).emit("documentStatusChanged", {
+      applicationId,
+      docType,
+      status,
+      updatedBy,
+      actionBy: actionByData,
+      message: actionMessage,
+      notificationId: notificationIdRm,
+      data: appData
+        ? {
+            appNo: appData.appNo,
+            loanType: appData.loanType,
+            appliedLoanAmount: appData.appliedLoanAmount,
+            status: appData.status,
+            customerName: appData.customerId
+              ? `${appData.customerId.firstName || ""} ${appData.customerId.middleName || ""} ${appData.customerId.lastName || ""}`.trim()
+              : null,
+          }
+        : null,
+      application: appData
+        ? {
+            appNo: appData.appNo,
+            loanType: appData.loanType,
+            appliedLoanAmount: appData.appliedLoanAmount,
+            status: appData.status,
+          }
+        : null,
+      timestamp: new Date(),
+    });
+  }
+
+  if (rsmIdFromApp && !rsmPerformedAction) {
+    const rsmRoom = `rsm_${String(rsmIdFromApp)}`;
+    const notificationIdRsm = generateNotificationId({
+      applicationId,
+      docType,
+      status,
+      timestamp: Date.now(),
+      userId: rsmIdFromApp,
+      type: "document",
+    });
+
+    await createNotification(rsmIdFromApp, {
+      type: "document",
+      title: "Document Status Changed (Your file)",
+      message: actionMessage,
+      data: {
+        applicationId,
+        appNo: appData?.appNo,
+        loanType: appData?.loanType,
+        customerName: appData?.customerId
+          ? `${appData.customerId.firstName || ""} ${appData.customerId.middleName || ""} ${appData.customerId.lastName || ""}`.trim()
+          : null,
+        docType,
+        status,
+        actionBy: actionByData,
+      },
+      actionBy: actionByData,
+      loanInfo: {
+        appNo: appData?.appNo,
+        loanType: appData?.loanType,
+        customerName: appData?.customerId
+          ? `${appData.customerId.firstName || ""} ${appData.customerId.middleName || ""} ${appData.customerId.lastName || ""}`.trim()
+          : null,
+        docType,
+      },
+      notificationId: notificationIdRsm,
+      timestamp: new Date(),
+    });
+
+    io.to(rsmRoom).emit("documentStatusChanged", {
+      applicationId,
+      docType,
+      status,
+      updatedBy,
+      actionBy: actionByData,
+      message: actionMessage,
+      notificationId: notificationIdRsm,
+      data: appData
+        ? {
+            appNo: appData.appNo,
+            loanType: appData.loanType,
+            appliedLoanAmount: appData.appliedLoanAmount,
+            status: appData.status,
+            customerName: appData.customerId
+              ? `${appData.customerId.firstName || ""} ${appData.customerId.middleName || ""} ${appData.customerId.lastName || ""}`.trim()
+              : null,
+          }
+        : null,
+      application: appData
+        ? {
+            appNo: appData.appNo,
+            loanType: appData.loanType,
+            appliedLoanAmount: appData.appliedLoanAmount,
+            status: appData.status,
+          }
+        : null,
+      timestamp: new Date(),
+    });
+  }
 
   console.log("✅ emitDocumentStatusChanged: All notifications sent");
 };
@@ -1055,6 +1310,25 @@ export const emitPartnerStatusChanged = async (io, partnerId, newStatus, oldStat
     oldStatus,
     notificationId,
     timestamp: new Date(),
+  });
+
+  await notifyPartnerReportingLine(io, partnerIdStr, {
+    type: "partner",
+    title: "Partner Status Changed",
+    message,
+    data: {
+      partnerId: partnerIdStr,
+      status: newStatus,
+      oldStatus,
+    },
+    eventName: "partnerStatusChanged",
+    buildPayload: (nid) => ({
+      partnerId: partnerIdStr,
+      status: newStatus,
+      oldStatus,
+      notificationId: nid,
+      timestamp: new Date(),
+    }),
   });
 };
 
@@ -1155,7 +1429,8 @@ export const emitNewPartnerRegistered = async (io, partner) => {
   });
 
   if (partner.rmId) {
-    io.to(`rm_${partner.rmId._id || partner.rmId}`).emit("newPartnerRegistered", {
+    const rmIdStr = String(partner.rmId._id || partner.rmId);
+    io.to(`rm_${rmIdStr}`).emit("newPartnerRegistered", {
       partner: {
         _id: partner._id,
         firstName: partner.firstName,
@@ -1166,6 +1441,60 @@ export const emitNewPartnerRegistered = async (io, partner) => {
       notificationId,
       timestamp: new Date(),
     });
+
+    const line = await getReportingLineFromRmId(rmIdStr);
+    const regData = {
+      partnerId: partnerIdStr,
+      partner: {
+        _id: partner._id,
+        firstName: partner.firstName,
+        lastName: partner.lastName,
+        email: partner.email,
+        status: partner.status,
+      },
+    };
+    if (line.asmId) {
+      const nidAsm = generateNotificationId({
+        applicationId: partnerIdStr,
+        timestamp: Date.now(),
+        userId: line.asmId,
+        type: "registration",
+      });
+      await createNotification(line.asmId, {
+        type: "registration",
+        title: "New Partner Registered",
+        message,
+        data: regData,
+        notificationId: nidAsm,
+        timestamp: new Date(),
+      });
+      io.to(`asm_${line.asmId}`).emit("newPartnerRegistered", {
+        partner: regData.partner,
+        notificationId: nidAsm,
+        timestamp: new Date(),
+      });
+    }
+    for (const rsmId of line.rsmIds) {
+      const nidRsm = generateNotificationId({
+        applicationId: partnerIdStr,
+        timestamp: Date.now(),
+        userId: rsmId,
+        type: "registration",
+      });
+      await createNotification(rsmId, {
+        type: "registration",
+        title: "New Partner Registered",
+        message,
+        data: regData,
+        notificationId: nidRsm,
+        timestamp: new Date(),
+      });
+      io.to(`rsm_${rsmId}`).emit("newPartnerRegistered", {
+        partner: regData.partner,
+        notificationId: nidRsm,
+        timestamp: new Date(),
+      });
+    }
   }
 };
 
@@ -1204,7 +1533,8 @@ export const emitNewCustomerRegistered = async (io, customer, partnerId) => {
 
   // Emit socket event
   if (partnerId) {
-    io.to(`partner_${String(partnerId)}`).emit("newCustomerRegistered", {
+    const partnerIdStrNc = String(partnerId);
+    io.to(`partner_${partnerIdStrNc}`).emit("newCustomerRegistered", {
       customer: {
         _id: customer._id,
         firstName: customer.firstName,
@@ -1213,6 +1543,29 @@ export const emitNewCustomerRegistered = async (io, customer, partnerId) => {
       },
       notificationId,
       timestamp: new Date(),
+    });
+
+    const custData = {
+      customerId: customerIdStr,
+      customer: {
+        _id: customer._id,
+        firstName: customer.firstName,
+        lastName: customer.lastName,
+        email: customer.email,
+      },
+    };
+    await notifyPartnerReportingLine(io, partnerIdStrNc, {
+      type: "registration",
+      title: "New Customer Registered",
+      message,
+      data: custData,
+      eventName: "newCustomerRegistered",
+      buildPayload: (nid) => ({
+        customer: custData.customer,
+        partnerId: partnerIdStrNc,
+        notificationId: nid,
+        timestamp: new Date(),
+      }),
     });
   }
 };
@@ -1311,6 +1664,30 @@ export const emitPayoutStatusChanged = async (io, payoutId, status, partnerId, a
     notificationId,
     timestamp: new Date(),
   });
+
+  if (partnerId) {
+    const partnerIdStrP = String(partnerId);
+    await notifyPartnerReportingLine(io, partnerIdStrP, {
+      type: "payout",
+      title: "Payout Status Changed",
+      message,
+      data: {
+        payoutId,
+        status,
+        partnerId: partnerIdStrP,
+        amount,
+      },
+      eventName: "payoutStatusChanged",
+      buildPayload: (nid) => ({
+        payoutId,
+        status,
+        partnerId: partnerIdStrP,
+        amount,
+        notificationId: nid,
+        timestamp: new Date(),
+      }),
+    });
+  }
 };
 
 // Incentive status (PENDING → PAID) notifications
@@ -1414,5 +1791,30 @@ export const emitIncentiveStatusChanged = async (io, incentive, partnerId) => {
     year: incentive.year,
     notificationId,
     timestamp: new Date(),
+  });
+
+  await notifyPartnerReportingLine(io, partnerIdStr, {
+    type: "incentive",
+    title: "Incentive Status Updated",
+    message,
+    data: {
+      incentiveId,
+      status,
+      partnerId: partnerIdStr,
+      month: incentive.month,
+      year: incentive.year,
+      amount: incentive.amount,
+    },
+    eventName: "incentiveStatusChanged",
+    buildPayload: (nid) => ({
+      incentiveId,
+      status,
+      partnerId: partnerIdStr,
+      amount: incentive.amount,
+      month: incentive.month,
+      year: incentive.year,
+      notificationId: nid,
+      timestamp: new Date(),
+    }),
   });
 };

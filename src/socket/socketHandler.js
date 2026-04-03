@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
 import { Application } from "../models/Application.js";
+import { getReportingLineFromRmId } from "../utils/reportingLine.js";
 
 // Store active users: { userId: { socketId, role, ... } }
 const activeUsers = new Map();
@@ -92,6 +93,10 @@ export const initializeSocket = (io) => {
       socket.join(`asm_${userId.toString()}`);
       socket.join("asm"); // Join general ASM room
       console.log(`📥 ASM ${userId} joined rooms: asm_${userId.toString()}, asm`);
+    } else if (role === "RSM") {
+      socket.join(`rsm_${userId.toString()}`);
+      socket.join("rsm");
+      console.log(`📥 RSM ${userId} joined rooms: rsm_${userId.toString()}, rsm`);
     } else if (role === "PARTNER") {
       socket.join(`partner_${userId.toString()}`);
       socket.join("partner"); // Join general partner room
@@ -172,17 +177,51 @@ export const initializeSocket = (io) => {
 
         // Notify RM if assigned
         if (application.rmId) {
-          io.to(`rm_${application.rmId}`).emit("applicationUpdated", {
+          const rmIdStr = String(application.rmId);
+          io.to(`rm_${rmIdStr}`).emit("applicationUpdated", {
             applicationId,
             status: newStatus,
             oldStatus,
             application,
             timestamp: new Date(),
           });
+          try {
+            const line = await getReportingLineFromRmId(rmIdStr);
+            const payload = {
+              applicationId,
+              status: newStatus,
+              oldStatus,
+              application: {
+                _id: application._id,
+                status: application.status,
+                loanType: application.loanType,
+                loanAmount: application.loanAmount,
+              },
+              timestamp: new Date(),
+            };
+            if (line.asmId) {
+              io.to(`asm_${line.asmId}`).emit("applicationUpdated", payload);
+            }
+            const rsmSet = new Set(line.rsmIds);
+            const appLean = await Application.findById(applicationId).select("rsmId").lean();
+            if (appLean?.rsmId) rsmSet.add(String(appLean.rsmId));
+            for (const rsmId of rsmSet) {
+              io.to(`rsm_${rsmId}`).emit("applicationUpdated", payload);
+            }
+          } catch (e) {
+            console.error("applicationStatusChanged reporting line:", e);
+          }
         }
 
         // Notify Admin
         io.to("admin").emit("applicationUpdated", {
+          applicationId,
+          status: newStatus,
+          oldStatus,
+          application,
+          timestamp: new Date(),
+        });
+        io.to("super_admin").emit("applicationUpdated", {
           applicationId,
           status: newStatus,
           oldStatus,
@@ -206,22 +245,36 @@ export const initializeSocket = (io) => {
 
         // Notify RM
         if (application.rmId) {
-          io.to(`rm_${application.rmId._id}`).emit("newApplication", {
+          const rmRef = application.rmId._id || application.rmId;
+          io.to(`rm_${rmRef}`).emit("newApplication", {
             application,
             timestamp: new Date(),
           });
-        }
-
-        // Notify ASM if RM has ASM
-        if (application.rmId?.asmId) {
-          io.to(`asm_${application.rmId.asmId}`).emit("newApplication", {
-            application,
-            timestamp: new Date(),
-          });
+          try {
+            const line = await getReportingLineFromRmId(String(rmRef));
+            if (line.asmId) {
+              io.to(`asm_${line.asmId}`).emit("newApplication", {
+                application,
+                timestamp: new Date(),
+              });
+            }
+            for (const rsmId of line.rsmIds) {
+              io.to(`rsm_${rsmId}`).emit("newApplication", {
+                application,
+                timestamp: new Date(),
+              });
+            }
+          } catch (e) {
+            console.error("newApplication reporting line:", e);
+          }
         }
 
         // Notify Admin
         io.to("admin").emit("newApplication", {
+          application,
+          timestamp: new Date(),
+        });
+        io.to("super_admin").emit("newApplication", {
           application,
           timestamp: new Date(),
         });
@@ -247,14 +300,27 @@ export const initializeSocket = (io) => {
           });
         }
 
-        // Notify Admin
-        io.to("admin").emit("documentUploaded", {
+        const payload = {
           applicationId,
           docType,
           partnerId,
           customerId,
           timestamp: new Date(),
-        });
+        };
+        if (application?.rmId) {
+          try {
+            const line = await getReportingLineFromRmId(String(application.rmId._id || application.rmId));
+            if (line.asmId) io.to(`asm_${line.asmId}`).emit("documentUploaded", payload);
+            for (const rsmId of line.rsmIds) {
+              io.to(`rsm_${rsmId}`).emit("documentUploaded", payload);
+            }
+          } catch (e) {
+            console.error("documentUploaded reporting line:", e);
+          }
+        }
+
+        io.to("admin").emit("documentUploaded", payload);
+        io.to("super_admin").emit("documentUploaded", payload);
       } catch (error) {
         console.error("Error handling documentUploaded:", error);
       }
@@ -288,6 +354,32 @@ export const initializeSocket = (io) => {
             timestamp: new Date(),
           });
         }
+
+        const docPayload = {
+          applicationId,
+          docType,
+          status,
+          updatedBy,
+          timestamp: new Date(),
+        };
+        if (application?.rmId) {
+          const rmR = String(application.rmId._id || application.rmId);
+          io.to(`rm_${rmR}`).emit("documentStatusChanged", { ...docPayload });
+          try {
+            const line = await getReportingLineFromRmId(rmR);
+            if (line.asmId) io.to(`asm_${line.asmId}`).emit("documentStatusChanged", { ...docPayload });
+            const appLean = await Application.findById(applicationId).select("rsmId").lean();
+            const rsmSet = new Set(line.rsmIds);
+            if (appLean?.rsmId) rsmSet.add(String(appLean.rsmId));
+            for (const rsmId of rsmSet) {
+              io.to(`rsm_${rsmId}`).emit("documentStatusChanged", { ...docPayload });
+            }
+          } catch (e) {
+            console.error("documentStatusChanged reporting line:", e);
+          }
+        }
+        io.to("admin").emit("documentStatusChanged", docPayload);
+        io.to("super_admin").emit("documentStatusChanged", docPayload);
       } catch (error) {
         console.error("Error handling documentStatusChanged:", error);
       }
@@ -332,6 +424,30 @@ export const initializeSocket = (io) => {
           oldStatus,
           timestamp: new Date(),
         });
+        io.to("super_admin").emit("partnerStatusChanged", {
+          partnerId,
+          status: newStatus,
+          oldStatus,
+          timestamp: new Date(),
+        });
+
+        if (partner.rmId) {
+          try {
+            const line = await getReportingLineFromRmId(String(partner.rmId));
+            const ps = {
+              partnerId,
+              status: newStatus,
+              oldStatus,
+              timestamp: new Date(),
+            };
+            if (line.asmId) io.to(`asm_${line.asmId}`).emit("partnerStatusChanged", ps);
+            for (const rsmId of line.rsmIds) {
+              io.to(`rsm_${rsmId}`).emit("partnerStatusChanged", ps);
+            }
+          } catch (e) {
+            console.error("partnerStatusChanged reporting line:", e);
+          }
+        }
       } catch (error) {
         console.error("Error handling partnerStatusChanged:", error);
       }
@@ -356,7 +472,8 @@ export const initializeSocket = (io) => {
 
         // Notify RM if assigned
         if (partner.rmId) {
-          io.to(`rm_${partner.rmId._id}`).emit("newPartnerRegistered", {
+          const rmRef = partner.rmId._id || partner.rmId;
+          io.to(`rm_${rmRef}`).emit("newPartnerRegistered", {
             partner: {
               _id: partner._id,
               firstName: partner.firstName,
@@ -366,7 +483,36 @@ export const initializeSocket = (io) => {
             },
             timestamp: new Date(),
           });
+          try {
+            const line = await getReportingLineFromRmId(String(rmRef));
+            const np = {
+              partner: {
+                _id: partner._id,
+                firstName: partner.firstName,
+                lastName: partner.lastName,
+                email: partner.email,
+                status: partner.status,
+              },
+              timestamp: new Date(),
+            };
+            if (line.asmId) io.to(`asm_${line.asmId}`).emit("newPartnerRegistered", np);
+            for (const rsmId of line.rsmIds) {
+              io.to(`rsm_${rsmId}`).emit("newPartnerRegistered", np);
+            }
+          } catch (e) {
+            console.error("newPartnerRegistered reporting line:", e);
+          }
         }
+        io.to("super_admin").emit("newPartnerRegistered", {
+          partner: {
+            _id: partner._id,
+            firstName: partner.firstName,
+            lastName: partner.lastName,
+            email: partner.email,
+            status: partner.status,
+          },
+          timestamp: new Date(),
+        });
       } catch (error) {
         console.error("Error handling newPartnerRegistered:", error);
       }
@@ -394,7 +540,8 @@ export const initializeSocket = (io) => {
 
         // Notify RM if partner has RM
         if (customer.partnerId?.rmId) {
-          io.to(`rm_${customer.partnerId.rmId}`).emit("newCustomerRegistered", {
+          const rmR = String(customer.partnerId.rmId);
+          io.to(`rm_${rmR}`).emit("newCustomerRegistered", {
             customer: {
               _id: customer._id,
               firstName: customer.firstName,
@@ -403,7 +550,45 @@ export const initializeSocket = (io) => {
             },
             timestamp: new Date(),
           });
+          try {
+            const line = await getReportingLineFromRmId(rmR);
+            const nc = {
+              customer: {
+                _id: customer._id,
+                firstName: customer.firstName,
+                lastName: customer.lastName,
+                email: customer.email,
+              },
+              timestamp: new Date(),
+            };
+            if (line.asmId) io.to(`asm_${line.asmId}`).emit("newCustomerRegistered", nc);
+            for (const rsmId of line.rsmIds) {
+              io.to(`rsm_${rsmId}`).emit("newCustomerRegistered", nc);
+            }
+          } catch (e) {
+            console.error("newCustomerRegistered reporting line:", e);
+          }
         }
+        io.to("admin").emit("newCustomerRegistered", {
+          customer: {
+            _id: customer._id,
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            email: customer.email,
+          },
+          partnerId: customer.partnerId?._id,
+          timestamp: new Date(),
+        });
+        io.to("super_admin").emit("newCustomerRegistered", {
+          customer: {
+            _id: customer._id,
+            firstName: customer.firstName,
+            lastName: customer.lastName,
+            email: customer.email,
+          },
+          partnerId: customer.partnerId?._id,
+          timestamp: new Date(),
+        });
       } catch (error) {
         console.error("Error handling newCustomerRegistered:", error);
       }
@@ -423,13 +608,26 @@ export const initializeSocket = (io) => {
           });
         }
 
-        // Notify Admin
-        io.to("admin").emit("payoutStatusChanged", {
-          payoutId,
-          status,
-          partnerId,
-          timestamp: new Date(),
-        });
+        const po = { payoutId, status, partnerId, timestamp: new Date() };
+        io.to("admin").emit("payoutStatusChanged", po);
+        io.to("super_admin").emit("payoutStatusChanged", po);
+
+        if (partnerId) {
+          try {
+            const partnerUser = await User.findById(partnerId).select("rmId").lean();
+            if (partnerUser?.rmId) {
+              const rmP = String(partnerUser.rmId);
+              const line = await getReportingLineFromRmId(rmP);
+              io.to(`rm_${rmP}`).emit("payoutStatusChanged", po);
+              if (line.asmId) io.to(`asm_${line.asmId}`).emit("payoutStatusChanged", po);
+              for (const rsmId of line.rsmIds) {
+                io.to(`rsm_${rsmId}`).emit("payoutStatusChanged", po);
+              }
+            }
+          } catch (e) {
+            console.error("payoutStatusChanged reporting line:", e);
+          }
+        }
       } catch (error) {
         console.error("Error handling payoutStatusChanged:", error);
       }
@@ -453,6 +651,11 @@ export const initializeSocket = (io) => {
           });
         } else if (role === "ASM") {
           io.to(`asm_${assignedTo}`).emit("targetUpdated", {
+            targetId,
+            timestamp: new Date(),
+          });
+        } else if (role === "RSM") {
+          io.to(`rsm_${assignedTo}`).emit("targetUpdated", {
             targetId,
             timestamp: new Date(),
           });
@@ -495,6 +698,10 @@ export const initializeSocket = (io) => {
         });
       } else if (role === "ASM") {
         io.to(`asm_${userId}`).emit("dashboardUpdate", {
+          timestamp: new Date(),
+        });
+      } else if (role === "RSM") {
+        io.to(`rsm_${userId}`).emit("dashboardUpdate", {
           timestamp: new Date(),
         });
       } else if (role === "SUPER_ADMIN" || role === "ADMIN") {

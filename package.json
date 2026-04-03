@@ -3,11 +3,12 @@
   "version": "1.0.0",
   "description": "",
   "license": "ISC",
-  "author": "trustlinefin",
+  "author": "DhanSource Capital",
   "type": "module",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "verify:loan-doc-rules": "node src/scripts/verifyLoanDocRules.js",
     "dev": "node index.js",
     "cleanup:dupes:dry": "node src/scripts/cleanupDuplicateApplications.js",
     "cleanup:dupes:apply": "node src/scripts/cleanupDuplicateApplications.js --apply"
