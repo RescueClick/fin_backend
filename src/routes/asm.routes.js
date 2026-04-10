@@ -713,14 +713,18 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
             { rsmId: { $in: rsmIds.map((id) => new mongoose.Types.ObjectId(id)) } },
             { rmId: { $in: rmIds.map((id) => new mongoose.Types.ObjectId(id)) } }
           ],
-          status: "DISBURSED",
+          status: { $ne: "DRAFT" },
           updatedAt: { $gte: startOfYear },
         },
       },
       {
         $group: {
           _id: { month: { $month: "$updatedAt" } },
-          totalAchieved: { $sum: { $toDouble: "$approvedLoanAmount" } },
+          totalAchieved: { 
+            $sum: { 
+              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0] 
+            } 
+          },
           totalFiles: { $sum: 1 },
         },
       },
@@ -1931,10 +1935,10 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       year: targetYear,
     }).lean();
 
-    // Get disbursed applications for achievement calculation (use updatedAt when status becomes DISBURSED)
-    const disbursedApps = await Application.find({
-      status: "DISBURSED",
+    // Get relevant applications for achievement calculation
+    const relevantApps = await Application.find({
       partnerId: { $in: partnerIds },
+      status: { $ne: "DRAFT" },
       updatedAt: {
         $gte: startDate,
         $lt: endDate,
@@ -1942,13 +1946,11 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
     }).lean();
 
     // Calculate achievements using Hybrid Target Model (for display only)
-    // NOTE: Incentive AMOUNT is NOT auto-calculated anymore.
-    // ASM will decide the amount manually and record it via /asm/incentives/:partnerId/pay.
     const incentiveData = partners.map((partner) => {
       const partnerTargets = targets.filter(
         (t) => t.assignedTo.toString() === partner._id.toString()
       );
-      const partnerDisbursed = disbursedApps.filter(
+      const partnerApps = relevantApps.filter(
         (app) => app.partnerId.toString() === partner._id.toString()
       );
 
@@ -1958,11 +1960,13 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       const disbursementTarget = target.disbursementTarget || target.targetValue || 2000000; // Default ₹20L
       
       // Calculate achievements
-      const achievedFileCount = partnerDisbursed.length;
-      const achievedDisbursement = partnerDisbursed.reduce(
-        (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
-        0
-      );
+      const achievedFileCount = partnerApps.length;
+      const achievedDisbursement = partnerApps
+        .filter(app => app.status === "DISBURSED")
+        .reduce(
+          (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
+          0
+        );
 
       // Check if both conditions are met (Target Achieved)
       const fileTargetMet = achievedFileCount >= fileCountTarget;

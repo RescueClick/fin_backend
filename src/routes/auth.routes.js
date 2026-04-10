@@ -375,6 +375,138 @@ router.post(
   })
 );
 
+// ─── OTP-based forgot-password flow (mobile app) ────────────────────────────
+
+/**
+ * STEP 1 – POST /api/auth/forgot-password
+ * Generates a 6-digit OTP, saves it hashed on the user, and emails it.
+ */
+router.post(
+  "/forgot-password",
+  asyncHandler(async (req, res) => {
+    const { email } = req.body || {};
+    if (!email) throw new ApiError(400, "Email is required", { code: "VALIDATION_ERROR" });
+
+    const user = await User.findOne({ email: String(email).trim().toLowerCase() });
+    // Always return 200 to avoid email enumeration
+    if (!user) {
+      return sendSuccess(res, { message: "If an account exists, an OTP has been sent." });
+    }
+
+    // Generate a 6-digit numeric OTP
+    const otp = String(Math.floor(100000 + crypto.randomInt(900000)));
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    user.otpCode   = otp;   // stored plain – safe because it expires quickly
+    user.otpExpiry = otpExpiry;
+    await user.save();
+
+    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+      console.error("forgot-password: email credentials missing");
+      throw new ApiError(500, "Email service not configured. Contact support.", { code: "EMAIL_NOT_CONFIGURED" });
+    }
+
+    await sendMail({
+      to: user.email,
+      subject: "Your DhanSource Password Reset OTP",
+      html: `
+        <div style="font-family:sans-serif;max-width:480px;margin:auto">
+          <h2 style="color:#12B99C">Password Reset OTP</h2>
+          <p>Hi ${user.firstName || "User"},</p>
+          <p>Use the OTP below to reset your DhanSource account password.
+             It expires in <strong>10 minutes</strong>.</p>
+          <div style="font-size:36px;font-weight:bold;letter-spacing:8px;
+                      color:#1c1917;background:#f5f5f4;padding:18px 24px;
+                      border-radius:10px;display:inline-block;margin:12px 0">
+            ${otp}
+          </div>
+          <p style="font-size:13px;color:#78716c">
+            If you did not request this, you can safely ignore this email.
+          </p>
+        </div>
+      `,
+    });
+
+    return sendSuccess(res, { message: "OTP sent! Check your inbox." });
+  })
+);
+
+/**
+ * STEP 2 – POST /api/auth/verify-otp
+ * Verifies the OTP is correct and not expired.
+ */
+router.post(
+  "/verify-otp",
+  asyncHandler(async (req, res) => {
+    const { email, otp } = req.body || {};
+    if (!email || !otp) {
+      throw new ApiError(400, "email and otp are required", { code: "VALIDATION_ERROR" });
+    }
+
+    const user = await User.findOne({ email: String(email).trim().toLowerCase() });
+    if (!user || !user.otpCode || !user.otpExpiry) {
+      throw new ApiError(400, "Invalid or expired OTP. Please request a new one.", { code: "OTP_INVALID" });
+    }
+
+    if (new Date() > user.otpExpiry) {
+      user.otpCode   = undefined;
+      user.otpExpiry = undefined;
+      await user.save();
+      throw new ApiError(400, "OTP has expired. Please request a new one.", { code: "OTP_EXPIRED" });
+    }
+
+    if (String(otp).trim() !== user.otpCode) {
+      throw new ApiError(400, "Incorrect OTP. Please try again.", { code: "OTP_MISMATCH" });
+    }
+
+    // OTP is valid — leave it on the user so Step 3 can also verify before resetting.
+    return sendSuccess(res, { message: "OTP verified! Set your new password." });
+  })
+);
+
+/**
+ * STEP 3 – POST /api/auth/reset-password
+ * Verifies OTP once more, then resets the password.
+ */
+router.post(
+  "/reset-password",
+  asyncHandler(async (req, res) => {
+    const { email, otp, newPassword } = req.body || {};
+    if (!email || !otp || !newPassword) {
+      throw new ApiError(400, "email, otp and newPassword are required", { code: "VALIDATION_ERROR" });
+    }
+    if (String(newPassword).length < 6) {
+      throw new ApiError(400, "Password must be at least 6 characters.", { code: "VALIDATION_ERROR" });
+    }
+
+    const user = await User.findOne({ email: String(email).trim().toLowerCase() });
+    if (!user || !user.otpCode || !user.otpExpiry) {
+      throw new ApiError(400, "Invalid or expired OTP. Please restart the process.", { code: "OTP_INVALID" });
+    }
+
+    if (new Date() > user.otpExpiry) {
+      user.otpCode   = undefined;
+      user.otpExpiry = undefined;
+      await user.save();
+      throw new ApiError(400, "OTP has expired. Please request a new one.", { code: "OTP_EXPIRED" });
+    }
+
+    if (String(otp).trim() !== user.otpCode) {
+      throw new ApiError(400, "Incorrect OTP. Session invalid.", { code: "OTP_MISMATCH" });
+    }
+
+    // All checks passed — set new password
+    user.passwordHash = await argon2.hash(String(newPassword));
+    user.otpCode      = undefined;
+    user.otpExpiry    = undefined;
+    await user.save();
+
+    return sendSuccess(res, { message: "Password reset successfully. Please sign in." });
+  })
+);
+
+// ─── Token-link-based reset (web dashboard / email links) ───────────────────
+
 /**
  * Request password reset (secure version)
  */

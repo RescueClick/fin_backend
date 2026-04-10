@@ -59,14 +59,14 @@ export const sendMail = async ({ to, subject, html }) => {
     return info;
   } catch (primaryError) {
     console.warn(`⚠️ Primary SMTP (port 587) failed:`, primaryError.message);
-    
+
     // Try fallback for timeout, auth errors, or connection issues
-    if (primaryError.message.includes("authentication") || 
-        primaryError.message.includes("535") || 
-        primaryError.message.includes("ECONNREFUSED") ||
-        primaryError.message.includes("Timeout") ||
-        primaryError.code === 'ETIMEDOUT' ||
-        primaryError.code === 'ECONNRESET') {
+    if (primaryError.message.includes("authentication") ||
+      primaryError.message.includes("535") ||
+      primaryError.message.includes("ECONNREFUSED") ||
+      primaryError.message.includes("Timeout") ||
+      primaryError.code === 'ETIMEDOUT' ||
+      primaryError.code === 'ECONNRESET') {
       try {
         console.log(`🔄 Trying fallback SMTP (port 465)...`);
         const transporter = nodemailer.createTransport(fallbackConfig);
@@ -84,21 +84,21 @@ export const sendMail = async ({ to, subject, html }) => {
         console.error(`❌ Both SMTP configurations failed`);
         console.error(`   Primary (587) error: ${primaryError.message}`);
         console.error(`   Fallback (465) error: ${fallbackError.message}`);
-        
+
         // Enhanced error diagnostics
         if (fallbackError.message.includes("535") || fallbackError.message.includes("authentication")) {
           console.error(`   🔴 Authentication Error:`);
           console.error(`      1. EMAIL_USER should be full email: ${EMAIL_USER}`);
           console.error(`      2. EMAIL_PASS should be correct (use App Password if 2FA enabled)`);
           console.error(`      3. Verify SMTP is enabled in Hostinger control panel`);
-          
+
           throw new Error(`SMTP Authentication Failed: ${fallbackError.message}`);
         }
-        
+
         throw fallbackError;
       }
     }
-    
+
     // For non-auth errors, throw the primary error
     console.error(`❌ Failed to send email to ${to}:`, primaryError.message);
     throw primaryError;

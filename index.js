@@ -92,6 +92,9 @@ const authLimiter = rateLimit({
 // Apply limiter ONLY on these sensitive routes
 app.use("/api/auth/login", authLimiter);
 app.use("/api/auth/create-admin", authLimiter);
+app.use("/api/auth/forgot-password", authLimiter);
+app.use("/api/auth/verify-otp", authLimiter);
+app.use("/api/auth/reset-password", authLimiter);
 app.use("/api/auth/reset-password/request", authLimiter);
 app.use("/api/auth/reset-password/confirm", authLimiter);
 app.use("/api/partner/signup-partner", authLimiter);

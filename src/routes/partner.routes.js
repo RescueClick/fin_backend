@@ -50,6 +50,8 @@ import {
 function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+const router = Router();
+
 
 function firstNonEmptyTrimmed(values) {
   for (const v of values) {
@@ -160,6 +162,35 @@ const validateApplicationPayload = ({
   return errors;
 };
 
+// Check if a customer exists by email or phone
+router.get("/check-customer", auth, requireRole(ROLES.PARTNER), async (req, res) => {
+  try {
+    const { email, phone } = req.query;
+    if (!email && !phone) {
+      return res.status(400).json({ message: "Email or phone is required" });
+    }
+
+    const query = [];
+    if (email) query.push({ email: String(email).trim().toLowerCase() });
+    if (phone) query.push({ phone: String(phone).trim() });
+
+    const existingUser = await User.findOne({ $or: query });
+
+    if (existingUser) {
+      const matchField = email && existingUser.email === String(email).trim().toLowerCase() ? "Email" : "Phone number";
+      return res.json({
+        exists: true,
+        message: `${matchField} is already registered in the system.`,
+      });
+    }
+
+    return res.json({ exists: false });
+  } catch (err) {
+    console.error("Error checking customer existence:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+});
+
 const ACTIVE_APPLICATION_STATUSES = [
   "DRAFT",
   "SUBMITTED",
@@ -222,8 +253,7 @@ const mergeApplicationDocs = (existingDocs = [], newDocs = [], uploadedBy) => {
 
   return mergedDocs;
 };
-
-const router = Router();
+// application creation logic follows below
 
 // GET /api/partner/public-default-referral-code — no auth (public loan forms)
 router.get("/public-default-referral-code", async (req, res) => {
@@ -1324,10 +1354,30 @@ router.post(
         $or: [
           { email: customer.email.toLowerCase() },
           { phone: customer.phone },
-          { appNo: customer.appNo },
         ],
         role: ROLES.CUSTOMER,
       });
+
+      // ✅ IDENTITY VALIDATION: If customer exists, ensure the name matches to prevent account mixing.
+      if (customerUser) {
+        const existingFirstName = (customerUser.firstName || "").trim().toLowerCase();
+        const existingLastName = (customerUser.lastName || "").trim().toLowerCase();
+        const incomingFirstName = (customer.firstName || "").trim().toLowerCase();
+        const incomingLastName = (customer.lastName || "").trim().toLowerCase();
+
+        // If both first and last name are different, it's likely a different person using the same contact info.
+        if (existingFirstName !== incomingFirstName || existingLastName !== incomingLastName) {
+          const field = customerUser.email.toLowerCase() === customer.email.toLowerCase() ? "email" : "phone";
+          return res.status(409).json({ 
+            message: `This ${field} is already registered to another customer: ${customerUser.firstName} ${customerUser.lastName}. Please use unique contact details for ${customer.firstName} or use the existing customer's registered name.`,
+            existingCustomer: {
+              name: `${customerUser.firstName} ${customerUser.lastName}`,
+              email: customerUser.email,
+              phone: customerUser.phone
+            }
+          });
+        }
+      }
 
       // If not exists, create customer
       let tempPassword;
@@ -1720,6 +1770,24 @@ router.post(
         $or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
         role: ROLES.CUSTOMER,
       });
+
+      // ✅ IDENTITY VALIDATION
+      if (customerUser) {
+        const existingFirstName = (customerUser.firstName || "").trim().toLowerCase();
+        const existingLastName = (customerUser.lastName || "").trim().toLowerCase();
+        const incomingFirstName = (customer.firstName || "").trim().toLowerCase();
+        const incomingLastName = (customer.lastName || "").trim().toLowerCase();
+
+        if (existingFirstName !== incomingFirstName || existingLastName !== incomingLastName) {
+          const field = customerUser.email.toLowerCase() === normalizedEmail ? "email" : "phone";
+          return res.status(409).json({ 
+            message: `This ${field} is already registered to another customer: ${customerUser.firstName} ${customerUser.lastName}.`,
+            existingCustomer: {
+              name: `${customerUser.firstName} ${customerUser.lastName}`,
+            }
+          });
+        }
+      }
 
       if (!customerUser) {
         const employeeId = await generateEmployeeId("CUSTOMER");
@@ -2221,9 +2289,9 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     const customers = applications.map((app) => ({
       customerId: app.customerId?._id,
       customerEmployeeId: app.customerId?.employeeId || null,
-      customerName: `${app.customerId?.firstName ?? ""} ${
-        app.customerId?.lastName ?? ""
-      }`.trim(),
+      customerName: app.customer?.firstName 
+        ? `${app.customer.firstName} ${app.customer.lastName || ""}`.trim()
+        : `${app.customerId?.firstName ?? ""} ${app.customerId?.lastName ?? ""}`.trim(),
       contact: app.customerId?.phone || null,
       email: app.customerId?.email || null,
       loanType: app.loanType,
@@ -2297,47 +2365,54 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     const { year, month, start, end } = req.query;
 
     // ------------------
-    // 1️⃣ Build filter for Applications
+    // 1️⃣ Build filter for Applications (Fetch all for this period/partner)
     // ------------------
     const match = {
       partnerId: new mongoose.Types.ObjectId(partnerId),
       deletedAt: null,
     };
 
+    // Note: We'll filter by date in-memory for some stats to allowed
+    // Section 6 (Monthly Targets) to see the whole year's data if needed,
+    // and Section 7 (Current Month Target) to be accurate.
+    const applications = await Application.find(match).lean();
+
+    // In-memory filter for the requested period (for top-level stats)
     const hasYearMonth = year && month;
     const hasRange = start && end;
+    let periodStart = null;
+    let periodEnd = null;
 
     if (hasYearMonth) {
       const parsedYear = parseInt(year, 10);
       const parsedMonth = parseInt(month, 10);
-      const startDate = new Date(parsedYear, parsedMonth - 1, 1);
-      const endDate = new Date(parsedYear, parsedMonth, 1);
-      match.createdAt = { $gte: startDate, $lt: endDate };
+      periodStart = new Date(parsedYear, parsedMonth - 1, 1);
+      periodEnd = new Date(parsedYear, parsedMonth, 1);
     } else if (hasRange) {
-      match.createdAt = { $gte: new Date(start), $lte: new Date(end) };
+      periodStart = new Date(start);
+      periodEnd = new Date(end);
     }
 
-    // ------------------
-    // 2️⃣ Fetch Applications
-    // ------------------
-    const applications = await Application.find(match).lean();
+    const filteredApps = (periodStart && periodEnd)
+      ? applications.filter(a => a.createdAt >= periodStart && a.createdAt < periodEnd)
+      : applications;
 
-    const totalFiles = applications.length;
-    const approvedFiles = applications.filter(
+    const totalFiles = filteredApps.length;
+    const approvedFiles = filteredApps.filter(
       (a) => a.status === "APPROVED"
     ).length;
-    const rejectedFiles = applications.filter(
+    const rejectedFiles = filteredApps.filter(
       (a) => a.status === "REJECTED"
     ).length;
-    const docsIncomplete = applications.filter(
+    const docsIncomplete = filteredApps.filter(
       (a) => a.status === "DOC_INCOMPLETE"
     ).length;
-    const inProcessFiles = applications.filter((a) =>
+    const inProcessFiles = filteredApps.filter((a) =>
       ["UNDER_REVIEW", "SUBMITTED", "DRAFT"].includes(a.status)
     ).length;
 
-    // Total disbursed
-    const disbursedApps = applications.filter((a) => a.status === "DISBURSED");
+    // Total disbursed (also within the period)
+    const disbursedApps = filteredApps.filter((a) => a.status === "DISBURSED");
     const totalDisburseAmount = disbursedApps.reduce(
       (sum, app) => sum + (app.approvedLoanAmount || 0),
       0
@@ -2345,13 +2420,15 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     const partnerEarnCount = disbursedApps.length;
 
     // ------------------
-    // 3️⃣ Payout calculation
+    // 3️⃣ Payout calculation (for the requested period)
     // ------------------
     const payoutMatch = {
       partnerId: new mongoose.Types.ObjectId(partnerId),
       payOutStatus: "DONE",
     };
-    if (match.createdAt) payoutMatch.createdAt = match.createdAt;
+    if (periodStart && periodEnd) {
+      payoutMatch.createdAt = { $gte: periodStart, $lt: periodEnd };
+    }
 
     const payoutAgg = await Payout.aggregate([
       { $match: payoutMatch },
@@ -2574,21 +2651,23 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       const fileCountTarget = targetDoc ? (targetDoc.fileCountTarget || 4) : 4;
       const disbursementTarget = targetDoc ? (targetDoc.disbursementTarget || targetDoc.targetValue || 2000000) : 2000000;
 
-      // Calculate achieved for the month (use updatedAt when status becomes DISBURSED)
-      const monthDisbursedApps = applications.filter((a) => {
+      // Calculate achieved for the month
+      const monthRelevantApps = applications.filter((a) => {
         const appUpdatedAt = a.updatedAt || a.createdAt;
         return (
-          a.status === "DISBURSED" &&
+          a.status !== "DRAFT" &&
           appUpdatedAt >= monthStart &&
           appUpdatedAt < monthEnd
         );
       });
 
-      const achievedFileCount = monthDisbursedApps.length;
-      const achievedDisbursement = monthDisbursedApps.reduce(
-        (sum, a) => sum + (parseFloat(a.approvedLoanAmount) || 0),
-        0
-      );
+      const achievedFileCount = monthRelevantApps.length;
+      const achievedDisbursement = monthRelevantApps
+        .filter(a => a.status === "DISBURSED")
+        .reduce(
+          (sum, a) => sum + (parseFloat(a.approvedLoanAmount) || 0),
+          0
+        );
 
       monthlyTargets[months[i]] = {
         fileCountTarget,
@@ -2615,10 +2694,12 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
 
     const currentMonthStart = new Date(currentYear, currentMonth - 1, 1);
     const currentMonthEnd = new Date(currentYear, currentMonth, 1);
-    const currentMonthDisbursed = applications.filter((a) => {
+    
+    // Get all non-draft applications for current month (for file count)
+    const currentMonthRelevantApps = applications.filter((a) => {
       const appUpdatedAt = a.updatedAt || a.createdAt;
       return (
-        a.status === "DISBURSED" &&
+        a.status !== "DRAFT" &&
         appUpdatedAt >= currentMonthStart &&
         appUpdatedAt < currentMonthEnd
       );
@@ -2626,11 +2707,14 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
 
     const currentFileCountTarget = currentMonthTarget?.fileCountTarget || 4;
     const currentDisbursementTarget = currentMonthTarget?.disbursementTarget || currentMonthTarget?.targetValue || 2000000;
-    const currentAchievedFileCount = currentMonthDisbursed.length;
-    const currentAchievedDisbursement = currentMonthDisbursed.reduce(
-      (sum, a) => sum + (parseFloat(a.approvedLoanAmount) || 0),
-      0
-    );
+    
+    const currentAchievedFileCount = currentMonthRelevantApps.length;
+    const currentAchievedDisbursement = currentMonthRelevantApps
+      .filter(a => a.status === "DISBURSED")
+      .reduce(
+        (sum, a) => sum + (parseFloat(a.approvedLoanAmount) || 0),
+        0
+      );
 
     // ------------------
     // 8️⃣ Incentive history (from Incentive collection)
@@ -4260,13 +4344,13 @@ router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       year: targetYear,
     }).lean();
 
-    // Get disbursed applications for achievement calculation
+    // Get relevant applications for achievement calculation
     const startDate = new Date(targetYear, targetMonth - 1, 1);
     const endDate = new Date(targetYear, targetMonth, 1);
 
-    const disbursedApps = await Application.find({
-      status: "DISBURSED",
+    const relevantApps = await Application.find({
       partnerId: partnerId,
+      status: { $ne: "DRAFT" }, // Count all submitted/processed files
       updatedAt: {
         $gte: startDate,
         $lt: endDate
@@ -4275,11 +4359,11 @@ router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
 
     const fileCountTarget = target?.fileCountTarget || 4;
     const disbursementTarget = target?.disbursementTarget || 2000000;
-    const achievedFileCount = disbursedApps.length;
-    const achievedDisbursement = disbursedApps.reduce(
-      (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
-      0
-    );
+    
+    const achievedFileCount = relevantApps.length;
+    const achievedDisbursement = relevantApps
+      .filter(app => app.status === "DISBURSED")
+      .reduce((sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0), 0);
 
     // Check if targets are met and exceeded
     const fileTargetMet = achievedFileCount >= fileCountTarget;

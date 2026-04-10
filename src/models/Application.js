@@ -9,6 +9,8 @@ export const APP_STATUSES = [
   "DOC_COMPLETE",
   "LOGIN",
   "DOC_SUBMITTED",
+  "KYC_PENDING",
+  "KYC_COMPLETE",
   "UNDER_REVIEW",
   "APPROVED",
   "AGREEMENT",

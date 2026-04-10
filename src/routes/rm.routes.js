@@ -1695,16 +1695,21 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       {
         $match: {
           $or: [
-            { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
-            { partnerId: { $in: partnerIds }, status: "DISBURSED" }
+            { rmId: new mongoose.Types.ObjectId(rmId) },
+            { partnerId: { $in: partnerIds } }
           ],
+          status: { $ne: "DRAFT" },
           updatedAt: { $gte: startOfYear },
         },
       },
       {
         $group: {
           _id: { month: { $month: "$updatedAt" } },
-          totalAchieved: { $sum: { $toDouble: "$approvedLoanAmount" } },
+          totalAchieved: { 
+            $sum: { 
+              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: "$approvedLoanAmount" }, 0] 
+            } 
+          },
           totalFiles: { $sum: 1 },
         },
       },
@@ -3581,10 +3586,10 @@ router.get("/partners/targets", auth, requireRole(ROLES.RM), async (req, res) =>
       ...dateFilter,
     }).lean();
 
-    // Get disbursed applications for achievement calculation
-    const disbursedApps = await Application.find({
-      status: "DISBURSED",
+    // Get relevant applications for achievement calculation
+    const relevantApps = await Application.find({
       partnerId: { $in: partnerIds },
+      status: { $ne: "DRAFT" },
       ...(year && month ? {
         updatedAt: {
           $gte: new Date(year, month - 1, 1),
@@ -3598,17 +3603,19 @@ router.get("/partners/targets", auth, requireRole(ROLES.RM), async (req, res) =>
       const target = targets.find(
         (t) => t.assignedTo.toString() === partner._id.toString()
       );
-      const partnerDisbursed = disbursedApps.filter(
+      const partnerApps = relevantApps.filter(
         (app) => app.partnerId.toString() === partner._id.toString()
       );
 
       const fileCountTarget = target?.fileCountTarget || 4;
       const disbursementTarget = target?.disbursementTarget || 2000000;
-      const achievedFileCount = partnerDisbursed.length;
-      const achievedDisbursement = partnerDisbursed.reduce(
-        (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
-        0
-      );
+      const achievedFileCount = partnerApps.length;
+      const achievedDisbursement = partnerApps
+        .filter(app => app.status === "DISBURSED")
+        .reduce(
+          (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
+          0
+        );
 
       return {
         partnerId: partner._id,

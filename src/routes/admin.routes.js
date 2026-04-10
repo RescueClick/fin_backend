@@ -870,22 +870,26 @@ router.get(
         return res.status(404).json({ message: "Admin not found" });
       }
 
-      // Partners awaiting RM assignment (queued under admin)
+      // Partners awaiting approval or RM assignment
       const partners = await User.find({
         role: ROLES.PARTNER,
-        rmId: admin._id, // explicitly under Admin
         status: "PENDING",
       })
         .select("-passwordHash -__v")
+        .populate({
+          path: "rmId",
+          select: "firstName lastName employeeId"
+        })
         .lean();
 
       // Map partners and keep stored doc URLs (S3 URLs already absolute)
       const formatted = partners.map((p) => {
+        const rm = p.rmId || admin;
         return {
           ...p,
-          rmId: admin._id,
-          rmName: `${admin.firstName} ${admin.lastName}`,
-          rmEmployeeId: admin.employeeId,
+          rmId: rm._id,
+          rmName: `${rm.firstName} ${rm.lastName}`,
+          rmEmployeeId: rm.employeeId,
           docs: p.docs || [],
         };
       });
@@ -918,12 +922,12 @@ router.post(
       const partner = await User.findOne({
         _id: partnerId,
         role: ROLES.PARTNER,
-        rmId: admin._id, // currently under Admin
+        status: "PENDING",
       });
       if (!partner)
         return res
           .status(404)
-          .json({ message: "Partner not found or not under Admin" });
+          .json({ message: "Partner not found or not in PENDING status" });
 
       const rm = await User.findOne({
         _id: rmId,
@@ -4519,10 +4523,10 @@ router.get("/partners/targets", auth, requireRole(ROLES.SUPER_ADMIN), async (req
       ...dateFilter,
     }).lean();
 
-    // Get disbursed applications for achievement calculation
-    const disbursedApps = await Application.find({
-      status: "DISBURSED",
+    // Get relevant applications for achievement calculation
+    const relevantApps = await Application.find({
       partnerId: { $in: partnerIds },
+      status: { $ne: "DRAFT" },
       ...(year && month ? {
         updatedAt: {
           $gte: new Date(year, month - 1, 1),
@@ -4536,17 +4540,19 @@ router.get("/partners/targets", auth, requireRole(ROLES.SUPER_ADMIN), async (req
       const target = targets.find(
         (t) => t.assignedTo.toString() === partner._id.toString()
       );
-      const partnerDisbursed = disbursedApps.filter(
+      const partnerApps = relevantApps.filter(
         (app) => app.partnerId.toString() === partner._id.toString()
       );
 
       const fileCountTarget = target?.fileCountTarget || 4;
       const disbursementTarget = target?.disbursementTarget || 2000000;
-      const achievedFileCount = partnerDisbursed.length;
-      const achievedDisbursement = partnerDisbursed.reduce(
-        (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
-        0
-      );
+      const achievedFileCount = partnerApps.length;
+      const achievedDisbursement = partnerApps
+        .filter(app => app.status === "DISBURSED")
+        .reduce(
+          (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
+          0
+        );
 
       return {
         partnerId: partner._id,

@@ -118,6 +118,10 @@ const userSchema = new mongoose.Schema(
     passwordHash: { type: String, required: true },
     deletedAt: { type: Date },
 
+    /** OTP-based password reset (mobile app) */
+    otpCode:   { type: String },
+    otpExpiry: { type: Date },
+
     /** Pending email change (dual verification via old+new email links) */
     pendingEmail: { type: String, lowercase: true, sparse: true, trim: true },
     emailChangeToken: { type: String, sparse: true }, // legacy

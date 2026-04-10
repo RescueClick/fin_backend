@@ -16,7 +16,7 @@ const testEmail = async () => {
 
   try {
     console.log(`📧 Sending test email to: ${process.env.EMAIL_USER}`);
-    
+
     const result = await sendMail({
       to: process.env.EMAIL_USER,
       subject: "Test from sendMail Function",

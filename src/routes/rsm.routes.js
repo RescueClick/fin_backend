@@ -979,7 +979,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       {
         $match: {
           rsmId: new mongoose.Types.ObjectId(rsmId),
-          status: "DISBURSED",
+          status: { $ne: "DRAFT" },
           ...ltFilter,
           updatedAt: {
             $gte: currentMonthStart,
@@ -990,7 +990,11 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       {
         $group: {
           _id: null,
-          totalDisbursement: { $sum: { $toDouble: "$approvedLoanAmount" } },
+          totalDisbursement: { 
+            $sum: { 
+              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0] 
+            } 
+          },
           totalFiles: { $sum: 1 },
         },
       },
@@ -1013,7 +1017,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       {
         $match: {
           rsmId: new mongoose.Types.ObjectId(rsmId),
-          status: "DISBURSED",
+          status: { $ne: "DRAFT" },
           ...ltFilter,
           updatedAt: { $gte: startOfYear },
         },
@@ -1021,7 +1025,11 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       {
         $group: {
           _id: { month: { $month: "$updatedAt" } },
-          totalAchieved: { $sum: { $toDouble: "$approvedLoanAmount" } },
+          totalAchieved: { 
+            $sum: { 
+              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0] 
+            } 
+          },
           totalFiles: { $sum: 1 },
         },
       },
@@ -1883,10 +1891,10 @@ router.get("/partners/targets", auth, requireRole(ROLES.RSM), async (req, res) =
       ...dateFilter,
     }).lean();
 
-    // Get disbursed applications for achievement calculation
-    const disbursedApps = await Application.find({
-      status: "DISBURSED",
+    // Get relevant applications for achievement calculation
+    const relevantApps = await Application.find({
       partnerId: { $in: partnerIds },
+      status: { $ne: "DRAFT" },
       ...(year && month ? {
         updatedAt: {
           $gte: new Date(year, month - 1, 1),
@@ -1900,17 +1908,19 @@ router.get("/partners/targets", auth, requireRole(ROLES.RSM), async (req, res) =
       const target = targets.find(
         (t) => t.assignedTo.toString() === partner._id.toString()
       );
-      const partnerDisbursed = disbursedApps.filter(
+      const partnerApps = relevantApps.filter(
         (app) => app.partnerId.toString() === partner._id.toString()
       );
 
       const fileCountTarget = target?.fileCountTarget || 4;
       const disbursementTarget = target?.disbursementTarget || 2000000;
-      const achievedFileCount = partnerDisbursed.length;
-      const achievedDisbursement = partnerDisbursed.reduce(
-        (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
-        0
-      );
+      const achievedFileCount = partnerApps.length;
+      const achievedDisbursement = partnerApps
+        .filter(app => app.status === "DISBURSED")
+        .reduce(
+          (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
+          0
+        );
 
       return {
         partnerId: partner._id,
