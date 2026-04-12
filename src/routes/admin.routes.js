@@ -27,8 +27,8 @@ import mongoose from "mongoose";
 import fs from "fs";
 import path from "path";
 import { sendMail } from "../utils/sendMail.js";
-import { 
-  sendUserAccountEmail, 
+import {
+  sendUserAccountEmail,
   sendPartnerRegistrationEmail,
   sendLoanApplicationEmail,
   sendApplicationStatusEmail,
@@ -311,8 +311,8 @@ router.post(
           emailTaken && phoneTaken
             ? "Email and phone number already in use"
             : emailTaken
-            ? "Email already in use"
-            : "Phone number already in use";
+              ? "Email already in use"
+              : "Phone number already in use";
         return res.status(409).json({ message, field });
       }
 
@@ -432,32 +432,32 @@ router.post(
           emailTaken && phoneTaken
             ? "Email and phone number already in use"
             : emailTaken
-            ? "Email already in use"
-            : "Phone number already in use";
+              ? "Email already in use"
+              : "Phone number already in use";
         return res.status(409).json({ message, field });
       }
 
       // Check if Personal RSM exists and is of correct type
-      const personalRsm = await User.findOne({ 
-        _id: personalRsmId, 
+      const personalRsm = await User.findOne({
+        _id: personalRsmId,
         role: ROLES.RSM,
-        rsmType: RSM_TYPES.PERSONAL 
+        rsmType: RSM_TYPES.PERSONAL
       });
       if (!personalRsm) {
-        return res.status(404).json({ 
-          message: "Personal Loan RSM not found or invalid type" 
+        return res.status(404).json({
+          message: "Personal Loan RSM not found or invalid type"
         });
       }
 
       // Check if Business/Home RSM exists and is of correct type
-      const businessHomeRsm = await User.findOne({ 
-        _id: businessHomeRsmId, 
+      const businessHomeRsm = await User.findOne({
+        _id: businessHomeRsmId,
         role: ROLES.RSM,
-        rsmType: RSM_TYPES.BUSINESS_HOME 
+        rsmType: RSM_TYPES.BUSINESS_HOME
       });
       if (!businessHomeRsm) {
-        return res.status(404).json({ 
-          message: "Business & Home Loan RSM not found or invalid type" 
+        return res.status(404).json({
+          message: "Business & Home Loan RSM not found or invalid type"
         });
       }
 
@@ -605,8 +605,8 @@ router.post(
           emailTaken && phoneTaken
             ? "Email and phone number already in use"
             : emailTaken
-            ? "Email already in use"
-            : "Phone number already in use";
+              ? "Email already in use"
+              : "Phone number already in use";
         return res.status(409).json({ message, field });
       }
 
@@ -708,11 +708,11 @@ router.get(
         const businessHomeRsm = rm.businessHomeRsmId;
 
         // Store original IDs before destructuring
-        const originalPersonalRsmId = typeof rm.personalRsmId === 'object' && rm.personalRsmId?._id 
-          ? rm.personalRsmId._id 
+        const originalPersonalRsmId = typeof rm.personalRsmId === 'object' && rm.personalRsmId?._id
+          ? rm.personalRsmId._id
           : rm.personalRsmId;
-        const originalBusinessHomeRsmId = typeof rm.businessHomeRsmId === 'object' && rm.businessHomeRsmId?._id 
-          ? rm.businessHomeRsmId._id 
+        const originalBusinessHomeRsmId = typeof rm.businessHomeRsmId === 'object' && rm.businessHomeRsmId?._id
+          ? rm.businessHomeRsmId._id
           : rm.businessHomeRsmId;
 
         // Extract base RM data without populated objects
@@ -1242,9 +1242,9 @@ router.delete(
       }
 
       // Find the customer
-      const customer = await User.findOne({ 
-        _id: customerId, 
-        role: ROLES.CUSTOMER 
+      const customer = await User.findOne({
+        _id: customerId,
+        role: ROLES.CUSTOMER
       });
 
       if (!customer) {
@@ -1252,8 +1252,8 @@ router.delete(
       }
 
       // Find all applications for this customer
-      const applications = await Application.find({ 
-        customerId: customerId 
+      const applications = await Application.find({
+        customerId: customerId
       });
 
       // Delete all documents/files associated with applications
@@ -1262,7 +1262,7 @@ router.delete(
           for (const doc of app.docs) {
             if (doc.url) {
               try {
-                const filePath = doc.url.startsWith('/') 
+                const filePath = doc.url.startsWith('/')
                   ? path.join(process.cwd(), doc.url)
                   : doc.url;
                 if (fs.existsSync(filePath)) {
@@ -1278,8 +1278,8 @@ router.delete(
       }
 
       // Delete all applications for this customer
-      const deletedAppsCount = await Application.deleteMany({ 
-        customerId: customerId 
+      const deletedAppsCount = await Application.deleteMany({
+        customerId: customerId
       });
 
       // Delete the customer user
@@ -1293,9 +1293,9 @@ router.delete(
       });
     } catch (error) {
       console.error("Error deleting customer:", error);
-      res.status(500).json({ 
-        message: "Failed to delete customer", 
-        error: error.message 
+      res.status(500).json({
+        message: "Failed to delete customer",
+        error: error.message
       });
     }
   }
@@ -1461,7 +1461,7 @@ router.get(
   async (req, res) => {
     try {
       const limit = parseInt(req.query.limit) || 10;
-      
+
       const activities = [];
 
       // 1. Recent customers registered
@@ -1825,9 +1825,9 @@ router.post(
           );
         } else {
           await User.updateMany(
-             { role: ROLES.RM, $or: [{ personalRsmId: rsmId }, { businessHomeRsmId: rsmId }] },
-             { $set: { personalRsmId: newRsmId, businessHomeRsmId: newRsmId } },
-             { session }
+            { role: ROLES.RM, $or: [{ personalRsmId: rsmId }, { businessHomeRsmId: rsmId }] },
+            { $set: { personalRsmId: newRsmId, businessHomeRsmId: newRsmId } },
+            { session }
           );
         }
 
@@ -2042,25 +2042,25 @@ router.post(
       });
 
       if (!oldPartner) {
-         return res.status(404).json({ message: "Old Partner not found" });
+        return res.status(404).json({ message: "Old Partner not found" });
       }
-      
+
       const newPartner = await User.findById(newPartnerId);
 
       // Mails
       if (oldPartner && oldPartner.email) {
-         sendMail({
-            to: oldPartner.email,
-            subject: "Your Partner Account Has Been Deactivated",
-            html: `<p>Dear ${oldPartner.firstName}, your Partner account has been suspended and your customers have been reassigned.</p>`,
-         }).catch(err => console.error(err));
+        sendMail({
+          to: oldPartner.email,
+          subject: "Your Partner Account Has Been Deactivated",
+          html: `<p>Dear ${oldPartner.firstName}, your Partner account has been suspended and your customers have been reassigned.</p>`,
+        }).catch(err => console.error(err));
       }
       if (newPartner && newPartner.email) {
-         sendMail({
-            to: newPartner.email,
-            subject: "You Have Been Assigned New Customers",
-            html: `<p>Dear ${newPartner.firstName}, you have been assigned Customers from a deactivated Partner.</p>`,
-         }).catch(err => console.error(err));
+        sendMail({
+          to: newPartner.email,
+          subject: "You Have Been Assigned New Customers",
+          html: `<p>Dear ${newPartner.firstName}, you have been assigned Customers from a deactivated Partner.</p>`,
+        }).catch(err => console.error(err));
       }
 
       res.json({
@@ -3101,8 +3101,8 @@ router.get(
       // Role-wise calculations
       if (user.role === ROLES.ASM) {
         // Only include ACTIVE RMs and their ACTIVE partners
-        const rms = await User.find({ 
-          asmId: id, 
+        const rms = await User.find({
+          asmId: id,
           role: ROLES.RM,
           status: "ACTIVE" // Only ACTIVE RMs
         })
@@ -3134,10 +3134,10 @@ router.get(
         performance =
           assignedTargetValue.targetValue > 0
             ? (
-                (assignedTargetValue.achievedValue /
-                  assignedTargetValue.targetValue) *
-                100
-              ).toFixed(2)
+              (assignedTargetValue.achievedValue /
+                assignedTargetValue.targetValue) *
+              100
+            ).toFixed(2)
             : "0.00";
 
         totals = {
@@ -3149,8 +3149,8 @@ router.get(
 
       if (user.role === ROLES.RM) {
         // Get all ACTIVE partners under this RM
-        const partners = await User.find({ 
-          rmId: id, 
+        const partners = await User.find({
+          rmId: id,
           role: ROLES.PARTNER,
           status: "ACTIVE" // Only ACTIVE partners
         })
@@ -3165,7 +3165,7 @@ router.get(
             partnerId: { $in: partnerIds },
             status: "DISBURSED"
           });
-          
+
           // Only count partners who have disbursed
           partnerIds = partnersWithDisbursement;
         }
@@ -3177,9 +3177,9 @@ router.get(
         // For both ACTIVE and SUSPENDED RM, count disbursements from ACTIVE partners
         // For SUSPENDED RM, partnerIds already filtered to only those who have disbursed
         const disbursementFilter = { partnerId: { $in: partnerIds }, status: "DISBURSED" };
-        
+
         totalDisbursed = await sumDisbursedBy(disbursementFilter);
-        
+
         // Target calculation - uses the same filter to ensure consistency
         // For SUSPENDED RM, this will only count targets from active partners who have disbursed
         assignedTargetValue = await getAssignedTarget(user._id, ROLES.RM, disbursementFilter);
@@ -3187,10 +3187,10 @@ router.get(
         performance =
           assignedTargetValue.targetValue > 0
             ? (
-                (assignedTargetValue.achievedValue /
-                  assignedTargetValue.targetValue) *
-                100
-              ).toFixed(2)
+              (assignedTargetValue.achievedValue /
+                assignedTargetValue.targetValue) *
+              100
+            ).toFixed(2)
             : "0.00";
 
         totals = { partners: partnerIds.length, customers: customers.length };
@@ -3213,10 +3213,10 @@ router.get(
         performance =
           assignedTargetValue.targetValue > 0
             ? (
-                (assignedTargetValue.achievedValue /
-                  assignedTargetValue.targetValue) *
-                100
-              ).toFixed(2)
+              (assignedTargetValue.achievedValue /
+                assignedTargetValue.targetValue) *
+              100
+            ).toFixed(2)
             : "0.00";
 
         totals = { customers: customers.length };
@@ -3260,10 +3260,10 @@ router.get(
         performance =
           assignedTargetValue.targetValue > 0
             ? (
-                (assignedTargetValue.achievedValue /
-                  assignedTargetValue.targetValue) *
-                100
-              ).toFixed(2)
+              (assignedTargetValue.achievedValue /
+                assignedTargetValue.targetValue) *
+              100
+            ).toFixed(2)
             : "0.00";
 
         totals = {
@@ -3390,7 +3390,7 @@ const evaluatePartnerHardDeleteEligibility = async (partnerId) => {
     .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0] || null;
   const retentionEligible = latestActivityAt
     ? Date.now() - new Date(latestActivityAt).getTime() >=
-      DELETE_RETENTION_DAYS * 24 * 60 * 60 * 1000
+    DELETE_RETENTION_DAYS * 24 * 60 * 60 * 1000
     : true;
 
   const blockers = [];
@@ -3774,17 +3774,17 @@ router.post(
       const { email, type = "basic" } = req.body;
 
       if (!email) {
-        return res.status(400).json({ 
-          success: false, 
-          message: "Email address is required" 
+        return res.status(400).json({
+          success: false,
+          message: "Email address is required"
         });
       }
 
       // Validate email format
       if (!/^\S+@\S+\.\S+$/.test(email)) {
-        return res.status(400).json({ 
-          success: false, 
-          message: "Invalid email format" 
+        return res.status(400).json({
+          success: false,
+          message: "Invalid email format"
         });
       }
 
@@ -3826,11 +3826,11 @@ router.post(
               firstName: "Admin",
               lastName: "User",
             });
-            result.user = { 
-              success: emailSent, 
-              message: emailSent 
-                ? "User account email sent successfully" 
-                : "Failed to send user account email" 
+            result.user = {
+              success: emailSent,
+              message: emailSent
+                ? "User account email sent successfully"
+                : "Failed to send user account email"
             };
           } catch (error) {
             result.user = { success: false, message: error.message };
@@ -3856,11 +3856,11 @@ router.post(
               testApplication,
               "Test@123"
             );
-            result.loan = { 
-              success: emailSent, 
-              message: emailSent 
-                ? "Loan application email sent successfully" 
-                : "Failed to send loan application email" 
+            result.loan = {
+              success: emailSent,
+              message: emailSent
+                ? "Loan application email sent successfully"
+                : "Failed to send loan application email"
             };
           } catch (error) {
             result.loan = { success: false, message: error.message };
@@ -3886,11 +3886,11 @@ router.post(
               "DRAFT",
               "APPROVED"
             );
-            result.status = { 
-              success: emailSent, 
-              message: emailSent 
-                ? "Application status email sent successfully" 
-                : "Failed to send application status email" 
+            result.status = {
+              success: emailSent,
+              message: emailSent
+                ? "Application status email sent successfully"
+                : "Failed to send application status email"
             };
           } catch (error) {
             result.status = { success: false, message: error.message };
@@ -3914,11 +3914,11 @@ router.post(
               "AADHAR_FRONT",
               "VERIFIED"
             );
-            result.document = { 
-              success: emailSent, 
-              message: emailSent 
-                ? "Document status email sent successfully" 
-                : "Failed to send document status email" 
+            result.document = {
+              success: emailSent,
+              message: emailSent
+                ? "Document status email sent successfully"
+                : "Failed to send document status email"
             };
           } catch (error) {
             result.document = { success: false, message: error.message };
@@ -3984,11 +3984,11 @@ router.post(
       }
 
       const allSuccess = Object.values(result).every((r) => r.success);
-      
+
       res.json({
         success: allSuccess,
-        message: allSuccess 
-          ? `Email test completed successfully` 
+        message: allSuccess
+          ? `Email test completed successfully`
           : `Some email tests failed`,
         results: result,
         testedEmail: email,
@@ -4043,30 +4043,28 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.SUPER_ADMIN), a
       );
 
       return {
-      customerId: app.customerId?._id,
-      customerEmployeeId: app.customerId?.employeeId || null,
-      customerName: `${app.customerId?.firstName ?? ""} ${
-        app.customerId?.lastName ?? ""
-      }`.trim(),
-      contact: app.customerId?.phone || null,
-      email: app.customerId?.email || null,
-      loanType: app.loanType,
-      requestedAmount: app.customer?.loanAmount || null,
-      approvedAmount: app.approvedLoanAmount || null,
-      status: app.status,
-      payOutStatus: payout?.payOutStatus || "PENDING",
-      payoutAmount: payout?.amount || 0,
-      partner: {
-        partnerId: app.partnerId?._id,
-        name: `${app.partnerId?.firstName ?? ""} ${
-          app.partnerId?.lastName ?? ""
-        }`.trim(),
-        email: app.partnerId?.email,
-        phone: app.partnerId?.phone,
-      },
-      applicationId: app._id,
-      createdAt: app.createdAt,
-    };
+        customerId: app.customerId?._id,
+        customerEmployeeId: app.customerId?.employeeId || null,
+        customerName: `${app.customerId?.firstName ?? ""} ${app.customerId?.lastName ?? ""
+          }`.trim(),
+        contact: app.customerId?.phone || null,
+        email: app.customerId?.email || null,
+        loanType: app.loanType,
+        requestedAmount: app.customer?.loanAmount || null,
+        approvedAmount: app.approvedLoanAmount || null,
+        status: app.status,
+        payOutStatus: payout?.payOutStatus || "PENDING",
+        payoutAmount: payout?.amount || 0,
+        partner: {
+          partnerId: app.partnerId?._id,
+          name: `${app.partnerId?.firstName ?? ""} ${app.partnerId?.lastName ?? ""
+            }`.trim(),
+          email: app.partnerId?.email,
+          phone: app.partnerId?.phone,
+        },
+        applicationId: app._id,
+        createdAt: app.createdAt,
+      };
     });
 
     return res.json(customers);
@@ -4109,9 +4107,8 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.SUPER_ADMIN), asyn
         return {
           customerId: app.customerId?._id,
           customerEmployeeId: app.customerId?.employeeId || null,
-          customerName: `${app.customerId?.firstName ?? ""} ${
-            app.customerId?.lastName ?? ""
-          }`.trim(),
+          customerName: `${app.customerId?.firstName ?? ""} ${app.customerId?.lastName ?? ""
+            }`.trim(),
           contact: app.customerId?.phone || null,
           email: app.customerId?.email || null,
           loanType: app.loanType,
@@ -4122,9 +4119,8 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.SUPER_ADMIN), asyn
           payoutAmount: payout?.amount || 0,
           partner: {
             partnerId: app.partnerId?._id,
-            name: `${app.partnerId?.firstName ?? ""} ${
-              app.partnerId?.lastName ?? ""
-            }`.trim(),
+            name: `${app.partnerId?.firstName ?? ""} ${app.partnerId?.lastName ?? ""
+              }`.trim(),
             email: app.partnerId?.email,
             phone: app.partnerId?.phone,
           },
@@ -4357,8 +4353,8 @@ router.post("/target-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, 
 
     // fileCountTarget is required
     if (!fileCountTarget || fileCountTarget < 1) {
-      return res.status(400).json({ 
-        message: "fileCountTarget is required and must be at least 1" 
+      return res.status(400).json({
+        message: "fileCountTarget is required and must be at least 1"
       });
     }
 
@@ -4588,8 +4584,8 @@ router.post("/target/assign-partner", auth, requireRole(ROLES.SUPER_ADMIN), asyn
     const { partnerId, month, year, fileCountTarget, disbursementTarget } = req.body;
 
     if (!partnerId || !month || !year || !fileCountTarget || !disbursementTarget) {
-      return res.status(400).json({ 
-        message: "partnerId, month, year, fileCountTarget, and disbursementTarget are required" 
+      return res.status(400).json({
+        message: "partnerId, month, year, fileCountTarget, and disbursementTarget are required"
       });
     }
 
@@ -5006,13 +5002,13 @@ router.post(
       }
 
       const { deriveCurrentTargetContext, rebalanceHierarchyTargetsReplace } = await import("../utils/targetRebalanceService.js");
-      
+
       // Step 1: Detect current target context (Total Company Target already set by Admin)
       const context = await deriveCurrentTargetContext(targetMonth, targetYear);
-      
+
       if (!context.totalCompanyTarget || context.totalCompanyTarget <= 0) {
-        return res.status(400).json({ 
-          message: `No base target found for ${new Date(0, targetMonth - 1).toLocaleString('en-US', { month: 'long' })} ${targetYear}. Please set a company target first.` 
+        return res.status(400).json({
+          message: `No base target found for ${new Date(0, targetMonth - 1).toLocaleString('en-US', { month: 'long' })} ${targetYear}. Please set a company target first.`
         });
       }
 
@@ -5071,22 +5067,22 @@ router.post(
       }
 
       if (!totalCompanyTarget || totalCompanyTarget <= 0) {
-        return res.status(400).json({ 
-          message: "totalCompanyTarget is required and must be greater than 0" 
+        return res.status(400).json({
+          message: "totalCompanyTarget is required and must be greater than 0"
         });
       }
 
       // Minimum realistic company target (₹10,00,000 = ₹10 Lakhs)
       const MIN_COMPANY_TARGET = 1000000;
       if (totalCompanyTarget < MIN_COMPANY_TARGET) {
-        return res.status(400).json({ 
-          message: `Total Company Target must be at least ₹10,00,000 (₹10 Lakhs). Current value: ₹${Number(totalCompanyTarget).toLocaleString('en-IN')}` 
+        return res.status(400).json({
+          message: `Total Company Target must be at least ₹10,00,000 (₹10 Lakhs). Current value: ₹${Number(totalCompanyTarget).toLocaleString('en-IN')}`
         });
       }
 
       if (!partnerFileCountTarget || partnerFileCountTarget < 1) {
-        return res.status(400).json({ 
-          message: "partnerFileCountTarget is required and must be at least 1" 
+        return res.status(400).json({
+          message: "partnerFileCountTarget is required and must be at least 1"
         });
       }
 
@@ -5128,7 +5124,7 @@ router.post(
 
       // Step 1: Get all ASMs
       const asms = await User.find({ role: ROLES.ASM }).lean();
-      
+
       if (asms.length === 0) {
         return res.status(400).json({ message: "No ASMs found. Please create ASMs first." });
       }
@@ -5136,11 +5132,11 @@ router.post(
       // Step 2: Divide total target equally among ASMs
       const asmTarget = Math.round(totalTarget / asms.length);
       distributionSummary.asmCount = asms.length;
-      
+
       for (const asm of asms) {
         // Step 3: Get all RSMs under this ASM
         const rsms = await User.find({ role: ROLES.RSM, asmId: asm._id }).lean();
-        
+
         if (rsms.length === 0) {
           // If no RSMs, assign entire ASM target to ASM (they can manage directly)
           let asmTargetDoc = await Target.findOne({

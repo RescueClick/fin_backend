@@ -38,10 +38,10 @@ const DocumentSchema = new mongoose.Schema(
     docType: { type: String, required: true }, // PAN, AADHAAR, BANK, INCOME, etc.
     url: { type: String, required: true },
     uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    status: { 
-      type: String, 
-      enum: ["PENDING", "VERIFIED", "REJECTED", "UPDATED"], 
-      default: "PENDING" 
+    status: {
+      type: String,
+      enum: ["PENDING", "VERIFIED", "REJECTED", "UPDATED"],
+      default: "PENDING"
     },
     remarks: { type: String },
     uploadedAt: { type: Date, default: Date.now },
@@ -96,9 +96,9 @@ const CustomerSchema = new mongoose.Schema(
     currentAddressLandmark: { type: String }, // ✅ added
     currentAddressPinCode: { type: String },        // ✅ added
     currentAddressHouseStatus: { type: String },         // ✅ added
-    stabilityOfResidency: {type: String},
-    currentAddressOwnRented: {type: String},
-    currentAddressStability: {type: String},
+    stabilityOfResidency: { type: String },
+    currentAddressOwnRented: { type: String },
+    currentAddressStability: { type: String },
 
 
 
@@ -106,9 +106,9 @@ const CustomerSchema = new mongoose.Schema(
     permanentAddressLandmark: { type: String },      // ✅ added
     permanentAddressPinCode: { type: String },       // ✅ added
     permanentAddressHouseStatus: { type: String },
-    permanentAddressStability: {type: String},
-    permanentAddressOwnRented: {type:String},      // ✅ added
-    permanentAddressStability:{type:String},
+    permanentAddressStability: { type: String },
+    permanentAddressOwnRented: { type: String },      // ✅ added
+    permanentAddressStability: { type: String },
 
     loanAmount: { type: Number },
     password: { type: String },
@@ -132,7 +132,7 @@ const EmploymentInfoSchema = new mongoose.Schema(
     currentExperience: { type: String },
     salaryInHand: { type: String }, // ✅ added
 
-    
+
   },
   { _id: false }
 );
@@ -142,9 +142,9 @@ const BusinessInfoSchema = new mongoose.Schema(
   {
 
     businessName: { type: String },
-    businessAddress: {type:String},
-    businessLandmark: {type: String},
-    businessVintage: {type: String},
+    businessAddress: { type: String },
+    businessLandmark: { type: String },
+    businessVintage: { type: String },
     gstNumber: { type: String },
     annualTurnoverInINR: { type: String },
     yearsInBusiness: { type: String } // ✅ added
@@ -159,7 +159,7 @@ const PropertyInfoSchema = new mongoose.Schema(
     propertyValue: { type: Number },   // ✅ added
     propertyAddress: { type: String }  // ✅ added
   },
-  
+
   { _id: false }
 );
 
@@ -190,7 +190,7 @@ const ApplicationSchema = new mongoose.Schema(
     // Convenience link to ASM for fast reporting (set when routed to RSM)
     asmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     customerId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    
+
     loanType: {
       type: String,
       enum: LOAN_TYPES,  // ✅ restricts to predefined loan types
@@ -207,8 +207,8 @@ const ApplicationSchema = new mongoose.Schema(
     businessInfo: { type: BusinessInfoSchema },     // Business / Home Self-Employed
     propertyInfo: { type: PropertyInfoSchema },     // Home Loan
     approvedLoanAmount: { type: Number }, // approved/disbursed by RM
-    remarks: {type:String},
-    requestedAmount:{type: Number},
+    remarks: { type: String },
+    requestedAmount: { type: Number },
     // Workflow
     // Option A: new applications should not start in DRAFT
     status: { type: String, enum: APP_STATUSES, default: "SUBMITTED" },
@@ -254,26 +254,26 @@ export function findUploadedDocMatchingRequired(uploadedDocs, requiredType) {
 }
 
 // Helper function to get required document types based on loan type
-ApplicationSchema.methods.getRequiredDocTypes = function() {
+ApplicationSchema.methods.getRequiredDocTypes = function () {
   const baseDocs = ["PAN", "AADHAR_FRONT", "AADHAR_BACK"];
-  
+
   if (this.loanType === "PERSONAL" || this.loanType === "HOME_LOAN_SALARIED") {
     return [...baseDocs, "SALARY_SLIP_1", "BANK_STATEMENT"];
   } else if (this.loanType === "BUSINESS" || this.loanType === "HOME_LOAN_SELF_EMPLOYED") {
     return [...baseDocs, "BANK_STATEMENT", "GST_CERTIFICATE"];
   }
-  
+
   return baseDocs;
 };
 
 // Helper function to check if all required documents are verified
-ApplicationSchema.methods.areAllDocumentsVerified = function() {
+ApplicationSchema.methods.areAllDocumentsVerified = function () {
   const requiredDocTypes = this.getRequiredDocTypes();
   const uploadedDocs = this.docs || [];
 
   // If there are no uploaded documents, do not allow completion.
   if (!uploadedDocs.length) return false;
-  
+
   // Check if all required documents exist and are verified
   for (const docType of requiredDocTypes) {
     const doc = findUploadedDocMatchingRequired(uploadedDocs, docType);

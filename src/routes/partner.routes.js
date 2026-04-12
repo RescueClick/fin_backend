@@ -2600,7 +2600,10 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       },
     ]);
 
-    const targetValue = targetDoc ? Number(targetDoc.targetValue) : 0;
+    const targetValue = targetDoc
+      ? Number(targetDoc.disbursementTarget || targetDoc.targetValue || 0)
+      : 0;
+    const fileTarget = targetDoc ? Number(targetDoc.fileCountTarget || 0) : 0;
     const achievedValue =
       achievedAgg.length > 0 ? Number(achievedAgg[0].total) : 0;
 

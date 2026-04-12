@@ -80,8 +80,8 @@ router.post(
           emailTaken && phoneTaken
             ? "Email and phone number already in use"
             : emailTaken
-            ? "Email already in use"
-            : "Phone number already in use";
+              ? "Email already in use"
+              : "Phone number already in use";
         return res.status(409).json({ message, field });
       }
 
@@ -198,11 +198,11 @@ router.get("/get-rm", auth, requireRole(ROLES.ASM), async (req, res) => {
       const businessHomeRsm = rm.businessHomeRsmId;
 
       // Store original IDs before destructuring
-      const originalPersonalRsmId = typeof rm.personalRsmId === 'object' && rm.personalRsmId?._id 
-        ? rm.personalRsmId._id 
+      const originalPersonalRsmId = typeof rm.personalRsmId === 'object' && rm.personalRsmId?._id
+        ? rm.personalRsmId._id
         : rm.personalRsmId;
-      const originalBusinessHomeRsmId = typeof rm.businessHomeRsmId === 'object' && rm.businessHomeRsmId?._id 
-        ? rm.businessHomeRsmId._id 
+      const originalBusinessHomeRsmId = typeof rm.businessHomeRsmId === 'object' && rm.businessHomeRsmId?._id
+        ? rm.businessHomeRsmId._id
         : rm.businessHomeRsmId;
 
       // Extract base RM data without populated objects
@@ -720,10 +720,10 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
       {
         $group: {
           _id: { month: { $month: "$updatedAt" } },
-          totalAchieved: { 
-            $sum: { 
-              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0] 
-            } 
+          totalAchieved: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0]
+            }
           },
           totalFiles: { $sum: 1 },
         },
@@ -752,9 +752,9 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
       const t = targetDoc?.disbursementTarget || 0;
       const a =
         monthlyAchieved.find((m) => m._id.month === month)?.totalAchieved || 0;
-      return { 
-        month: monthNames[i], 
-        target: t, 
+      return {
+        month: monthNames[i],
+        target: t,
         achieved: a,
         fileCountTarget: targetDoc?.fileCountTarget || 0,
         achievedFileCount: monthlyAchieved.find((m) => m._id.month === month)?.totalFiles || 0,
@@ -851,8 +851,8 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
         achievedDisbursement: currentMonthAchievedDisbursement,
         fileTargetMet: currentMonthAchievedFileCount >= (asmTarget?.fileCountTarget || 0),
         disbursementTargetMet: currentMonthAchievedDisbursement >= (asmTarget?.disbursementTarget || 0),
-        targetAchieved: currentMonthAchievedFileCount >= (asmTarget?.fileCountTarget || 0) && 
-                       currentMonthAchievedDisbursement >= (asmTarget?.disbursementTarget || 0),
+        targetAchieved: currentMonthAchievedFileCount >= (asmTarget?.fileCountTarget || 0) &&
+          currentMonthAchievedDisbursement >= (asmTarget?.disbursementTarget || 0),
       },
       targets, // 12-month breakdown
       topRSMPerformers,
@@ -877,11 +877,11 @@ router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.ASM), async (req, re
 
     // Verify RSM exists and belongs to this ASM
     // Check both direct asmId match and also verify through relationship
-    const rsm = await User.findOne({ 
-      _id: rsmId, 
-      role: ROLES.RSM 
+    const rsm = await User.findOne({
+      _id: rsmId,
+      role: ROLES.RSM
     }).lean();
-    
+
     if (!rsm) {
       return res.status(404).json({ message: "RSM not found" });
     }
@@ -894,8 +894,8 @@ router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.ASM), async (req, re
       rsm.asmId = asmId;
     } else if (rsm.asmId.toString() !== asmId.toString()) {
       // RSM has asmId but it doesn't match - deny access
-      return res.status(403).json({ 
-        message: "Access denied. RSM does not belong to this ASM." 
+      return res.status(403).json({
+        message: "Access denied. RSM does not belong to this ASM."
       });
     }
 
@@ -924,15 +924,15 @@ router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.ASM), async (req, re
         { partnerId: { $in: partnerIds } }
       ]
     });
-    
-    const disbursedApplications = await Application.countDocuments({ 
+
+    const disbursedApplications = await Application.countDocuments({
       $or: [
         { rsmId: rsmId, status: "DISBURSED" },
         { rmId: { $in: rmIds }, status: "DISBURSED" },
         { partnerId: { $in: partnerIds }, status: "DISBURSED" }
       ]
     });
-    
+
     const inProcessApplications = await Application.countDocuments({
       $or: [
         { rsmId: rsmId, status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] } },
@@ -966,17 +966,17 @@ router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.ASM), async (req, re
     const now = new Date();
     const currentMonth = now.getMonth() + 1;
     const currentYear = now.getFullYear();
-    
+
     const targetDoc = await Target.findOne({
       assignedTo: rsmId,
       role: ROLES.RSM,
       month: currentMonth,
       year: currentYear,
     }).lean();
-    
+
     // Get target value - prefer disbursementTarget, fallback to targetValue
     const targetValue = targetDoc ? Number(targetDoc.disbursementTarget || targetDoc.targetValue || 0) : 0;
-    
+
     // Calculate achieved value for current month
     const currentMonthAchievedAgg = await Application.aggregate([
       {
@@ -1129,7 +1129,7 @@ router.get("/rsms/follow-ups", auth, requireRole(ROLES.ASM), async (req, res) =>
     const rsmIds = rsms.map((rsm) => rsm._id);
 
     const FollowUp = (await import("../models/followUp.js")).FollowUp;
-    
+
     // Get latest follow-up for each RSM
     const followUps = await FollowUp.find({
       targetId: { $in: rsmIds },
@@ -1163,16 +1163,16 @@ router.get("/rsms/follow-ups", auth, requireRole(ROLES.ASM), async (req, res) =>
         },
         followUp: followUp
           ? {
-              status: followUp.status,
-              remarks: followUp.remarks,
-              lastCall: followUp.lastCall,
-              updatedBy: followUp.updatedBy
-                ? {
-                    name: `${followUp.updatedBy.firstName} ${followUp.updatedBy.lastName}`,
-                    employeeId: followUp.updatedBy.employeeId,
-                  }
-                : null,
-            }
+            status: followUp.status,
+            remarks: followUp.remarks,
+            lastCall: followUp.lastCall,
+            updatedBy: followUp.updatedBy
+              ? {
+                name: `${followUp.updatedBy.firstName} ${followUp.updatedBy.lastName}`,
+                employeeId: followUp.updatedBy.employeeId,
+              }
+              : null,
+          }
           : null,
       };
     });
@@ -1382,7 +1382,7 @@ router.post("/payouts/approve", auth, requireRole(ROLES.ASM), async (req, res) =
     const asmId = req.user.sub;
     const partners = await User.find({ role: ROLES.PARTNER }).lean();
     const partnerIds = partners.map((p) => p._id);
-    
+
     // Get all RSMs under this ASM
     const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
     const rsmIds = rsms.map((rsm) => rsm._id);
@@ -1569,30 +1569,28 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
       );
 
       return {
-      customerId: app.customerId?._id,
-      customerEmployeeId: app.customerId?.employeeId || null,
-      customerName: `${app.customerId?.firstName ?? ""} ${
-        app.customerId?.lastName ?? ""
-      }`.trim(),
-      contact: app.customerId?.phone || null,
-      email: app.customerId?.email || null,
-      loanType: app.loanType,
-      requestedAmount: app.customer?.loanAmount || null,
-      approvedAmount: app.approvedLoanAmount || null,
-      status: app.status,
-      payOutStatus: payout?.payOutStatus || "PENDING",
-      payoutAmount: payout?.amount || 0,
-      partner: {
-        partnerId: app.partnerId?._id,
-        name: `${app.partnerId?.firstName ?? ""} ${
-          app.partnerId?.lastName ?? ""
-        }`.trim(),
-        email: app.partnerId?.email,
-        phone: app.partnerId?.phone,
-      },
-      applicationId: app._id,
-      createdAt: app.createdAt,
-    };
+        customerId: app.customerId?._id,
+        customerEmployeeId: app.customerId?.employeeId || null,
+        customerName: `${app.customerId?.firstName ?? ""} ${app.customerId?.lastName ?? ""
+          }`.trim(),
+        contact: app.customerId?.phone || null,
+        email: app.customerId?.email || null,
+        loanType: app.loanType,
+        requestedAmount: app.customer?.loanAmount || null,
+        approvedAmount: app.approvedLoanAmount || null,
+        status: app.status,
+        payOutStatus: payout?.payOutStatus || "PENDING",
+        payoutAmount: payout?.amount || 0,
+        partner: {
+          partnerId: app.partnerId?._id,
+          name: `${app.partnerId?.firstName ?? ""} ${app.partnerId?.lastName ?? ""
+            }`.trim(),
+          email: app.partnerId?.email,
+          phone: app.partnerId?.phone,
+        },
+        applicationId: app._id,
+        createdAt: app.createdAt,
+      };
     });
 
     return res.json(customers);
@@ -1664,9 +1662,8 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.ASM), async (req, 
         return {
           customerId: app.customerId?._id,
           customerEmployeeId: app.customerId?.employeeId || null,
-          customerName: `${app.customerId?.firstName ?? ""} ${
-            app.customerId?.lastName ?? ""
-          }`.trim(),
+          customerName: `${app.customerId?.firstName ?? ""} ${app.customerId?.lastName ?? ""
+            }`.trim(),
           contact: app.customerId?.phone || null,
           email: app.customerId?.email || null,
           loanType: app.loanType,
@@ -1677,9 +1674,8 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.ASM), async (req, 
           payoutAmount: payout?.amount || 0,
           partner: {
             partnerId: app.partnerId?._id,
-            name: `${app.partnerId?.firstName ?? ""} ${
-              app.partnerId?.lastName ?? ""
-            }`.trim(),
+            name: `${app.partnerId?.firstName ?? ""} ${app.partnerId?.lastName ?? ""
+              }`.trim(),
             email: app.partnerId?.email,
             phone: app.partnerId?.phone,
           },
@@ -1923,7 +1919,7 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
     const currentDate = new Date();
     const targetMonth = month ? Number(month) : currentDate.getMonth() + 1;
     const targetYear = year ? Number(year) : currentDate.getFullYear();
-    
+
     const startDate = new Date(targetYear, targetMonth - 1, 1);
     const endDate = new Date(targetYear, targetMonth, 1);
 
@@ -1958,7 +1954,7 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       const target = partnerTargets[0] || {};
       const fileCountTarget = target.fileCountTarget || 4; // Default 4 files
       const disbursementTarget = target.disbursementTarget || target.targetValue || 2000000; // Default ₹20L
-      
+
       // Calculate achievements
       const achievedFileCount = partnerApps.length;
       const achievedDisbursement = partnerApps
@@ -1980,13 +1976,13 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       const targetExceeded = disbursementTargetExceeded;
 
       // Calculate percentages
-      const fileAchievementPercentage = fileCountTarget > 0 
-        ? (achievedFileCount / fileCountTarget) * 100 
+      const fileAchievementPercentage = fileCountTarget > 0
+        ? (achievedFileCount / fileCountTarget) * 100
         : 0;
-      const disbursementAchievementPercentage = disbursementTarget > 0 
-        ? (achievedDisbursement / disbursementTarget) * 100 
+      const disbursementAchievementPercentage = disbursementTarget > 0
+        ? (achievedDisbursement / disbursementTarget) * 100
         : 0;
-      
+
       // Overall achievement percentage (minimum of both)
       const overallAchievementPercentage = Math.min(
         fileAchievementPercentage,
@@ -2799,9 +2795,9 @@ router.post(
       // Verify RM is under ASM's hierarchy (through RSM)
       const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
       const rsmIds = rsms.map((r) => r._id);
-      
+
       const isUnderAsm = rm.personalRsmId && rsmIds.some(id => id.toString() === rm.personalRsmId.toString()) ||
-                         rm.businessHomeRsmId && rsmIds.some(id => id.toString() === rm.businessHomeRsmId.toString());
+        rm.businessHomeRsmId && rsmIds.some(id => id.toString() === rm.businessHomeRsmId.toString());
 
       if (!isUnderAsm) {
         return res.status(403).json({ message: "Partner is not under your ASM hierarchy" });
@@ -3248,8 +3244,8 @@ router.get("/:id/analytics", auth, requireRole(ROLES.ASM), async (req, res) => {
 
     // ✅ HIERARCHICAL ACCESS CONTROL: ASM can only view RSM analytics
     if (user.role !== ROLES.RSM) {
-      return res.status(403).json({ 
-        message: "Access denied. ASM can only view RSM analytics." 
+      return res.status(403).json({
+        message: "Access denied. ASM can only view RSM analytics."
       });
     }
 
@@ -3261,8 +3257,8 @@ router.get("/:id/analytics", auth, requireRole(ROLES.ASM), async (req, res) => {
       user.asmId = asmId;
     } else if (user.asmId.toString() !== asmId.toString()) {
       // RSM has asmId but it doesn't match - deny access
-      return res.status(403).json({ 
-        message: "Access denied. RSM does not belong to this ASM." 
+      return res.status(403).json({
+        message: "Access denied. RSM does not belong to this ASM."
       });
     }
 

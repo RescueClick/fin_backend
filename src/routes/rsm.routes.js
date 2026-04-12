@@ -251,8 +251,8 @@ router.post(
           emailTaken && phoneTaken
             ? "Email and phone number already in use"
             : emailTaken
-            ? "Email already in use"
-            : "Phone number already in use";
+              ? "Email already in use"
+              : "Phone number already in use";
         return res.status(409).json({ message, field });
       }
 
@@ -387,7 +387,7 @@ router.post(
 
       if (!RSM_ALLOWED_STATUSES.includes(to)) {
         return res.status(403).json({
-            message: `RSM can only transition to processing statuses: ${RSM_ALLOWED_STATUSES.join(", ")}. Document statuses are handled by RM.`
+          message: `RSM can only transition to processing statuses: ${RSM_ALLOWED_STATUSES.join(", ")}. Document statuses are handled by RM.`
         });
       }
 
@@ -423,9 +423,8 @@ router.post(
 
       if (!allowedTransitions[currentStatus]?.includes(to)) {
         return res.status(400).json({
-          message: `Cannot transition from ${currentStatus} to ${to}. Allowed transitions: ${
-            allowedTransitions[currentStatus]?.join(", ") || "none"
-          }`,
+          message: `Cannot transition from ${currentStatus} to ${to}. Allowed transitions: ${allowedTransitions[currentStatus]?.join(", ") || "none"
+            }`,
         });
       }
 
@@ -713,7 +712,7 @@ router.get(
       );
       if (!doc) {
         console.error(`Document not found: docType=${docType}, available docs:`, app.docs.map(d => d.docType));
-        return res.status(404).json({ 
+        return res.status(404).json({
           message: "Document not found",
           docType: docType,
           availableDocTypes: app.docs.map(d => d.docType)
@@ -722,7 +721,7 @@ router.get(
 
       if (!doc.url || doc.url.trim() === "") {
         console.error(`Document URL is empty: docType=${docType}, docId=${doc._id}`);
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: "Document URL is empty or invalid",
           docType: docType
         });
@@ -731,28 +730,28 @@ router.get(
       let filename;
       let contentType;
       const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
-      
+
       // Get the actual file URL (remove backend URL prefix if present)
       let actualUrl = doc.url.trim();
       if (actualUrl.startsWith(backendUrl)) {
         // Strip backend URL prefix to get the actual path
         actualUrl = actualUrl.replace(backendUrl, "").replace(/^\/+/, "");
       }
-      
+
       console.log(`RSM downloading document: docType=${docType}, actualUrl=${actualUrl.substring(0, 100)}...`);
 
       // Check if it's a remote URL (S3, external CDN, etc.)
       if (actualUrl.startsWith("http://") || actualUrl.startsWith("https://")) {
         // 🔹 Remote URL (S3, CDN, etc.)
         try {
-          const response = await axios.get(actualUrl, { 
+          const response = await axios.get(actualUrl, {
             responseType: "stream",
             timeout: 30000, // 30 second timeout
             maxRedirects: 5
           });
-          
+
           contentType = response.headers["content-type"] || "application/octet-stream";
-          
+
           // Try to get extension from URL or Content-Type
           let ext = "";
           try {
@@ -770,18 +769,18 @@ router.get(
               ext = "";
             }
           }
-          
+
           filename = `${docType}${ext}`;
-          
+
           res.setHeader(
             "Content-Disposition",
             `attachment; filename="${filename}"`
           );
           res.setHeader("Content-Type", contentType);
           res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
-          
+
           response.data.pipe(res);
-          
+
           response.data.on("error", (err) => {
             console.error("Stream error:", err);
             if (!res.headersSent) {
@@ -797,10 +796,10 @@ router.get(
             statusText: axiosErr.response?.statusText,
           });
           if (!res.headersSent) {
-            const errorMsg = axiosErr.response?.status 
+            const errorMsg = axiosErr.response?.status
               ? `Remote server returned ${axiosErr.response.status}: ${axiosErr.response.statusText || axiosErr.message}`
               : `Error downloading document from remote server: ${axiosErr.message}`;
-            return res.status(500).json({ 
+            return res.status(500).json({
               message: errorMsg,
               error: axiosErr.message,
               code: axiosErr.code
@@ -810,27 +809,27 @@ router.get(
       } else {
         // 🔹 Local file
         const filePath = path.resolve(process.cwd(), actualUrl);
-        
+
         console.log(`Checking local file: ${filePath}`);
-        
+
         if (!fs.existsSync(filePath)) {
           console.error(`Local file not found: ${filePath}`);
-          return res.status(404).json({ 
+          return res.status(404).json({
             message: "File not found on server",
             path: actualUrl,
             resolvedPath: filePath
           });
         }
-        
+
         const stats = fs.statSync(filePath);
         if (!stats.isFile()) {
           console.error(`Path is not a file: ${filePath}`);
-          return res.status(404).json({ 
+          return res.status(404).json({
             message: "Path is not a file",
             path: actualUrl
           });
         }
-        
+
         const ext = path.extname(filePath);
         filename = `${docType}${ext}`;
         contentType = mime.lookup(ext) || "application/octet-stream";
@@ -842,10 +841,10 @@ router.get(
         res.setHeader("Content-Type", contentType);
         res.setHeader("Content-Length", stats.size);
         res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
-        
+
         const fileStream = fs.createReadStream(filePath);
         fileStream.pipe(res);
-        
+
         fileStream.on("error", (err) => {
           console.error("File stream error:", err);
           if (!res.headersSent) {
@@ -856,9 +855,9 @@ router.get(
     } catch (err) {
       console.error("RSM Download error:", err);
       if (!res.headersSent) {
-        res.status(500).json({ 
+        res.status(500).json({
           message: "Error downloading document",
-          error: err.message 
+          error: err.message
         });
       }
     }
@@ -990,10 +989,10 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       {
         $group: {
           _id: null,
-          totalDisbursement: { 
-            $sum: { 
-              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0] 
-            } 
+          totalDisbursement: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0]
+            }
           },
           totalFiles: { $sum: 1 },
         },
@@ -1025,10 +1024,10 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       {
         $group: {
           _id: { month: { $month: "$updatedAt" } },
-          totalAchieved: { 
-            $sum: { 
-              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0] 
-            } 
+          totalAchieved: {
+            $sum: {
+              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0]
+            }
           },
           totalFiles: { $sum: 1 },
         },
@@ -1047,9 +1046,9 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       const t = targetDoc?.disbursementTarget || 0;
       const a =
         monthlyAchieved.find((m) => m._id.month === month)?.totalAchieved || 0;
-      return { 
-        month: monthNames[i], 
-        target: t, 
+      return {
+        month: monthNames[i],
+        target: t,
         achieved: a,
         fileCountTarget: targetDoc?.fileCountTarget || 0,
         achievedFileCount: monthlyAchieved.find((m) => m._id.month === month)?.totalFiles || 0,
@@ -1137,8 +1136,8 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
         achievedDisbursement: currentMonthAchievedDisbursement,
         fileTargetMet: currentMonthAchievedFileCount >= (rsmTarget?.fileCountTarget || 0),
         disbursementTargetMet: currentMonthAchievedDisbursement >= (rsmTarget?.disbursementTarget || 0),
-        targetAchieved: currentMonthAchievedFileCount >= (rsmTarget?.fileCountTarget || 0) && 
-                       currentMonthAchievedDisbursement >= (rsmTarget?.disbursementTarget || 0),
+        targetAchieved: currentMonthAchievedFileCount >= (rsmTarget?.fileCountTarget || 0) &&
+          currentMonthAchievedDisbursement >= (rsmTarget?.disbursementTarget || 0),
       },
       targets, // 12-month breakdown
       topPerformers,
@@ -1361,7 +1360,7 @@ router.get("/rm/:rmId/analytics", auth, requireRole(ROLES.RSM), async (req, res)
       role: ROLES.RM,
       ...scope,
     }).lean();
-    
+
     if (!rm) {
       return res.status(404).json({ message: "RM not found or not under this RSM" });
     }
@@ -1381,15 +1380,15 @@ router.get("/rm/:rmId/analytics", auth, requireRole(ROLES.RSM), async (req, res)
         { partnerId: { $in: partnerIds } }
       ]
     });
-    
-    const disbursedApplications = await Application.countDocuments({ 
+
+    const disbursedApplications = await Application.countDocuments({
       $or: [
         { rmId },
         { partnerId: { $in: partnerIds } }
       ],
-      status: "DISBURSED" 
+      status: "DISBURSED"
     });
-    
+
     const inProcessApplications = await Application.countDocuments({
       $or: [
         { rmId },
@@ -1422,17 +1421,17 @@ router.get("/rm/:rmId/analytics", auth, requireRole(ROLES.RSM), async (req, res)
     const now = new Date();
     const currentMonth = now.getMonth() + 1;
     const currentYear = now.getFullYear();
-    
+
     const targetDoc = await Target.findOne({
       assignedTo: rmId,
       role: ROLES.RM,
       month: currentMonth,
       year: currentYear,
     }).lean();
-    
+
     // Get target value - prefer disbursementTarget, fallback to targetValue
     const targetValue = targetDoc ? Number(targetDoc.disbursementTarget || targetDoc.targetValue || 0) : 0;
-    
+
     // Calculate achieved value for current month
     const currentMonthAchievedAgg = await Application.aggregate([
       {
@@ -1489,7 +1488,7 @@ router.get("/rm/:rmId/analytics", auth, requireRole(ROLES.RSM), async (req, res)
         { partnerId: { $in: partnerIds } }
       ]
     });
-    
+
     res.json({
       profile: {
         userId: rm._id,
@@ -1539,7 +1538,7 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM), async (req, res
       role: ROLES.RM,
       ...scope,
     });
-    
+
     if (!rm) {
       return res.status(404).json({ message: "RM not found or not under this RSM" });
     }
@@ -1587,7 +1586,7 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM), async (req, res) => 
     const rmIds = rms.map((rm) => rm._id);
 
     const FollowUp = (await import("../models/followUp.js")).FollowUp;
-    
+
     // Get latest follow-up for each RM
     const followUps = await FollowUp.find({
       targetId: { $in: rmIds },
@@ -1620,16 +1619,16 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM), async (req, res) => 
         },
         followUp: followUp
           ? {
-              status: followUp.status,
-              remarks: followUp.remarks,
-              lastCall: followUp.lastCall,
-              updatedBy: followUp.updatedBy
-                ? {
-                    name: `${followUp.updatedBy.firstName} ${followUp.updatedBy.lastName}`,
-                    employeeId: followUp.updatedBy.employeeId,
-                  }
-                : null,
-            }
+            status: followUp.status,
+            remarks: followUp.remarks,
+            lastCall: followUp.lastCall,
+            updatedBy: followUp.updatedBy
+              ? {
+                name: `${followUp.updatedBy.firstName} ${followUp.updatedBy.lastName}`,
+                employeeId: followUp.updatedBy.employeeId,
+              }
+              : null,
+          }
           : null,
       };
     });
