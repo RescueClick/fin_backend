@@ -4338,7 +4338,7 @@ router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
 
     // Get target for this partner
     const target = await Target.findOne({
-      assignedTo: partnerId,
+      assignedTo: new mongoose.Types.ObjectId(partnerId),
       role: ROLES.PARTNER,
       month: targetMonth,
       year: targetYear,
@@ -4349,7 +4349,7 @@ router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     const endDate = new Date(targetYear, targetMonth, 1);
 
     const relevantApps = await Application.find({
-      partnerId: partnerId,
+      partnerId: new mongoose.Types.ObjectId(partnerId),
       status: { $ne: "DRAFT" }, // Count all submitted/processed files
       updatedAt: {
         $gte: startDate,
