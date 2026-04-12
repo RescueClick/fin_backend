@@ -4988,223 +4988,66 @@ router.get(
 
 // POST /api/admin/target/assign-new-users
 // Assign targets only to users who don't have target entries for selected month/year.
+// POST /api/admin/target/assign-new-users
+// Industry standard approach for Top-Down models: 
+// Re-distributes the existing Company Target across the updated hierarchy (including new joiners).
 router.post(
   "/target/assign-new-users",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const { month, year, prorateByJoinDate = true } = req.body || {};
+      const { month, year } = req.body || {};
       const targetMonth = Number(month);
       const targetYear = Number(year);
-      const adminId = req.user.sub;
-      const shouldProrate = Boolean(prorateByJoinDate);
 
       if (!targetMonth || !targetYear) {
         return res.status(400).json({ message: "Month and year are required" });
       }
-      if (targetMonth < 1 || targetMonth > 12) {
-        return res.status(400).json({ message: "Invalid month value" });
+
+      const { deriveCurrentTargetContext, rebalanceHierarchyTargetsReplace } = await import("../utils/targetRebalanceService.js");
+      
+      // Step 1: Detect current target context (Total Company Target already set by Admin)
+      const context = await deriveCurrentTargetContext(targetMonth, targetYear);
+      
+      if (!context.totalCompanyTarget || context.totalCompanyTarget <= 0) {
+        return res.status(400).json({ 
+          message: `No base target found for ${new Date(0, targetMonth - 1).toLocaleString('en-US', { month: 'long' })} ${targetYear}. Please set a company target first.` 
+        });
       }
 
-      const daysInTargetMonth = new Date(targetYear, targetMonth, 0).getDate();
-      const monthStart = new Date(targetYear, targetMonth - 1, 1);
-      const monthEnd = new Date(targetYear, targetMonth, 0);
-      const calcProrationRatio = (joinDate) => {
-        if (!shouldProrate) return 1;
-        if (!(joinDate instanceof Date) || Number.isNaN(joinDate.getTime())) return 1;
-        if (joinDate < monthStart || joinDate > monthEnd) return 1;
-        const remainingDays = Math.max(1, daysInTargetMonth - joinDate.getDate() + 1);
-        return Number((remainingDays / daysInTargetMonth).toFixed(6));
-      };
-
-      const [asms, rsms, rms, partners, targets] = await Promise.all([
-        User.find({ role: ROLES.ASM }).lean(),
-        User.find({ role: ROLES.RSM }).lean(),
-        User.find({ role: ROLES.RM }).lean(),
-        User.find({ role: ROLES.PARTNER }).lean(),
-        Target.find({
-          month: targetMonth,
-          year: targetYear,
-          role: { $in: [ROLES.ASM, ROLES.RSM, ROLES.RM, ROLES.PARTNER] },
-        }).lean(),
-      ]);
-
-      const targetMap = new Map(
-        targets.map((t) => [`${t.role}:${String(t.assignedTo)}`, t])
-      );
-
-      const avg = (rows, picker) => {
-        if (!rows.length) return 0;
-        const total = rows.reduce((sum, row) => sum + Number(picker(row) || 0), 0);
-        return Number((total / rows.length).toFixed(2));
-      };
-
-      const asmAvg = avg(
-        targets.filter((t) => t.role === ROLES.ASM),
-        (t) => t.disbursementTarget || t.targetValue
-      );
-      const rsmAvg = avg(
-        targets.filter((t) => t.role === ROLES.RSM),
-        (t) => t.disbursementTarget || t.targetValue
-      );
-      const rmAvg = avg(
-        targets.filter((t) => t.role === ROLES.RM),
-        (t) => t.disbursementTarget || t.targetValue
-      );
-      const partnerAvg = avg(
-        targets.filter((t) => t.role === ROLES.PARTNER),
-        (t) => t.disbursementTarget || t.targetValue
-      );
-      const partnerFileAvg = Math.max(
-        1,
-        Math.round(
-          avg(
-            targets.filter((t) => t.role === ROLES.PARTNER),
-            (t) => t.fileCountTarget || 0
-          )
-        )
-      );
-
-      const assignments = [];
-      const summary = {
-        asmAssigned: 0,
-        rsmAssigned: 0,
-        rmAssigned: 0,
-        partnerAssigned: 0,
-      };
-      const assignmentBreakdown = [];
-
-      for (const u of asms) {
-        if (targetMap.has(`${ROLES.ASM}:${String(u._id)}`)) continue;
-        const effectiveJoinDate = u.joinDate || u.createdAt;
-        const ratio = calcProrationRatio(effectiveJoinDate);
-        const proratedTarget = Number((asmAvg * ratio).toFixed(2));
-        const doc = await Target.create({
-          assignedBy: adminId,
-          assignedTo: u._id,
-          role: ROLES.ASM,
-          month: targetMonth,
-          year: targetYear,
-          fileCountTarget: 0,
-          disbursementTarget: proratedTarget,
-          targetValue: proratedTarget,
-          isCalculated: true,
-        });
-        assignments.push(doc);
-        assignmentBreakdown.push({
-          userId: u._id,
-          role: ROLES.ASM,
-          joinDate: effectiveJoinDate,
-          prorationRatio: ratio,
-          assignedDisbursementTarget: proratedTarget,
-          assignedFileCountTarget: 0,
-        });
-        summary.asmAssigned += 1;
-      }
-
-      for (const u of rsms) {
-        if (targetMap.has(`${ROLES.RSM}:${String(u._id)}`)) continue;
-        const effectiveJoinDate = u.joinDate || u.createdAt;
-        const ratio = calcProrationRatio(effectiveJoinDate);
-        const proratedTarget = Number((rsmAvg * ratio).toFixed(2));
-        const doc = await Target.create({
-          assignedBy: adminId,
-          assignedTo: u._id,
-          role: ROLES.RSM,
-          month: targetMonth,
-          year: targetYear,
-          fileCountTarget: 0,
-          disbursementTarget: proratedTarget,
-          targetValue: proratedTarget,
-          isCalculated: true,
-        });
-        assignments.push(doc);
-        assignmentBreakdown.push({
-          userId: u._id,
-          role: ROLES.RSM,
-          joinDate: effectiveJoinDate,
-          prorationRatio: ratio,
-          assignedDisbursementTarget: proratedTarget,
-          assignedFileCountTarget: 0,
-        });
-        summary.rsmAssigned += 1;
-      }
-
-      for (const u of rms) {
-        if (targetMap.has(`${ROLES.RM}:${String(u._id)}`)) continue;
-        const effectiveJoinDate = u.joinDate || u.createdAt;
-        const ratio = calcProrationRatio(effectiveJoinDate);
-        const proratedTarget = Number((rmAvg * ratio).toFixed(2));
-        const doc = await Target.create({
-          assignedBy: adminId,
-          assignedTo: u._id,
-          role: ROLES.RM,
-          month: targetMonth,
-          year: targetYear,
-          fileCountTarget: 0,
-          disbursementTarget: proratedTarget,
-          targetValue: proratedTarget,
-          isCalculated: true,
-        });
-        assignments.push(doc);
-        assignmentBreakdown.push({
-          userId: u._id,
-          role: ROLES.RM,
-          joinDate: effectiveJoinDate,
-          prorationRatio: ratio,
-          assignedDisbursementTarget: proratedTarget,
-          assignedFileCountTarget: 0,
-        });
-        summary.rmAssigned += 1;
-      }
-
-      for (const u of partners) {
-        if (targetMap.has(`${ROLES.PARTNER}:${String(u._id)}`)) continue;
-        const effectiveJoinDate = u.joinDate || u.createdAt;
-        const ratio = calcProrationRatio(effectiveJoinDate);
-        const proratedDisbursementTarget = Number((partnerAvg * ratio).toFixed(2));
-        const proratedFileCountTarget = Math.max(
-          1,
-          Math.round(partnerFileAvg * ratio)
-        );
-        const doc = await Target.create({
-          assignedBy: adminId,
-          assignedTo: u._id,
-          role: ROLES.PARTNER,
-          month: targetMonth,
-          year: targetYear,
-          fileCountTarget: proratedFileCountTarget,
-          disbursementTarget: proratedDisbursementTarget,
-          targetValue: proratedDisbursementTarget,
-          isCalculated: false,
-        });
-        assignments.push(doc);
-        assignmentBreakdown.push({
-          userId: u._id,
-          role: ROLES.PARTNER,
-          joinDate: effectiveJoinDate,
-          prorationRatio: ratio,
-          assignedDisbursementTarget: proratedDisbursementTarget,
-          assignedFileCountTarget: proratedFileCountTarget,
-        });
-        summary.partnerAssigned += 1;
-      }
-
-      emitTargetUpdatesForDocs(global.io, assignments);
-
-      return res.status(201).json({
-        message: `Targets assigned to newly added users${shouldProrate ? " with proration" : ""}`,
+      // Step 2: Run hierarchical re-distribution
+      // This automatically picks up all current users (including new ones) and 
+      // divides the existing totalCompanyTarget equally among the updated hierarchy.
+      const result = await rebalanceHierarchyTargetsReplace({
         month: targetMonth,
         year: targetYear,
-        prorateByJoinDate: shouldProrate,
-        totalNewAssignments: assignments.length,
-        summary,
-        assignmentBreakdown,
+        totalCompanyTarget: context.totalCompanyTarget,
+        partnerFileCountTarget: context.partnerFileCountTarget,
+        assignedBy: context.assignedBy || req.user.sub,
+      });
+
+      const summary = result.distributionSummary || {};
+
+      // Emit real-time socket updates for all affected users
+      if (global.io && result.assignments.length > 0) {
+        const { emitTargetUpdatesForDocs } = await import("../utils/targetSocketEmitter.js");
+        emitTargetUpdatesForDocs(global.io, result.assignments);
+      }
+
+      return res.status(200).json({
+        message: "Hierarchy synchronized and new joiners assigned targets.",
+        totalNewAssignments: result.assignments.length,
+        summary: {
+          asmAssigned: summary.asmCount || 0,
+          rsmAssigned: summary.rsmCount || 0,
+          rmAssigned: summary.rmCount || 0,
+          partnerAssigned: summary.partnerCount || 0,
+        }
       });
     } catch (err) {
-      console.error("Assign new users targets error:", err);
-      return res.status(500).json({ message: "Server error", error: err.message });
+      console.error("Assign New Joiners Error:", err);
+      return res.status(500).json({ message: "Internal Server Error" });
     }
   }
 );
@@ -5266,9 +5109,8 @@ router.post(
         return mode === "add" ? existing + incoming : incoming;
       };
       const applyFileCountByMode = (existingValue, incomingValue) => {
-        const existing = Number(existingValue || 0);
-        const incoming = Number(incomingValue || 0);
-        return mode === "add" ? existing + incoming : incoming;
+        // File count target is always an absolute value (set/change), not additive.
+        return Number(incomingValue || 0);
       };
 
       if (targetMonth < 1 || targetMonth > 12) {

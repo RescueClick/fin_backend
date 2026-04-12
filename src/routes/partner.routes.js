@@ -134,8 +134,8 @@ const validateApplicationPayload = ({
   const refs = Array.isArray(references)
     ? references
     : references
-    ? [references]
-    : [];
+      ? [references]
+      : [];
 
   if (refs.length < 2) {
     errors.push("At least two references are required");
@@ -375,20 +375,20 @@ router.post(
       // Validate and format date of birth
       const formatDate = (dateString) => {
         if (!dateString) return null;
-        
+
         // Remove any whitespace
         dateString = dateString.trim();
-        
+
         // Try to parse the date in different formats
         let date;
-        
+
         // Format: YYYY-MM-DD (ISO format)
         if (/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
           const parts = dateString.split('-');
           const year = parseInt(parts[0]);
           const month = parseInt(parts[1]);
           const day = parseInt(parts[2]);
-          
+
           // Check if month is valid (1-12)
           if (month < 1 || month > 12) {
             // Might be DD-MM-YYYY format, swap day and month
@@ -421,24 +421,24 @@ router.post(
         else {
           date = new Date(dateString);
         }
-        
+
         // Validate the date
         if (isNaN(date.getTime())) {
           throw new Error(`Invalid date: ${dateString}. Please use format YYYY-MM-DD, DD-MM-YYYY, or DD/MM/YYYY`);
         }
-        
+
         // Check if date is reasonable (not in future, not too old)
         const today = new Date();
         const minDate = new Date(1900, 0, 1);
-        
+
         if (date > today) {
           throw new Error(`Date of birth cannot be in the future: ${dateString}`);
         }
-        
+
         if (date < minDate) {
           throw new Error(`Date of birth seems too old: ${dateString}`);
         }
-        
+
         // Return in ISO format (YYYY-MM-DD)
         return date.toISOString().split('T')[0];
       };
@@ -484,8 +484,8 @@ router.post(
           emailTaken && phoneTaken
             ? "Email and phone number already in use"
             : emailTaken
-            ? "Email already in use"
-            : "Phone number already in use";
+              ? "Email already in use"
+              : "Phone number already in use";
 
         return res.status(409).json({ message, field });
       }
@@ -606,14 +606,14 @@ router.post(
 
       // 🔔 Create notification for Admin about new partner registration
       try {
-        const adminUsers = await User.find({ 
+        const adminUsers = await User.find({
           role: { $in: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
           status: "ACTIVE"
         }).select("_id").lean();
-        
+
         if (adminUsers.length > 0) {
           const adminUserIds = adminUsers.map(u => u._id.toString());
-          
+
           await createNotificationsForUsers(adminUserIds, {
             type: "registration",
             title: "New Partner Registration",
@@ -940,12 +940,12 @@ router.post(
       if (!customerUser) {
         tempPassword =
           customer.password || `Cus@${Math.random().toString(36).slice(2, 10)}`;
-        
+
         // ✅ CRITICAL: Retry logic to handle duplicate employeeId race conditions
         let retries = 0;
         const maxRetries = 5;
         let created = false;
-        
+
         while (!created && retries < maxRetries) {
           try {
             const employeeId = await generateEmployeeId("CUSTOMER");
@@ -987,8 +987,8 @@ router.post(
       const docTypes = Array.isArray(req.body.docTypes)
         ? req.body.docTypes
         : req.body.docTypes
-        ? [req.body.docTypes]
-        : [];
+          ? [req.body.docTypes]
+          : [];
 
       if (req.files?.length) {
         const viol = oversizeDocBatchViolation(req.files, docTypes);
@@ -1053,8 +1053,8 @@ router.post(
       const refs = Array.isArray(references)
         ? references
         : references
-        ? [references]
-        : [];
+          ? [references]
+          : [];
 
       // Check for existing application
       let existingApp = await Application.findOne({
@@ -1154,7 +1154,7 @@ router.post(
       let appRetries = 0;
       const maxAppRetries = 5;
       let appCreated = false;
-      
+
       while (!appCreated && appRetries < maxAppRetries) {
         try {
           const appNo = await generateEmployeeId("APPLICATION");
@@ -1243,7 +1243,7 @@ router.post(
       }
 
       res.status(201).json({
-        message: emailSent 
+        message: emailSent
           ? "Application + Customer created and Email has been sent"
           : "Application + Customer created (Email sending failed, but application was saved)",
         id: app._id,
@@ -1368,7 +1368,7 @@ router.post(
         // If both first and last name are different, it's likely a different person using the same contact info.
         if (existingFirstName !== incomingFirstName || existingLastName !== incomingLastName) {
           const field = customerUser.email.toLowerCase() === customer.email.toLowerCase() ? "email" : "phone";
-          return res.status(409).json({ 
+          return res.status(409).json({
             message: `This ${field} is already registered to another customer: ${customerUser.firstName} ${customerUser.lastName}. Please use unique contact details for ${customer.firstName} or use the existing customer's registered name.`,
             existingCustomer: {
               name: `${customerUser.firstName} ${customerUser.lastName}`,
@@ -1384,12 +1384,12 @@ router.post(
       if (!customerUser) {
         tempPassword =
           customer.password || `Cus@${Math.random().toString(36).slice(2, 10)}`;
-        
+
         // ✅ CRITICAL: Retry logic to handle duplicate employeeId race conditions
         let retries = 0;
         const maxRetries = 5;
         let created = false;
-        
+
         while (!created && retries < maxRetries) {
           try {
             const employeeId = await generateEmployeeId("CUSTOMER");
@@ -1431,8 +1431,8 @@ router.post(
       const docTypes = Array.isArray(req.body.docTypes)
         ? req.body.docTypes
         : req.body.docTypes
-        ? [req.body.docTypes]
-        : [];
+          ? [req.body.docTypes]
+          : [];
 
       if (req.files?.length) {
         const viol = oversizeDocBatchViolation(req.files, docTypes);
@@ -1497,8 +1497,8 @@ router.post(
       const refs = Array.isArray(references)
         ? references
         : references
-        ? [references]
-        : [];
+          ? [references]
+          : [];
 
       // Check for existing application
       let existingApp = await Application.findOne({
@@ -1598,7 +1598,7 @@ router.post(
       let appRetries = 0;
       const maxAppRetries = 5;
       let appCreated = false;
-      
+
       while (!appCreated && appRetries < maxAppRetries) {
         try {
           const appNo = await generateEmployeeId("APPLICATION");
@@ -1687,7 +1687,7 @@ router.post(
       }
 
       res.status(201).json({
-        message: emailSent 
+        message: emailSent
           ? "Application + Customer created and Email has been sent"
           : "Application + Customer created (Email sending failed, but application was saved)",
         id: app._id,
@@ -1780,7 +1780,7 @@ router.post(
 
         if (existingFirstName !== incomingFirstName || existingLastName !== incomingLastName) {
           const field = customerUser.email.toLowerCase() === normalizedEmail ? "email" : "phone";
-          return res.status(409).json({ 
+          return res.status(409).json({
             message: `This ${field} is already registered to another customer: ${customerUser.firstName} ${customerUser.lastName}.`,
             existingCustomer: {
               name: `${customerUser.firstName} ${customerUser.lastName}`,
@@ -2239,7 +2239,7 @@ router.get(
           message: "Application not found or not accessible",
         });
       }
-      
+
       // Mask internal statuses for Partner:
       // - LOGIN is shown as DOC_COMPLETE
       const maskedStatus =
@@ -2263,9 +2263,9 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     const partnerId = req.user.sub; // Partner logged in
 
     // Find all applications under this Partner
-    const applications = await Application.find({ 
+    const applications = await Application.find({
       partnerId,
-      deletedAt: null 
+      deletedAt: null
     })
       .populate("customerId", "employeeId firstName lastName email phone")
       .populate("rmId", "firstName lastName email phone")
@@ -2289,7 +2289,7 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     const customers = applications.map((app) => ({
       customerId: app.customerId?._id,
       customerEmployeeId: app.customerId?.employeeId || null,
-      customerName: app.customer?.firstName 
+      customerName: app.customer?.firstName
         ? `${app.customer.firstName} ${app.customer.lastName || ""}`.trim()
         : `${app.customerId?.firstName ?? ""} ${app.customerId?.lastName ?? ""}`.trim(),
       contact: app.customerId?.phone || null,
@@ -2497,20 +2497,20 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       // Calculate which month we're looking for (i months ago)
       let targetMonth = currentMonth - i;
       let targetYear = currentYear;
-      
+
       // Handle year rollover
       while (targetMonth <= 0) {
         targetMonth += 12;
         targetYear -= 1;
       }
-      
+
       const monthName = monthNames[targetMonth - 1]; // monthNames is 0-indexed
-      
+
       // Find matching payout for this year-month combination
       const matchingPayout = monthlyPayoutAgg.find(
         (p) => p._id.year === targetYear && p._id.month === targetMonth
       );
-      
+
       last3MonthsPayouts.push({
         month: monthName,
         earning: matchingPayout ? matchingPayout.total : 0,
@@ -2694,7 +2694,7 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
 
     const currentMonthStart = new Date(currentYear, currentMonth - 1, 1);
     const currentMonthEnd = new Date(currentYear, currentMonth, 1);
-    
+
     // Get all non-draft applications for current month (for file count)
     const currentMonthRelevantApps = applications.filter((a) => {
       const appUpdatedAt = a.updatedAt || a.createdAt;
@@ -2707,7 +2707,7 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
 
     const currentFileCountTarget = currentMonthTarget?.fileCountTarget || 4;
     const currentDisbursementTarget = currentMonthTarget?.disbursementTarget || currentMonthTarget?.targetValue || 2000000;
-    
+
     const currentAchievedFileCount = currentMonthRelevantApps.length;
     const currentAchievedDisbursement = currentMonthRelevantApps
       .filter(a => a.status === "DISBURSED")
@@ -2827,16 +2827,16 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
         achievedDisbursement: currentAchievedDisbursement,
         fileTargetMet: currentAchievedFileCount >= currentFileCountTarget,
         disbursementTargetMet: currentAchievedDisbursement >= currentDisbursementTarget,
-        targetAchieved: currentAchievedFileCount >= currentFileCountTarget && 
-                       currentAchievedDisbursement >= currentDisbursementTarget,
+        targetAchieved: currentAchievedFileCount >= currentFileCountTarget &&
+          currentAchievedDisbursement >= currentDisbursementTarget,
       },
       rm: rm
         ? {
-            name: rm.firstName + " " + rm.lastName,
-            contact: rm.phone,
-            email: rm.email,
-            employeeId: rm.employeeId,
-          }
+          name: rm.firstName + " " + rm.lastName,
+          contact: rm.phone,
+          email: rm.email,
+          employeeId: rm.employeeId,
+        }
         : null,
       // monthlyPerformance,
       monthlyTargets,
@@ -2898,7 +2898,7 @@ router.get(
       }
 
       const payouts = await Payout.find(match)
-        .populate("application", "appNo loanType approvedLoanAmount createdAt")
+        .populate("application", "appNo loanType approvedLoanAmount createdAt customer")
         .sort({ createdAt: -1 })
         .lean();
 
@@ -2910,11 +2910,12 @@ router.get(
         createdAt: p.createdAt,
         application: p.application
           ? {
-              appNo: p.application.appNo || "",
-              loanType: p.application.loanType || "",
-              approvedLoanAmount: p.application.approvedLoanAmount || 0,
-              createdAt: p.application.createdAt,
-            }
+            appNo: p.application.appNo || "",
+            loanType: p.application.loanType || "",
+            approvedLoanAmount: p.application.approvedLoanAmount || 0,
+            createdAt: p.application.createdAt,
+            customer: p.application.customer,
+          }
           : null,
       }));
 
@@ -3125,19 +3126,19 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       /** Partner self-registration — same code as app invite; UTM for analytics */
       referralLink: partnerRefForShare
         ? appendPartnerShareUtm(
-            `${getReferralWebBaseUrl()}/${PARTNER_REGISTRATION_PATH_SEGMENT}?ref=${encodeURIComponent(partnerRefForShare)}`,
-            "web"
-          )
+          `${getReferralWebBaseUrl()}/${PARTNER_REGISTRATION_PATH_SEGMENT}?ref=${encodeURIComponent(partnerRefForShare)}`,
+          "web"
+        )
         : appendPartnerShareUtm(
-            `${getReferralWebBaseUrl()}/${PARTNER_REGISTRATION_PATH_SEGMENT}`,
-            "web"
-          ),
+          `${getReferralWebBaseUrl()}/${PARTNER_REGISTRATION_PATH_SEGMENT}`,
+          "web"
+        ),
       /** App invite landing — same code as ?ref= (legacy DB had partnerCode vs referralCode split). */
       appInviteLink: partnerRefForShare
         ? appendPartnerShareUtm(
-            `${getInviteBaseUrl()}/invite?code=${encodeURIComponent(partnerRefForShare)}`,
-            "invite"
-          )
+          `${getInviteBaseUrl()}/invite?code=${encodeURIComponent(partnerRefForShare)}`,
+          "invite"
+        )
         : null,
       status: partner.status,
 
@@ -3192,12 +3193,12 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
         },
         rm: pr
           ? {
-              id: pr._id,
-              employeeId: pr.employeeId || null,
-              name: `${pr.firstName} ${pr.lastName}`.trim(),
-              email: pr.email || null,
-              phone: pr.phone || null,
-            }
+            id: pr._id,
+            employeeId: pr.employeeId || null,
+            name: `${pr.firstName} ${pr.lastName}`.trim(),
+            email: pr.email || null,
+            phone: pr.phone || null,
+          }
           : null,
         personalRsm: personalRsmFmt,
         businessHomeRsm: businessRsmFmt,
@@ -3612,7 +3613,7 @@ router.patch(
 
       // Build update object with only provided fields
       const updateData = {};
-      
+
       if (bankName !== undefined) updateData.bankName = bankName;
       if (accountHolderName !== undefined) updateData.accountHolderName = accountHolderName;
       if (accountNumber !== undefined) updateData.accountNumber = accountNumber;
@@ -3760,7 +3761,7 @@ router.get(
         partnerId,
         createdAt: { $gte: monthStart, $lt: monthEnd },
       })
-        .populate("application", "appNo loanType loanAmount status")
+        .populate("application", "appNo loanType loanAmount status customer")
         .select("amount payOutStatus note createdAt application")
         .sort({ createdAt: -1 })
         .lean();
@@ -3956,7 +3957,7 @@ router.post(
 
       if (!req.file) {
         console.error('No file received in request');
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: "File is required",
           receivedFields: Object.keys(req.body || {}),
           contentType: req.headers['content-type'],
@@ -4038,7 +4039,7 @@ router.post(
       // If application was DOC_INCOMPLETE and partner is re-uploading, keep status as DOC_INCOMPLETE
       // (RM will review and change status accordingly)
       // If document was UPDATED and partner re-uploads, it stays UPDATED for RM review
-      
+
       await application.save();
 
       console.log('Document uploaded successfully:', {
@@ -4082,20 +4083,20 @@ router.post(
     } catch (err) {
       console.error("Error uploading document:", err);
       console.error("Error stack:", err.stack);
-      
+
       // Handle multer errors specifically
       if (err instanceof multer.MulterError || err.code === 'LIMIT_FILE_SIZE') {
         if (err.code === 'LIMIT_FILE_SIZE') {
-          return res.status(400).json({ 
-            message: "File too large. Maximum size is 20MB" 
+          return res.status(400).json({
+            message: "File too large. Maximum size is 20MB"
           });
         }
-        return res.status(400).json({ 
-          message: `Upload error: ${err.message}` 
+        return res.status(400).json({
+          message: `Upload error: ${err.message}`
         });
       }
-      
-      res.status(500).json({ 
+
+      res.status(500).json({
         message: err.message || "Internal server error",
         error: process.env.NODE_ENV === 'development' ? err.stack : undefined,
       });
@@ -4106,18 +4107,18 @@ router.post(
     if (err instanceof multer.MulterError) {
       console.error('Multer error:', err);
       if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ 
-          message: "File too large. Maximum size is 20MB" 
+        return res.status(400).json({
+          message: "File too large. Maximum size is 20MB"
         });
       }
-      return res.status(400).json({ 
-        message: `Upload error: ${err.message}` 
+      return res.status(400).json({
+        message: `Upload error: ${err.message}`
       });
     }
     if (err) {
       console.error('Upload middleware error:', err);
-      return res.status(400).json({ 
-        message: err.message || "File upload error" 
+      return res.status(400).json({
+        message: err.message || "File upload error"
       });
     }
     next();
@@ -4192,9 +4193,8 @@ router.get(
       const formatted = applications.map((app) => ({
         applicationId: app._id,
         customerId: app.customerId?._id,
-        customerName: `${app.customerId?.firstName || ""} ${
-          app.customerId?.lastName || ""
-        }`.trim(),
+        customerName: `${app.customerId?.firstName || ""} ${app.customerId?.lastName || ""
+          }`.trim(),
         contact: app.customerId?.phone || null,
         email: app.customerId?.email || null,
         loanType: app.loanType,
@@ -4359,7 +4359,7 @@ router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
 
     const fileCountTarget = target?.fileCountTarget || 4;
     const disbursementTarget = target?.disbursementTarget || 2000000;
-    
+
     const achievedFileCount = relevantApps.length;
     const achievedDisbursement = relevantApps
       .filter(app => app.status === "DISBURSED")
@@ -4374,11 +4374,11 @@ router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     const targetExceeded = fileTargetExceeded || disbursementTargetExceeded;
 
     // Calculate percentages
-    const fileAchievementPercentage = fileCountTarget > 0 
-      ? (achievedFileCount / fileCountTarget) * 100 
+    const fileAchievementPercentage = fileCountTarget > 0
+      ? (achievedFileCount / fileCountTarget) * 100
       : 0;
-    const disbursementAchievementPercentage = disbursementTarget > 0 
-      ? (achievedDisbursement / disbursementTarget) * 100 
+    const disbursementAchievementPercentage = disbursementTarget > 0
+      ? (achievedDisbursement / disbursementTarget) * 100
       : 0;
 
     res.json({
