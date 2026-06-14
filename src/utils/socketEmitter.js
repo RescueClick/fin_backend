@@ -3,6 +3,70 @@
 import { createNotification, generateNotificationId } from "./notificationService.js";
 import { getReportingLineFromRmId } from "./reportingLine.js";
 
+const getRoleBasedMessage = (role, appData, oldStatus, newStatus, actionByData) => {
+  const customerName = appData?.customerId
+    ? `${appData.customerId.firstName || ""} ${appData.customerId.lastName || ""}`.trim()
+    : "Customer";
+  const partnerName = appData?.partnerId
+    ? `${appData.partnerId.firstName || ""} ${appData.partnerId.lastName || ""}`.trim()
+    : "Partner";
+  const rmName = appData?.rmId
+    ? `${appData.rmId.firstName || ""} ${appData.rmId.lastName || ""}`.trim()
+    : "RM";
+  const loanType = appData?.loanType || "Loan";
+  const appNoText = appData?.appNo ? `Loan #${appData.appNo}` : "Application";
+  
+  if (role === "RM") {
+    if (newStatus === "SUBMITTED") {
+      return `You have a new ${loanType} form from Partner ${partnerName} waiting for your document verification.`;
+    }
+    if (newStatus === "DOC_INCOMPLETE") {
+      return `Application status updated to DOC_INCOMPLETE for customer ${customerName}.`;
+    }
+  }
+  
+  if (role === "RSM") {
+    if (newStatus === "DOC_COMPLETE") {
+      return `You have a verified ${loanType} application from RM ${rmName} ready for login/approval.`;
+    }
+  }
+  
+  if (role === "ASM") {
+    if (newStatus === "LOGIN") {
+      return `A loan application for customer ${customerName} is ready for bank submission. Please set a payout for Partner ${partnerName} for this case.`;
+    }
+  }
+  
+  if (role === "PARTNER") {
+    if (newStatus === "DISBURSED") {
+      return `Your customer ${customerName}'s ${loanType} has been Disbursed! Incentive is now pending payout.`;
+    }
+    if (newStatus === "APPROVED") {
+      const amtText = appData?.approvedLoanAmount ? ` for ₹${appData.approvedLoanAmount.toLocaleString("en-IN")}` : "";
+      return `Congratulations! Your customer ${customerName}'s ${loanType} application has been APPROVED${amtText}.`;
+    }
+    if (newStatus === "REJECTED") {
+      return `Your customer ${customerName}'s ${loanType} application has been REJECTED.`;
+    }
+  }
+
+  if (role === "CUSTOMER") {
+    return `Your loan application status has been updated from ${oldStatus} to ${newStatus}${appData?.appNo ? ` for Loan #${appData.appNo}` : ""}${appData?.loanType ? ` (${appData.loanType})` : ""}`;
+  }
+
+  if (role === "ADMIN" || role === "SUPER_ADMIN") {
+    if (newStatus === "SUBMITTED") {
+      return `New ${loanType} application submitted by Partner ${partnerName} for customer ${customerName}.`;
+    }
+  }
+
+  // Fallback
+  if (actionByData) {
+    return `${actionByData.name} (${actionByData.role}) changed status from ${oldStatus} to ${newStatus} for ${appNoText} - Customer: ${customerName}`;
+  }
+  return `Application status changed from ${oldStatus} to ${newStatus} for ${appNoText} - Customer: ${customerName}`;
+};
+
 /** Notifies RM + ASM + RSM line for a partner's linked RM (payouts, incentives, new customers, etc.). */
 async function notifyPartnerReportingLine(io, partnerIdStr, { type, title, message, data, eventName, buildPayload }) {
   if (!io || !partnerIdStr) return;
@@ -38,6 +102,9 @@ async function notifyPartnerReportingLine(io, partnerIdStr, { type, title, messa
     console.error("notifyPartnerReportingLine:", e);
   }
 }
+
+
+
 
 export const emitApplicationStatusChanged = async (io, application, oldStatus, newStatus, actionBy = null) => {
   if (!io || !application) {
@@ -157,25 +224,9 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     }
   }
 
-  // Build detailed message with loan/application info
-  const loanInfo = appData?.appNo 
-    ? `Loan #${appData.appNo} (${appData.loanType || "N/A"})`
-    : `Application #${application._id}`;
-  
-  const customerInfo = appData?.customerId
-    ? `Customer: ${appData.customerId.firstName || ""} ${appData.customerId.middleName || ""} ${appData.customerId.lastName || ""}`.trim()
-    : "";
-
-  const loanAmount = appData?.appliedLoanAmount 
-    ? `Amount: ₹${appData.appliedLoanAmount.toLocaleString()}`
-    : "";
-
-  const actionMessage = actionByData 
-    ? `${actionByData.name} (${actionByData.role}) changed status from ${oldStatus} to ${newStatus} for ${loanInfo}${customerInfo ? ` - ${customerInfo}` : ""}${loanAmount ? ` - ${loanAmount}` : ""}`
-    : `Application status changed from ${oldStatus} to ${newStatus} for ${loanInfo}${customerInfo ? ` - ${customerInfo}` : ""}${loanAmount ? ` - ${loanAmount}` : ""}`;
-
   // Notify partner - Save to MongoDB first, then emit socket event
   if (partnerId) {
+    const partnerMessage = getRoleBasedMessage("PARTNER", appData, oldStatus, newStatus, actionByData);
     // Ensure partnerId is properly formatted as ObjectId string for consistency
     const mongoose = await import("mongoose");
     let partnerIdForNotification = partnerId;
@@ -201,7 +252,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     const notificationResult = await createNotification(partnerIdForNotification, {
       type: "application",
       title: "Application Status Changed",
-      message: actionMessage,
+      message: partnerMessage,
       data: {
         applicationId: application._id,
         appNo: appData?.appNo,
@@ -224,22 +275,17 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     if (notificationResult) {
       console.log(`✅ Notification created successfully for partner ${partnerId}:`, {
         notificationId: notificationResult._id,
-        userId: notificationResult.userId,
-        userIdType: typeof notificationResult.userId,
-        userIdString: notificationResult.userId?.toString(),
       });
-    } else {
-      console.error(`❌ Failed to create notification for partner ${partnerId}`);
     }
 
     // Emit ONLY ONE event - applicationUpdated (frontend will handle it)
-    console.log(`📨 [APPLICATION] Emitting to partner room: ${partnerRoom}`, { partnerId, partnerIdType: typeof partnerId });
+    console.log(`📨 [APPLICATION] Emitting to partner room: ${partnerRoom}`);
     io.to(partnerRoom).emit("applicationUpdated", {
       applicationId: application._id,
       status: newStatus,
       oldStatus,
       actionBy: actionByData,
-      message: actionMessage,
+      message: partnerMessage,
       notificationId, // Include notificationId so frontend can sync
       application: {
         _id: application._id,
@@ -260,6 +306,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
 
   // Notify customer - ONLY LOAN STATUS (no internal details) - Save to MongoDB first
   if (customerId) {
+    const customerMessage = getRoleBasedMessage("CUSTOMER", appData, oldStatus, newStatus, actionByData);
     const customerRoom = `user_${String(customerId)}`;
     const notificationId = generateNotificationId({
       applicationId: application._id,
@@ -268,9 +315,6 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
       userId: customerId,
       type: "application",
     });
-    
-    // Customer-friendly message (no internal details about who did what)
-    const customerMessage = `Your loan application status has been updated from ${oldStatus} to ${newStatus}${appData?.appNo ? ` for Loan #${appData.appNo}` : ""}${appData?.loanType ? ` (${appData.loanType})` : ""}`;
 
     // Save notification to MongoDB
     await createNotification(customerId, {
@@ -293,7 +337,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     });
 
     // Emit ONLY ONE event
-    console.log(`📨 Emitting to customer room: ${customerRoom}`, { customerId, customerIdType: typeof customerId });
+    console.log(`📨 Emitting to customer room: ${customerRoom}`);
     io.to(customerRoom).emit("applicationUpdated", {
       applicationId: application._id,
       status: newStatus,
@@ -321,6 +365,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
   );
   
   if (rmId && actionByData && !rmPerformedAction) {
+    const rmMessage = getRoleBasedMessage("RM", appData, oldStatus, newStatus, actionByData);
     const rmRoom = `rm_${String(rmId)}`;
     const notificationId = generateNotificationId({
       applicationId: application._id,
@@ -334,7 +379,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     await createNotification(rmId, {
       type: "application",
       title: "Application Status Changed",
-      message: actionMessage,
+      message: rmMessage,
       data: {
         applicationId: application._id,
         appNo: appData?.appNo,
@@ -355,23 +400,22 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     });
 
     // Emit ONLY ONE event
-    console.log(`📨 Emitting to RM room: ${rmRoom} (action by ${actionByData.role} ${actionByData._id})`);
+    console.log(`📨 Emitting to RM room: ${rmRoom}`);
     io.to(rmRoom).emit("applicationUpdated", {
       applicationId: application._id,
       status: newStatus,
       oldStatus,
       actionBy: actionByData,
-      message: actionMessage,
+      message: rmMessage,
       notificationId,
       application: appData || application,
       timestamp: new Date(),
     });
-  } else if (rmPerformedAction) {
-    console.log(`⏭️ Skipping RM notification - RM ${actionByData?._id || rmId} performed this action themselves`);
   }
 
   // Notify ASM (only if RM belongs to this ASM - hierarchy)
   if (asmId) {
+    const asmMessage = getRoleBasedMessage("ASM", appData, oldStatus, newStatus, actionByData);
     const asmIdStr = String(asmId);
     const asmRoom = `asm_${asmIdStr}`;
     const notificationId = generateNotificationId({
@@ -386,7 +430,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     await createNotification(asmIdStr, {
       type: "application",
       title: "Application Status Changed (Your RM)",
-      message: actionMessage,
+      message: asmMessage,
       data: {
         applicationId: application._id,
         appNo: appData?.appNo,
@@ -408,13 +452,13 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     });
 
     // Emit ONLY ONE event
-    console.log(`📨 Emitting to ASM room: ${asmRoom}`, { asmId, asmIdType: typeof asmId });
+    console.log(`📨 Emitting to ASM room: ${asmRoom}`);
     io.to(asmRoom).emit("applicationUpdated", {
       applicationId: application._id,
       status: newStatus,
       oldStatus,
       actionBy: actionByData,
-      message: actionMessage,
+      message: asmMessage,
       notificationId,
       application: appData || application,
       timestamp: new Date(),
@@ -424,6 +468,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
   const rsmPerformedAction = rsmId && actionByData && String(rsmId) === String(actionByData._id);
 
   if (rsmId && !rsmPerformedAction) {
+    const rsmMessage = getRoleBasedMessage("RSM", appData, oldStatus, newStatus, actionByData);
     const rsmRoom = `rsm_${String(rsmId)}`;
     const notificationIdRsm = generateNotificationId({
       applicationId: application._id,
@@ -436,7 +481,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     await createNotification(String(rsmId), {
       type: "application",
       title: "Application Status Changed (Your file)",
-      message: actionMessage,
+      message: rsmMessage,
       data: {
         applicationId: application._id,
         appNo: appData?.appNo,
@@ -466,18 +511,18 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
       status: newStatus,
       oldStatus,
       actionBy: actionByData,
-      message: actionMessage,
+      message: rsmMessage,
       notificationId: notificationIdRsm,
       application: appData || application,
       timestamp: new Date(),
     });
-  } else if (rsmPerformedAction) {
-    console.log(`⏭️ Skipping RSM notification — RSM / acting user tied to this change`);
   }
 
   // Notify Admin and SUPER_ADMIN - Save to MongoDB for all admin users first
   console.log("📨 Creating notifications for Admin and SUPER_ADMIN");
   
+  const adminMessage = getRoleBasedMessage("ADMIN", appData, oldStatus, newStatus, actionByData);
+
   try {
     const { User } = await import("../models/User.js");
     const { createNotificationsForUsers } = await import("./notificationService.js");
@@ -499,7 +544,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     await createNotificationsForUsers(adminUserIds, {
       type: "application",
       title: "Application Status Changed",
-      message: actionMessage,
+      message: adminMessage,
       data: {
         applicationId: application._id,
         appNo: appData?.appNo,
@@ -532,7 +577,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     status: newStatus,
     oldStatus,
     actionBy: actionByData,
-    message: actionMessage,
+    message: adminMessage,
     notificationId: generateNotificationId({
       applicationId: application._id,
       status: newStatus,
@@ -549,7 +594,7 @@ export const emitApplicationStatusChanged = async (io, application, oldStatus, n
     status: newStatus,
     oldStatus,
     actionBy: actionByData,
-    message: actionMessage,
+    message: adminMessage,
     notificationId: generateNotificationId({
       applicationId: application._id,
       status: newStatus,
@@ -571,6 +616,19 @@ export const emitDocumentUploaded = async (io, applicationId, docType, partnerId
   let asmIdResolved = null;
   let rsmIds = [];
 
+  let partnerName = "Partner";
+  try {
+    const { User } = await import("../models/User.js");
+    if (partnerId) {
+      const partner = await User.findById(partnerId).select("firstName lastName").lean();
+      if (partner) {
+        partnerName = `${partner.firstName || ""} ${partner.lastName || ""}`.trim();
+      }
+    }
+  } catch (err) {
+    console.error("emitDocumentUploaded: load partner user", err);
+  }
+
   try {
     const { Application } = await import("../models/Application.js");
     const app = await Application.findById(applicationId).select("rmId asmId rsmId").lean();
@@ -586,14 +644,69 @@ export const emitDocumentUploaded = async (io, applicationId, docType, partnerId
     console.error("emitDocumentUploaded: load application", err);
   }
 
-  if (rmId) io.to(`rm_${rmId}`).emit("documentUploaded", payloadBase);
-  if (asmIdResolved) io.to(`asm_${asmIdResolved}`).emit("documentUploaded", payloadBase);
-  for (const rid of rsmIds) {
-    io.to(`rsm_${rid}`).emit("documentUploaded", payloadBase);
+  const message = `Verification pending: Partner ${partnerName} re-uploaded ${docType}.`;
+
+  // Persist notifications
+  try {
+    const notificationTargets = [];
+    if (rmId) notificationTargets.push(rmId);
+    if (asmIdResolved) notificationTargets.push(asmIdResolved);
+    for (const rid of rsmIds) {
+      if (rid) notificationTargets.push(rid);
+    }
+
+    for (const userId of notificationTargets) {
+      const notificationId = generateNotificationId({
+        applicationId,
+        docType,
+        timestamp: Date.now(),
+        userId,
+        type: "document",
+      });
+      await createNotification(userId, {
+        type: "document",
+        title: "Document Re-uploaded",
+        message,
+        data: { applicationId, docType, partnerId, customerId },
+        notificationId,
+        timestamp: new Date(),
+      });
+    }
+
+    // Admins
+    const { User } = await import("../models/User.js");
+    const { createNotificationsForUsers } = await import("./notificationService.js");
+    const adminUsers = await User.find({
+      role: { $in: ["ADMIN", "SUPER_ADMIN"] }
+    }).select("_id").lean();
+    const adminUserIds = adminUsers.map(u => u._id.toString());
+    const adminNotificationId = generateNotificationId({
+      applicationId,
+      docType,
+      timestamp: Date.now(),
+      type: "document",
+    });
+    await createNotificationsForUsers(adminUserIds, {
+      type: "document",
+      title: "Document Re-uploaded",
+      message,
+      data: { applicationId, docType, partnerId, customerId },
+      notificationId: adminNotificationId,
+      timestamp: new Date(),
+    });
+  } catch (dbErr) {
+    console.error("emitDocumentUploaded: database persist failed", dbErr);
   }
 
-  io.to("admin").emit("documentUploaded", payloadBase);
-  io.to("super_admin").emit("documentUploaded", payloadBase);
+  // Emit socket events
+  if (rmId) io.to(`rm_${rmId}`).emit("documentUploaded", { ...payloadBase, message });
+  if (asmIdResolved) io.to(`asm_${asmIdResolved}`).emit("documentUploaded", { ...payloadBase, message });
+  for (const rid of rsmIds) {
+    io.to(`rsm_${rid}`).emit("documentUploaded", { ...payloadBase, message });
+  }
+
+  io.to("admin").emit("documentUploaded", { ...payloadBase, message });
+  io.to("super_admin").emit("documentUploaded", { ...payloadBase, message });
 };
 
 export const emitDocumentStatusChanged = async (io, applicationId, docType, status, updatedBy, partnerId, customerId, actionBy = null, application = null) => {
@@ -644,7 +757,7 @@ export const emitDocumentStatusChanged = async (io, applicationId, docType, stat
         .populate("customerId", "firstName middleName lastName email phone")
         .populate("partnerId", "firstName lastName email employeeId")
         .populate("rmId", "firstName lastName asmId")
-        .select("appNo loanType appliedLoanAmount status rmId asmId rsmId partnerId customerId")
+        .select("appNo loanType appliedLoanAmount status rmId asmId rsmId partnerId customerId docs")
         .lean();
       // Extract ASM ID from RM if available
       if (appData?.rmId?.asmId) {
@@ -766,6 +879,23 @@ export const emitDocumentStatusChanged = async (io, applicationId, docType, stat
     ? `${actionByData.name} (${actionByData.role}) ${statusMessages[status] || "updated"} the document "${docType}" for ${loanInfo}${customerInfo ? ` - ${customerInfo}` : ""}`
     : `Document "${docType}" status changed to ${status} for ${loanInfo}${customerInfo ? ` - ${customerInfo}` : ""}`;
 
+  let docRemarks = "";
+  if (appData?.docs && docType) {
+    const doc = appData.docs.find(d => d.docType?.toUpperCase() === docType.toUpperCase());
+    if (doc?.remarks) {
+      docRemarks = doc.remarks;
+    }
+  }
+
+  let partnerMessage = actionMessage;
+  if (status === "REJECTED") {
+    const rmName = actionByData ? actionByData.name : "RM";
+    partnerMessage = `${docType} was rejected by RM ${rmName}${docRemarks ? ` due to: ${docRemarks}` : ""}. Please re-upload.`;
+  } else if (status === "VERIFIED") {
+    const rmName = actionByData ? actionByData.name : "RM";
+    partnerMessage = `${docType} has been verified by RM ${rmName}.`;
+  }
+
   // Notify partner - Save to MongoDB first, then emit socket event
   if (partnerIdStr) {
     const partnerRoom = `partner_${String(partnerIdStr)}`;
@@ -782,7 +912,7 @@ export const emitDocumentStatusChanged = async (io, applicationId, docType, stat
     await createNotification(partnerIdStr, {
       type: "document",
       title: "Document Status Changed",
-      message: actionMessage,
+      message: partnerMessage,
       data: {
         applicationId,
         appNo: appData?.appNo,
@@ -811,7 +941,7 @@ export const emitDocumentStatusChanged = async (io, applicationId, docType, stat
       status,
       updatedBy,
       actionBy: actionByData,
-      message: actionMessage,
+      message: partnerMessage,
       notificationId,
       data: appData ? {
         appNo: appData.appNo,
@@ -1818,3 +1948,63 @@ export const emitIncentiveStatusChanged = async (io, incentive, partnerId) => {
     }),
   });
 };
+
+export const emitPayoutCreated = async (io, payout, asmId) => {
+  if (!io || !payout) return;
+  try {
+    const { User } = await import("../models/User.js");
+    const { createNotificationsForUsers } = await import("./notificationService.js");
+    
+    const asm = await User.findById(asmId).select("firstName lastName").lean();
+    const asmName = asm ? `${asm.firstName || ""} ${asm.lastName || ""}`.trim() : "ASM";
+    
+    const amountText = typeof payout.amount === "number" ? `₹${payout.amount.toLocaleString("en-IN")}` : "";
+    const message = `Payout of ${amountText} requested by ASM ${asmName}. Please review.`;
+    
+    const adminUsers = await User.find({
+      role: { $in: ["ADMIN", "SUPER_ADMIN"] }
+    }).select("_id").lean();
+    const adminUserIds = adminUsers.map(u => u._id.toString());
+    
+    const notificationId = generateNotificationId({
+      applicationId: payout.application?.toString() || payout._id.toString(),
+      status: "PENDING",
+      timestamp: Date.now(),
+      type: "payout",
+    });
+    
+    await createNotificationsForUsers(adminUserIds, {
+      type: "payout",
+      title: "New Payout Request",
+      message,
+      data: {
+        payoutId: payout._id,
+        applicationId: payout.application,
+        partnerId: payout.partnerId,
+        amount: payout.amount,
+        asmName,
+      },
+      notificationId,
+      timestamp: new Date(),
+    });
+    
+    io.to("admin").emit("payoutStatusChanged", {
+      payoutId: payout._id,
+      status: "PENDING",
+      partnerId: payout.partnerId,
+      amount: payout.amount,
+      notificationId,
+      timestamp: new Date(),
+    });
+    io.to("super_admin").emit("payoutStatusChanged", {
+      payoutId: payout._id,
+      status: "PENDING",
+      partnerId: payout.partnerId,
+      amount: payout.amount,
+      notificationId,
+      timestamp: new Date(),
+    });
+  } catch (err) {
+    console.error("Error in emitPayoutCreated:", err);
+  }
+};

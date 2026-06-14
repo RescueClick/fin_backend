@@ -4654,7 +4654,12 @@ router.get(
       const { status, year, month } = req.query;
 
       // Get all partners in the system
-      const partners = await User.find({ role: ROLES.PARTNER }).lean();
+      const partners = await User.find({ role: ROLES.PARTNER })
+        .populate({
+          path: "asmId",
+          select: "firstName lastName employeeId",
+        })
+        .lean();
       if (!partners.length) {
         return res.json([]);
       }
@@ -4677,10 +4682,10 @@ router.get(
         year: targetYear,
       }).lean();
 
-      // Disbursed applications in the period
-      const disbursedApps = await Application.find({
-        status: "DISBURSED",
+      // Relevant applications (non-draft) in the period
+      const relevantApps = await Application.find({
         partnerId: { $in: partnerIds },
+        status: { $ne: "DRAFT" },
         updatedAt: {
           $gte: startDate,
           $lt: endDate,
@@ -4692,7 +4697,7 @@ router.get(
         const partnerTargets = targets.filter(
           (t) => t.assignedTo.toString() === partner._id.toString()
         );
-        const partnerDisbursed = disbursedApps.filter(
+        const partnerApps = relevantApps.filter(
           (app) => app.partnerId.toString() === partner._id.toString()
         );
 
@@ -4701,11 +4706,13 @@ router.get(
         const disbursementTarget =
           target.disbursementTarget || target.targetValue || 2000000;
 
-        const achievedFileCount = partnerDisbursed.length;
-        const achievedDisbursement = partnerDisbursed.reduce(
-          (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
-          0
-        );
+        const achievedFileCount = partnerApps.length;
+        const achievedDisbursement = partnerApps
+          .filter((app) => app.status === "DISBURSED")
+          .reduce(
+            (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
+            0
+          );
 
         const fileTargetMet = achievedFileCount >= fileCountTarget;
         const disbursementTargetMet = achievedDisbursement >= disbursementTarget;
@@ -4759,6 +4766,9 @@ router.get(
           partnerId: partner._id,
           partnerName: `${partner.firstName} ${partner.lastName}`,
           partnerEmployeeId: partner.employeeId,
+          asmId: partner.asmId?._id || null,
+          asmName: partner.asmId ? `${partner.asmId.firstName} ${partner.asmId.lastName}` : null,
+          asmEmployeeId: partner.asmId?.employeeId || null,
           // Legacy fields
           totalTarget: disbursementTarget,
           totalAchieved: achievedDisbursement,
@@ -4790,9 +4800,10 @@ router.get(
         month: targetMonth,
         year: targetYear,
       })
-        .select(
-          "partnerId amount status month year basis percentValue fixedValue notes"
-        )
+        .populate({
+          path: "asmId",
+          select: "firstName lastName employeeId",
+        })
         .lean();
 
       const docMap = new Map();
@@ -4802,6 +4813,7 @@ router.get(
 
       let response = incentiveData.map((row) => {
         const doc = docMap.get(row.partnerId.toString());
+        const docAsm = doc?.asmId;
 
         // Canonical incentive amount:
         // 👉 Incentive is NOT auto-calculated anymore.
@@ -4811,6 +4823,8 @@ router.get(
 
         return {
           ...row,
+          asmName: docAsm ? `${docAsm.firstName} ${docAsm.lastName}` : row.asmName,
+          asmEmployeeId: docAsm ? docAsm.employeeId : row.asmEmployeeId,
           // Ensure frontend sees the same value everywhere
           incentiveAmount: Math.round(canonicalAmount),
           incentiveRecordId: doc?._id || null,
@@ -4829,10 +4843,10 @@ router.get(
 
       // Optional status filter for admin cards + lists
       if (status === "PAID") {
-        response = response.filter((r) => r.eligibleForIncentive && r.incentivePaid);
+        response = response.filter((r) => r.incentivePaid || r.incentiveStatus === "PAID" || r.status === "PAID");
       } else if (status === "PENDING") {
         response = response.filter(
-          (r) => r.eligibleForIncentive && !r.incentivePaid
+          (r) => r.status === "PENDING" || r.incentiveStatus === "PENDING"
         );
       }
 
@@ -4865,11 +4879,9 @@ router.post(
         return res.status(404).json({ message: "Incentive not found" });
       }
 
-      // Only allow paying pending incentives
-      if (incentive.status === "PAID") {
-        return res
-          .status(400)
-          .json({ message: "Incentive already marked as paid" });
+      const { amount } = req.body;
+      if (amount && Number(amount) > 0) {
+        incentive.amount = Math.round(Number(amount));
       }
 
       incentive.status = "PAID";

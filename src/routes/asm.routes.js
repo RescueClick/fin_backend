@@ -24,6 +24,7 @@ import {
 } from "../utils/reassignmentPolicy.js";
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
+import { emitPayoutCreated } from "../utils/socketEmitter.js";
 
 const router = Router();
 
@@ -1493,6 +1494,15 @@ router.post("/payouts/create", auth, requireRole(ROLES.ASM), async (req, res) =>
       });
     }
 
+    try {
+      const io = global.io;
+      if (io) {
+        await emitPayoutCreated(io, payout, asmId);
+      }
+    } catch (socketErr) {
+      console.error("Error emitting payout socket notification:", socketErr);
+    }
+
     res.json({
       message: "Payout created/updated successfully",
       payout,
@@ -1871,6 +1881,15 @@ router.post("/set-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
         payOutStatus: "PENDING",
         addedBy: req.user.sub, // ASM user
       });
+    }
+
+    try {
+      const io = global.io;
+      if (io) {
+        await emitPayoutCreated(io, payout, asmId);
+      }
+    } catch (socketErr) {
+      console.error("Error emitting payout socket notification:", socketErr);
     }
 
     return res.status(201).json({

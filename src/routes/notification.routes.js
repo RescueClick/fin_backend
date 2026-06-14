@@ -2,6 +2,11 @@
 import { Router } from "express";
 import { auth } from "../middleware/auth.js";
 import { Notification } from "../models/Notification.js";
+import { Application } from "../models/Application.js";
+import { User } from "../models/User.js";
+import { Payout } from "../models/Payout.js";
+import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
+import { Incentive } from "../models/Incentive.js";
 
 const router = Router();
 
@@ -319,6 +324,96 @@ router.get("/test", auth, async (req, res) => {
       message: "Test failed",
       error: error.message,
     });
+  }
+});
+
+// GET /api/notifications/sidebar-counts - Calculate exact dynamic action counts for each user role
+router.get("/sidebar-counts", auth, async (req, res) => {
+  try {
+    const userId = req.user.sub;
+    const role = String(req.user.role || "").toLowerCase();
+
+    const counts = {
+      payout: 0,
+      partner: 0,
+      application: 0,
+      delete_request: 0,
+      incentive: 0,
+    };
+
+    const mongoose = await import("mongoose");
+    const userIdObjectId = mongoose.default.Types.ObjectId.isValid(userId)
+      ? new mongoose.default.Types.ObjectId(userId)
+      : null;
+
+    if (!userIdObjectId) {
+      return res.status(400).json({ message: "Invalid user ID" });
+    }
+
+    if (role === "admin" || role === "super_admin") {
+      // 1. Partner: Count of partners registered with status PENDING (waiting for validation)
+      counts.partner = await User.countDocuments({ role: "partner", status: "PENDING" });
+      // 2. Payout: Count of payouts in PENDING status
+      counts.payout = await Payout.countDocuments({ payOutStatus: "PENDING" });
+      // 3. Delete Request: Count of delete account requests in PENDING status
+      counts.delete_request = await DeleteAccountRequest.countDocuments({ status: "PENDING" });
+    } 
+    else if (role === "asm") {
+      // ASM specific counts
+      // Find all RSMs under this ASM
+      const rsms = await User.find({ asmId: userIdObjectId, role: "rsm" }).select("_id");
+      const rsmIds = rsms.map(r => r._id);
+      
+      // Find all RMs under these RSMs
+      const rms = await User.find({
+        $or: [
+          { personalRsmId: { $in: rsmIds } },
+          { businessHomeRsmId: { $in: rsmIds } }
+        ],
+        role: "rm"
+      }).select("_id");
+      const rmIds = rms.map(r => r._id);
+      
+      // Find all Partners under these RMs
+      const partners = await User.find({ rmId: { $in: rmIds }, role: "partner" }).select("_id");
+      const partnerIds = partners.map(p => p._id);
+      
+      // 1. Payouts: PENDING payouts for those Partners
+      counts.payout = await Payout.countDocuments({ partnerId: { $in: partnerIds }, payOutStatus: "PENDING" });
+      
+      // 2. Incentives: PENDING incentives for those Partners
+      counts.incentive = await Incentive.countDocuments({ partnerId: { $in: partnerIds }, status: "PENDING" });
+
+      // 3. Applications: Count of applications assigned/routed to ASM (DOC_SUBMITTED)
+      counts.application = await Application.countDocuments({ asmId: userIdObjectId, status: "DOC_SUBMITTED" });
+    }
+    else if (role === "rsm") {
+      // RSM specific counts
+      // 1. Applications: Count of applications in DOC_COMPLETE status assigned to this RSM
+      counts.application = await Application.countDocuments({ rsmId: userIdObjectId, status: "DOC_COMPLETE" });
+    }
+    else if (role === "rm") {
+      // RM specific counts
+      // 1. Applications: Count of applications in SUBMITTED or DOC_INCOMPLETE status assigned to this RM
+      counts.application = await Application.countDocuments({ 
+        rmId: userIdObjectId, 
+        status: { $in: ["SUBMITTED", "DOC_INCOMPLETE"] } 
+      });
+      // 2. My Partners: Count of partners assigned to this RM with status "PENDING"
+      counts.partner = await User.countDocuments({ rmId: userIdObjectId, role: "partner", status: "PENDING" });
+    }
+    else if (role === "partner") {
+      // Partner specific counts
+      // 1. Payouts: PENDING payout requests for this partner
+      counts.payout = await Payout.countDocuments({ partnerId: userIdObjectId, payOutStatus: "PENDING" });
+      // 2. Incentives: PENDING incentives for this partner
+      counts.incentive = await Incentive.countDocuments({ partnerId: userIdObjectId, status: "PENDING" });
+    }
+
+    res.json(counts);
+  } catch (error) {
+    console.error("Error calculating sidebar counts:", error);
+    res.status(500).json({ message: "Failed to calculate sidebar counts", error: error.message });
   }
 });
 

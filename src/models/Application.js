@@ -256,12 +256,33 @@ export function findUploadedDocMatchingRequired(uploadedDocs, requiredType) {
 
 // Helper function to get required document types based on loan type
 ApplicationSchema.methods.getRequiredDocTypes = function () {
-  const baseDocs = ["PAN", "AADHAR_FRONT", "AADHAR_BACK"];
+  const baseDocs = ["PAN", "AADHAR_FRONT", "AADHAR_BACK", "PHOTO", "ADDRESS_PROOF"];
+  const key = (this.loanType || "").toUpperCase();
 
-  if (this.loanType === "PERSONAL" || this.loanType === "HOME_LOAN_SALARIED") {
-    return [...baseDocs, "SALARY_SLIP_1", "BANK_STATEMENT"];
-  } else if (this.loanType === "BUSINESS" || this.loanType === "HOME_LOAN_SELF_EMPLOYED") {
-    return [...baseDocs, "BANK_STATEMENT", "GST_CERTIFICATE"];
+  if (key === "PERSONAL" || key === "HOME_LOAN_SALARIED") {
+    return [
+      ...baseDocs,
+      "COMPANY_ID_CARD",
+      "SALARY_SLIP_1",
+      "SALARY_SLIP_2",
+      "SALARY_SLIP_3",
+      "FORM_16_26AS",
+      "BANK_STATEMENT_1",
+      "BANK_STATEMENT_2",
+    ];
+  }
+  if (key === "BUSINESS" || key === "HOME_LOAN_SELF_EMPLOYED") {
+    return [
+      ...baseDocs,
+      "BUSINESS_OTHER_DOCS",
+      "SHOP_ACT",
+      "UDHYAM_AADHAR",
+      "ITR",
+      "GST_DOCUMENT",
+      "SHOP_PHOTO",
+      "BANK_STATEMENT_1",
+      "BANK_STATEMENT_2",
+    ];
   }
 
   return baseDocs;
@@ -284,17 +305,6 @@ ApplicationSchema.methods.areAllDocumentsVerified = function () {
       return false;
     }
   }
-
-  // Optional/Other documents should not block unless explicitly REJECTED
-  for (const doc of uploadedDocs) {
-    const isRequired = requiredDocTypes.some(
-      (reqType) => canonicalDocTypeForVerification(reqType) === canonicalDocTypeForVerification(doc.docType)
-    );
-    if (!isRequired && doc?.status === "REJECTED") {
-      return false;
-    }
-  }
-
   return true;
 };
 

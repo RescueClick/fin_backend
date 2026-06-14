@@ -922,17 +922,6 @@ router.post(
           }
         }
 
-        // ✅ Only block optional/other documents if they are explicitly REJECTED.
-        for (const doc of uploadedDocs) {
-          const isRequired = requiredDocTypes.some(
-            (reqType) => canonicalDocTypeForVerification(reqType) === canonicalDocTypeForVerification(doc.docType)
-          );
-          if (!isRequired && doc?.status === "REJECTED") {
-            const docType = doc?.docType || "UNKNOWN";
-            unverifiedDocsSet.add(`${docType} (${doc.status})`);
-          }
-        }
-
         const unverifiedDocs = Array.from(unverifiedDocsSet);
         
         if (missingDocs.length > 0 || unverifiedDocs.length > 0) {
