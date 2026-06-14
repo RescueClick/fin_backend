@@ -1350,13 +1350,23 @@ router.post(
       }
 
       // Check if customer exists
-      let customerUser = await User.findOne({
+      const existingUser = await User.findOne({
         $or: [
           { email: customer.email.toLowerCase() },
           { phone: customer.phone },
         ],
-        role: ROLES.CUSTOMER,
       });
+
+      let customerUser = null;
+      if (existingUser) {
+        if (existingUser.role !== ROLES.CUSTOMER) {
+          const matchField = existingUser.email === customer.email.toLowerCase() ? "email" : "phone number";
+          return res.status(409).json({
+            message: `This ${matchField} is already registered as a ${existingUser.role}. Please use unique contact details for the customer.`,
+          });
+        }
+        customerUser = existingUser;
+      }
 
       // ✅ IDENTITY VALIDATION: If customer exists, ensure the name matches to prevent account mixing.
       if (customerUser) {
@@ -4347,25 +4357,35 @@ router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       year: targetYear,
     }).lean();
 
-    // Get relevant applications for achievement calculation
     const startDate = new Date(targetYear, targetMonth - 1, 1);
     const endDate = new Date(targetYear, targetMonth, 1);
 
-    const relevantApps = await Application.find({
+    // Fetch all active applications for this partner
+    const partnerApps = await Application.find({
       partnerId: new mongoose.Types.ObjectId(partnerId),
-      status: { $ne: "DRAFT" }, // Count all submitted/processed files
-      updatedAt: {
-        $gte: startDate,
-        $lt: endDate
-      }
+      status: { $ne: "DRAFT" }
     }).lean();
+
+    // Filter file submissions by date they were submitted (to SUBMITTED or first stage transition)
+    const fileApps = partnerApps.filter(app => {
+      const submitStage = app.stageHistory?.find(s => s.to === "SUBMITTED");
+      const submitDate = submitStage ? new Date(submitStage.at) : new Date(app.createdAt);
+      return submitDate >= startDate && submitDate < endDate;
+    });
+
+    // Filter disbursed applications by exact date they transitioned to DISBURSED
+    const disbursedApps = partnerApps.filter(app => {
+      if (app.status !== "DISBURSED") return false;
+      const disburseStage = app.stageHistory?.find(s => s.to === "DISBURSED");
+      const disburseDate = disburseStage ? new Date(disburseStage.at) : new Date(app.updatedAt);
+      return disburseDate >= startDate && disburseDate < endDate;
+    });
 
     const fileCountTarget = target?.fileCountTarget || 4;
     const disbursementTarget = target?.disbursementTarget || 2000000;
 
-    const achievedFileCount = relevantApps.length;
-    const achievedDisbursement = relevantApps
-      .filter(app => app.status === "DISBURSED")
+    const achievedFileCount = fileApps.length;
+    const achievedDisbursement = disbursedApps
       .reduce((sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0), 0);
 
     // Check if targets are met and exceeded

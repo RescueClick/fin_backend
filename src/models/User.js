@@ -30,7 +30,7 @@ const userSchema = new mongoose.Schema(
     gender: { type: String, enum: ["Male", "Female", "Other"] },
     maritalStatus: {
       type: String,
-      enum: ["Single", "Married", "Divorced", "Widowed"],
+      enum: ["Single", "Married", "Divorced", "Widowed", "Widow"],
     },
     mothersName: { type: String, trim: true },
 
@@ -214,6 +214,6 @@ userSchema.virtual("isPartner").get(function () {
   return this.role === ROLES.PARTNER;
 });
 
-// TTL index
-userSchema.index({ deletedAt: 1 }, { expireAfterSeconds: 0 });
+// TTL index removed for soft deletion architecture
+// userSchema.index({ deletedAt: 1 }, { expireAfterSeconds: 0 });
 export const User = mongoose.model("User", userSchema);

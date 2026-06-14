@@ -213,7 +213,8 @@ const ApplicationSchema = new mongoose.Schema(
     // Option A: new applications should not start in DRAFT
     status: { type: String, enum: APP_STATUSES, default: "SUBMITTED" },
     stageHistory: [StageSchema],
-    deletedAt: { type: Date }
+    deletedAt: { type: Date },
+    isArchived: { type: Boolean, default: false }
   },
   { timestamps: true }
 );
@@ -284,8 +285,17 @@ ApplicationSchema.methods.areAllDocumentsVerified = function () {
     }
   }
 
-  // ✅ If any SINGLE document is not VERIFIED, block completion.
-  return uploadedDocs.every((doc) => doc?.status === "VERIFIED");
+  // Optional/Other documents should not block unless explicitly REJECTED
+  for (const doc of uploadedDocs) {
+    const isRequired = requiredDocTypes.some(
+      (reqType) => canonicalDocTypeForVerification(reqType) === canonicalDocTypeForVerification(doc.docType)
+    );
+    if (!isRequired && doc?.status === "REJECTED") {
+      return false;
+    }
+  }
+
+  return true;
 };
 
 // 🚦 State transition guard
@@ -367,8 +377,8 @@ ApplicationSchema.post("save", async function (doc) {
   }
 });
 
-// TTL index
-ApplicationSchema.index({ deletedAt: 1 }, { expireAfterSeconds: 0 })
+// TTL index removed for soft deletion architecture
+// ApplicationSchema.index({ deletedAt: 1 }, { expireAfterSeconds: 0 })
 
 // Prevent duplicate active applications for same partner + customer + loan type.
 ApplicationSchema.index(

@@ -53,7 +53,7 @@ export const SUPPORT_EMAIL =
 export const getPartnerAppPlayStoreUrl = () =>
   String(
     process.env.PARTNER_APP_PLAY_STORE_URL ||
-      "https://play.google.com/store/apps/details?id=com.dhansourcecapital.partner"
+      "https://play.google.com/store/apps/details?id=com.dhansourcecapital.partner&hl=en_IN"
   ).trim();
 
 /**

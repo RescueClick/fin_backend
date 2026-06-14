@@ -216,7 +216,7 @@ const getEmailTemplate = (title, content, footerText = `${COMPANY_NAME} Team`) =
               <strong>Email:</strong> ${SUPPORT_EMAIL}
             </div>
             <div class="footer-contact-item">
-              <strong>Phone:</strong> +91-8766681450
+              <strong>Phone:</strong> +91 7057772026
             </div>
             <div class="footer-contact-item">
               <strong>Address:</strong> ${COMPANY_NAME_LEGAL}, India

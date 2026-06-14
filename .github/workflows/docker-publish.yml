@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: trustline-backend
+  IMAGE_NAME: dhansource-backend
 
 jobs:
   docker:

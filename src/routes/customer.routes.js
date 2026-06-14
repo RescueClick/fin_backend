@@ -70,14 +70,24 @@ router.post(
       }
 
       // Check if customer exists
-      let customerUser = await User.findOne({
+      const existingUser = await User.findOne({
         $or: [
           { email: customer.email.toLowerCase() },
           { phone: customer.phone },
-          { appNo: customer.appNo },
+          ...(customer.appNo ? [{ appNo: customer.appNo }] : []),
         ],
-        role: ROLES.CUSTOMER,
       });
+
+      let customerUser = null;
+      if (existingUser) {
+        if (existingUser.role !== ROLES.CUSTOMER) {
+          const matchField = existingUser.email === customer.email.toLowerCase() ? "email" : "phone number";
+          return res.status(409).json({
+            message: `This ${matchField} is already registered as a ${existingUser.role}. Please use unique contact details for the customer.`,
+          });
+        }
+        customerUser = existingUser;
+      }
 
       if (customerUser) {
         const existingApp = await Application.findOne({

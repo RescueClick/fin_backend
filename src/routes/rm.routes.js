@@ -9,6 +9,7 @@ import {
   Application,
   APP_STATUSES,
   findUploadedDocMatchingRequired,
+  canonicalDocTypeForVerification,
 } from "../models/Application.js";
 import { Payout } from "../models/Payout.js";
 import fs from "fs";
@@ -921,9 +922,12 @@ router.post(
           }
         }
 
-        // ✅ If any SINGLE uploaded document is not VERIFIED, DOC_COMPLETE must be blocked.
+        // ✅ Only block optional/other documents if they are explicitly REJECTED.
         for (const doc of uploadedDocs) {
-          if (doc?.status !== "VERIFIED") {
+          const isRequired = requiredDocTypes.some(
+            (reqType) => canonicalDocTypeForVerification(reqType) === canonicalDocTypeForVerification(doc.docType)
+          );
+          if (!isRequired && doc?.status === "REJECTED") {
             const docType = doc?.docType || "UNKNOWN";
             unverifiedDocsSet.add(`${docType} (${doc.status})`);
           }

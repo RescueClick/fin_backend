@@ -515,15 +515,13 @@ router.post(
         stageHistory: app.stageHistory,
       });
 
-      // ✅ If status = REJECTED → mark for auto-delete after 3 months
+      // ✅ If status = REJECTED → mark for auto-delete after 3 months (Application only)
       if (to === "REJECTED") {
         const threeMonthsLater = new Date(
           Date.now() + 90 * 24 * 60 * 60 * 1000
         );
-        app.deletedAt = threeMonthsLater; // Application TTL
-        await User.findByIdAndUpdate(app.customerId._id, {
-          deletedAt: threeMonthsLater, // Customer TTL
-        });
+        app.deletedAt = threeMonthsLater; // Application soft-delete scheduled
+        // Customer is NO LONGER deleted, so we retain the lead info
         await app.save();
       }
 
