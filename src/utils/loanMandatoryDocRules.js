@@ -44,9 +44,7 @@ export const getMandatoryDocRules = (loanType, customer = {}) => {
       "SALARY_SLIP_1",
       "SALARY_SLIP_2",
       "SALARY_SLIP_3",
-      "FORM_16_26AS",
       "BANK_STATEMENT_1",
-      "BANK_STATEMENT_2",
     ];
   }
 
@@ -64,9 +62,7 @@ export const getMandatoryDocRules = (loanType, customer = {}) => {
       "SALARY_SLIP_1",
       "SALARY_SLIP_2",
       "SALARY_SLIP_3",
-      "FORM_16_26AS",
       "BANK_STATEMENT_1",
-      "BANK_STATEMENT_2",
     ];
   }
 
@@ -77,16 +73,13 @@ export const getMandatoryDocRules = (loanType, customer = {}) => {
     },
     "AADHAR_FRONT",
     "AADHAR_BACK",
-    "BUSINESS_OTHER_DOCS",
     "PAN",
     { anyOf: ["PHOTO", "SELFIE"], label: "PHOTO_OR_SELFIE" },
     "SHOP_ACT",
     "UDHYAM_AADHAR",
     "ITR",
-    "GST_DOCUMENT",
     "SHOP_PHOTO",
     "BANK_STATEMENT_1",
-    "BANK_STATEMENT_2",
   ];
 
   if (isFemale && (loanType === "BUSINESS" || loanType === "HOME_LOAN_SELF_EMPLOYED")) {
