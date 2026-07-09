@@ -112,6 +112,7 @@ const CustomerSchema = new mongoose.Schema(
 
     loanAmount: { type: Number },
     password: { type: String },
+    bankStatementPassword: { type: String },
 
     partnerId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     rmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
