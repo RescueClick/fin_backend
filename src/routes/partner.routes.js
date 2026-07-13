@@ -2312,6 +2312,7 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       status: app.status === "LOGIN" ? "DOC_COMPLETE" : app.status,
       payoutAmount: payoutMap[app._id.toString()] || 0, // ✅ only payout amount
       docs: app.docs || [], // ✅ Include documents for incomplete doc tracking
+      remarks: app.remarks || null, // ✅ Include application rejection remarks
       rm: {
         rmId: app.rmId?._id,
         name: `${app.rmId?.firstName ?? ""} ${app.rmId?.lastName ?? ""}`.trim(),
