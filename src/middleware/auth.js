@@ -9,7 +9,11 @@ export function auth(req, res, next) {
     if (!decoded?.sub) return res.status(401).json({ message: "Invalid token" });
     req.user = decoded; // { sub, role }
     next();
-  } catch {
-    return res.status(401).json({ message: "Unauthorized" });
+  } catch (error) {
+    if (error.name === "TokenExpiredError") {
+      return res.status(401).json({ message: "Session expired. Please login again.", code: "TOKEN_EXPIRED" });
+    }
+    console.error("Auth Middleware Error:", error.message);
+    return res.status(401).json({ message: "Unauthorized: Invalid session. Please login again." });
   }
 }
