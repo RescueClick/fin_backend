@@ -267,7 +267,6 @@ ApplicationSchema.methods.getRequiredDocTypes = function () {
       "SALARY_SLIP_1",
       "SALARY_SLIP_2",
       "SALARY_SLIP_3",
-      "FORM_16_26AS",
       "BANK_STATEMENT_1",
       "BANK_STATEMENT_2",
     ];
