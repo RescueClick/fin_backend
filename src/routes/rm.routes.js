@@ -906,41 +906,6 @@ router.post(
 
       // ✅ Validate DOC_COMPLETE transition - all documents must be verified
       if (to === "DOC_COMPLETE") {
-        const requiredDocTypes = app.getRequiredDocTypes();
-        const uploadedDocs = app.docs || [];
-        const missingDocs = [];
-        const unverifiedDocsSet = new Set();
-        
-        // Check for missing or unverified documents (alias-aware: BANK_STATEMENT ↔ BANK_STATEMENT_1, etc.)
-        for (const docType of requiredDocTypes) {
-          const doc = findUploadedDocMatchingRequired(uploadedDocs, docType);
-
-          if (!doc) {
-            missingDocs.push(docType);
-          } else if (doc.status !== "VERIFIED") {
-            unverifiedDocsSet.add(`${docType} (${doc.status})`);
-          }
-        }
-
-        const unverifiedDocs = Array.from(unverifiedDocsSet);
-        
-        if (missingDocs.length > 0 || unverifiedDocs.length > 0) {
-          let errorMessage = "Cannot set DOC_COMPLETE status. ";
-          if (missingDocs.length > 0) {
-            errorMessage += `Missing documents: ${missingDocs.join(", ")}. `;
-          }
-          if (unverifiedDocs.length > 0) {
-            errorMessage += `Unverified documents: ${unverifiedDocs.join(", ")}. `;
-          }
-          errorMessage += "Please verify all documents first (no PENDING/UPDATED/REJECTED allowed) or change status to DOC_INCOMPLETE.";
-          
-          return res.status(400).json({
-            message: errorMessage,
-            missingDocs,
-            unverifiedDocs,
-          });
-        }
-
         // ✅ AUTO-ROUTE TO RSM based on loanType + RM's RSM mapping
         const rm = await User.findById(req.user.sub).select("personalRsmId businessHomeRsmId");
         if (!rm) {
