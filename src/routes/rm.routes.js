@@ -101,19 +101,21 @@ async function syncApplicationStatusAfterDocUpdate(app, rmId) {
   const allVerified = app.areAllDocumentsVerified();
   const anyRejected = (app.docs || []).some((d) => d.status === "REJECTED");
 
-  if (allVerified) {
-    if (oldStatus === "DOC_COMPLETE") {
-      return { statusChanged: false, oldStatus, newStatus: oldStatus };
-    }
-    const assign = await assignRsmForDocComplete(app, rmId);
-    if (!assign.ok) {
-      const err = new Error(assign.message);
-      err.statusCode = assign.statusCode;
-      throw err;
-    }
-    app.transition("DOC_COMPLETE", rmId, "All required documents verified");
-    return { statusChanged: true, oldStatus, newStatus: "DOC_COMPLETE" };
-  }
+  // Disabled automatic transition to DOC_COMPLETE as per user request.
+  // The RM must manually transition the application to DOC_COMPLETE.
+  // if (allVerified) {
+  //   if (oldStatus === "DOC_COMPLETE") {
+  //     return { statusChanged: false, oldStatus, newStatus: oldStatus };
+  //   }
+  //   const assign = await assignRsmForDocComplete(app, rmId);
+  //   if (!assign.ok) {
+  //     const err = new Error(assign.message);
+  //     err.statusCode = assign.statusCode;
+  //     throw err;
+  //   }
+  //   app.transition("DOC_COMPLETE", rmId, "All required documents verified");
+  //   return { statusChanged: true, oldStatus, newStatus: "DOC_COMPLETE" };
+  // }
 
   if (anyRejected && oldStatus === "SUBMITTED") {
     app.transition("DOC_INCOMPLETE", rmId, "Document rejected — re-upload required");
