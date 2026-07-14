@@ -268,20 +268,16 @@ ApplicationSchema.methods.getRequiredDocTypes = function () {
       "SALARY_SLIP_2",
       "SALARY_SLIP_3",
       "BANK_STATEMENT_1",
-      "BANK_STATEMENT_2",
     ];
   }
   if (key === "BUSINESS" || key === "HOME_LOAN_SELF_EMPLOYED") {
     return [
       ...baseDocs,
-      "BUSINESS_OTHER_DOCS",
       "SHOP_ACT",
       "UDHYAM_AADHAR",
       "ITR",
-      "GST_DOCUMENT",
       "SHOP_PHOTO",
       "BANK_STATEMENT_1",
-      "BANK_STATEMENT_2",
     ];
   }
 
