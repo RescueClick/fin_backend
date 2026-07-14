@@ -1002,8 +1002,13 @@ router.post(
       // Store old status before transition
       const oldStatus = app.status;
 
-      // Transition
-      app.transition(to, req.user.sub, note);
+      // Transition only if status is actually changing
+      if (oldStatus !== to) {
+        app.transition(to, req.user.sub, note);
+      } else if (note) {
+        // Just record the note in history without throwing transition error
+        app.stageHistory.push({ from: oldStatus, to, by: req.user.sub, note });
+      }
 
       // ✅ Save application with rsmId and asmId
       await app.save();
