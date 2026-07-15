@@ -1544,6 +1544,7 @@ router.post(
         permanentAddressStability: customer.permanentAddressStability || "",
         stabilityOfResidency: customer.stabilityOfResidency || "",
         loanAmount: Number(customer.loanAmount ?? 0),
+        bankStatementPassword: customer.bankStatementPassword || "",
         partnerId: assignedPartnerId,
         rmId: assignedRmId,
         asmId: assignedAsmId,
