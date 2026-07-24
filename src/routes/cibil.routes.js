@@ -271,9 +271,9 @@ router.post("/report/:id/email", auth, requireRole(ROLES.PARTNER), async (req, r
     `;
 
     await transporter.sendMail({
-      from: \`"DhanSource Capital" <\${process.env.EMAIL_USER}>\`,
+      from: `"DhanSource Capital" <${process.env.EMAIL_USER}>`,
       to: partner.email,
-      subject: \`CIBIL Report - +91 \${report.customerPhone}\`,
+      subject: `CIBIL Report - +91 ${report.customerPhone}`,
       html: htmlContent,
     });
 
