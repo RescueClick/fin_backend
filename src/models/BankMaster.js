@@ -25,6 +25,12 @@ const bankMasterSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Array of pincodes where this bank operates
+    serviceablePincodes: { 
+      type: [String], 
+      default: [] 
+    },
+
     isActive: { type: Boolean, default: true },
 
     // For audit

@@ -31,6 +31,10 @@ import { sendPartnerRegistrationEmail, sendLoanApplicationEmail, sendDeleteAccou
 import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
 import { ReferralReward } from "../models/ReferralReward.js";
+import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
+import {
+  getPartnerWalletBalance,
+} from "../utils/walletBalance.js";
 import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { Config } from "../models/Config.js";
@@ -3156,6 +3160,8 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
         )
         : null,
       status: partner.status,
+      partnerLevel: partner.partnerLevel || "BRONZE",
+      isPartnerOfTheMonth: partner.isPartnerOfTheMonth || false,
 
       // Bank/KYC Details
       bankName: partner.bankName || null,
@@ -4429,5 +4435,104 @@ router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     res.status(500).json({ message: "Server error", error: err.message });
   }
 });
+
+// ─── Wallet / Withdrawals (Partner → ASM → Admin) ───────────────────────────
+
+router.get(
+  "/wallet/balance",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const balance = await getPartnerWalletBalance(req.user.sub);
+      return res.json({ success: true, data: balance });
+    } catch (err) {
+      console.error("wallet/balance error:", err);
+      return res.status(500).json({ message: "Failed to load wallet balance" });
+    }
+  }
+);
+
+router.get(
+  "/withdrawals",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const list = await WithdrawalRequest.find({ partnerId: req.user.sub })
+        .sort({ createdAt: -1 })
+        .lean();
+      return res.json({ success: true, data: list });
+    } catch (err) {
+      console.error("partner withdrawals list error:", err);
+      return res.status(500).json({ message: "Failed to load withdrawals" });
+    }
+  }
+);
+
+router.post(
+  "/withdrawals",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const amount = Number(req.body?.amount);
+      const note = String(req.body?.note || "").trim();
+
+      if (!Number.isFinite(amount) || amount < 1) {
+        return res.status(400).json({ message: "Enter a valid withdraw amount (min ₹1)." });
+      }
+
+      const balance = await getPartnerWalletBalance(partnerId);
+      if (amount > balance.available + 0.0001) {
+        return res.status(400).json({
+          message: `Insufficient available balance. Available: ₹${balance.available.toLocaleString("en-IN")}`,
+          available: balance.available,
+        });
+      }
+
+      const partner = await User.findById(partnerId).select("asmId firstName lastName").lean();
+      if (!partner) {
+        return res.status(404).json({ message: "Partner not found" });
+      }
+      if (!partner.asmId) {
+        return res.status(400).json({
+          message: "Your account has no ASM assigned yet. Contact support before withdrawing.",
+        });
+      }
+
+      const doc = await WithdrawalRequest.create({
+        partnerId,
+        asmId: partner.asmId,
+        amount,
+        note,
+        status: "PENDING_ASM",
+      });
+
+      try {
+        await createNotification(partner.asmId.toString(), {
+          type: "payout",
+          title: "New withdraw request",
+          message: `${partner.firstName || "Partner"} requested ₹${amount.toLocaleString("en-IN")} withdrawal.`,
+          category: "withdrawal",
+          priority: "normal",
+          data: { withdrawalId: String(doc._id) },
+        });
+      } catch (nErr) {
+        console.warn("withdraw notify ASM failed:", nErr?.message);
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: "Withdraw request submitted. Awaiting ASM approval.",
+        data: doc,
+      });
+    } catch (err) {
+      console.error("partner create withdrawal error:", err);
+      return res.status(500).json({ message: "Failed to create withdraw request" });
+    }
+  }
+);
 
 export default router;

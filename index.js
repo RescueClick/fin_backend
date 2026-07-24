@@ -16,6 +16,7 @@ import customerRoutes from "./src/routes/customer.routes.js";
 import notificationRoutes from "./src/routes/notification.routes.js";
 import analyticsRoutes from "./src/routes/analytics.routes.js";
 import referralRoutes from "./src/routes/referral.routes.js";
+import cibilRoutes from "./src/routes/cibil.routes.js";
 import { connectDB } from "./src/db/db.js";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -93,6 +94,7 @@ const authLimiter = rateLimit({
 
 // Apply limiter ONLY on these sensitive routes
 app.use("/api/auth/login", authLimiter);
+app.use("/api/auth/google-login", authLimiter);
 app.use("/api/auth/create-admin", authLimiter);
 app.use("/api/auth/forgot-password", authLimiter);
 app.use("/api/auth/verify-otp", authLimiter);
@@ -164,6 +166,7 @@ app.use("/api/contact", contactRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/analytics", analyticsRoutes); // Universal Analytics API
 app.use("/api/referral", referralRoutes); // Customer/partner: my referral code, referrals, earnings
+app.use("/api/cibil", cibilRoutes); // CIBIL checks and payments
 
 
 

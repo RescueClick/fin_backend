@@ -5,7 +5,17 @@ const payoutSchema = new mongoose.Schema(
     application: { 
       type: mongoose.Schema.Types.ObjectId, 
       ref: "Application", 
-      required: true 
+      required: false 
+    },
+    cibilReport: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CibilReport",
+      required: false
+    },
+    type: {
+      type: String,
+      enum: ["LOAN_DISBURSEMENT", "CIBIL_COMMISSION"],
+      default: "LOAN_DISBURSEMENT"
     },
     partnerId: { 
       type: mongoose.Schema.Types.ObjectId, 
@@ -28,7 +38,7 @@ const payoutSchema = new mongoose.Schema(
     addedBy: { 
       type: mongoose.Schema.Types.ObjectId, 
       ref: "User", 
-      required: true 
+      required: false // can be system for automated commissions
     },
   },
   { timestamps: true }

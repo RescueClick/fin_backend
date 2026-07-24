@@ -115,6 +115,14 @@ const userSchema = new mongoose.Schema(
     // In User.js
     followUps: [{ type: mongoose.Schema.Types.ObjectId, ref: "FollowUp" }],
 
+    // Partner Performance
+    partnerLevel: {
+      type: String,
+      enum: ["BRONZE", "SILVER", "GOLD", "PLATINUM"],
+      default: "BRONZE",
+    },
+    isPartnerOfTheMonth: { type: Boolean, default: false },
+
     passwordHash: { type: String, required: true },
     deletedAt: { type: Date },
 

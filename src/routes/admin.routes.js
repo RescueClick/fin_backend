@@ -21,6 +21,8 @@ import { bannerUpload } from "../middleware/bannerUpload.js";
 import { Banner } from "../models/Banner.js";
 import { Incentive } from "../models/Incentive.js";
 import { ReferralReward } from "../models/ReferralReward.js";
+import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
+import { settlePendingEarnings } from "../utils/walletBalance.js";
 import { BankMaster } from "../models/BankMaster.js";
 import { upload } from "../middleware/upload.js";
 import mongoose from "mongoose";
@@ -162,6 +164,7 @@ router.post(
         portalPassword,
         portalLink,
         rsmTypes, // can be string or array from frontend
+        serviceablePincodes, // stringified array
       } = req.body || {};
 
       // Normalize incoming loanType to match Application LOAN_TYPES:
@@ -239,6 +242,21 @@ router.post(
         }
       }
 
+      let parsedPincodes = [];
+      if (serviceablePincodes) {
+        try {
+          const parsed = JSON.parse(serviceablePincodes);
+          if (Array.isArray(parsed)) {
+            parsedPincodes = parsed.map(p => String(p).trim());
+          }
+        } catch (e) {
+          // If not JSON array, try comma-separated
+          if (typeof serviceablePincodes === 'string') {
+            parsedPincodes = serviceablePincodes.split(',').map(p => String(p).trim()).filter(Boolean);
+          }
+        }
+      }
+
       const bank = await BankMaster.create({
         bankName,
         loanType: normalizedLoanType,
@@ -247,6 +265,7 @@ router.post(
         portalPassword,
         portalLink,
         rsmTypes: normalizedRsmTypes,
+        serviceablePincodes: parsedPincodes,
         createdBy: req.user.sub,
       });
 
@@ -5767,6 +5786,182 @@ router.patch(
     } catch (err) {
       console.error("admin referral cancel:", err);
       res.status(500).json({ message: err.message || "Server error" });
+    }
+  }
+);
+
+// ─── Partner withdraw requests (Admin pay after ASM approval) ───────────────
+
+router.get(
+  "/withdrawals",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const status = String(req.query.status || "PENDING_ADMIN").trim();
+      const filter = {};
+      if (status && status !== "ALL") filter.status = status;
+
+      const list = await WithdrawalRequest.find(filter)
+        .populate("partnerId", "firstName lastName email phone employeeId partnerCode asmId")
+        .populate("asmId", "firstName lastName employeeId")
+        .sort({ createdAt: -1 })
+        .lean();
+
+      return res.json({ success: true, data: list });
+    } catch (err) {
+      console.error("Admin withdrawals list:", err);
+      return res.status(500).json({ message: "Failed to load withdrawals" });
+    }
+  }
+);
+
+router.post(
+  "/withdrawals/:id/pay",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const adminId = req.user.sub;
+      const doc = await WithdrawalRequest.findOne({
+        _id: req.params.id,
+        status: "PENDING_ADMIN",
+      });
+      if (!doc) {
+        return res.status(404).json({ message: "Withdraw request not found or not awaiting Admin" });
+      }
+
+      const settled = await settlePendingEarnings(doc.partnerId, doc.amount, adminId);
+      doc.status = "PAID";
+      doc.reviewedByAdmin = adminId;
+      doc.adminReviewedAt = new Date();
+      doc.settledPayoutIds = settled.settledPayoutIds || [];
+      doc.settledIncentiveIds = settled.settledIncentiveIds || [];
+      await doc.save();
+
+      try {
+        await createNotification(String(doc.partnerId), {
+          type: "payout",
+          title: "Withdraw paid",
+          message: `Your withdraw of ₹${Number(doc.amount).toLocaleString("en-IN")} has been paid.`,
+          data: { withdrawalId: String(doc._id), status: doc.status },
+        });
+      } catch (_) {}
+
+      return res.json({
+        success: true,
+        message: "Withdraw marked as paid and pending earnings settled.",
+        data: doc,
+      });
+    } catch (err) {
+      console.error("Admin withdraw pay:", err);
+      return res.status(500).json({ message: "Failed to pay withdraw" });
+    }
+  }
+);
+
+router.post(
+  "/withdrawals/:id/reject",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const adminId = req.user.sub;
+      const reason = String(req.body?.reason || req.body?.rejectReason || "").trim();
+      const doc = await WithdrawalRequest.findOne({
+        _id: req.params.id,
+        status: "PENDING_ADMIN",
+      });
+      if (!doc) {
+        return res.status(404).json({ message: "Withdraw request not found or not awaiting Admin" });
+      }
+      doc.status = "REJECTED";
+      doc.rejectReason = reason || "Rejected by Admin";
+      doc.reviewedByAdmin = adminId;
+      doc.adminReviewedAt = new Date();
+      await doc.save();
+
+      try {
+        await createNotification(String(doc.partnerId), {
+          type: "payout",
+          title: "Withdraw rejected by Admin",
+          message: `Your withdraw request of ₹${Number(doc.amount).toLocaleString("en-IN")} was rejected${reason ? `: ${reason}` : "."}`,
+          data: { withdrawalId: String(doc._id), status: doc.status },
+        });
+      } catch (_) {}
+
+      return res.json({ success: true, message: "Withdraw rejected", data: doc });
+    } catch (err) {
+      console.error("Admin withdraw reject:", err);
+      return res.status(500).json({ message: "Failed to reject withdraw" });
+    }
+  }
+);
+
+// POST /api/admin/evaluate-partner-performance
+router.post(
+  "/evaluate-partner-performance",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  async (req, res) => {
+    try {
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = now.getMonth() + 1; // current month
+      
+      const partners = await User.find({ role: ROLES.PARTNER, status: "ACTIVE" });
+      
+      let highestDisbursement = 0;
+      let topPartnerId = null;
+
+      for (const partner of partners) {
+        const target = await Target.findOne({ 
+          assignedTo: partner._id,
+          month: month,
+          year: year
+        });
+        
+        const achievedAmount = target ? target.achievedDisbursement : 0;
+        const achievedFiles = target ? target.achievedFileCount : 0;
+
+        // Determine Level
+        let newLevel = "BRONZE";
+        if (achievedFiles >= 50 || achievedAmount >= 20000000) {
+          newLevel = "PLATINUM";
+        } else if (achievedFiles >= 25 || achievedAmount >= 10000000) {
+          newLevel = "GOLD";
+        } else if (achievedFiles >= 10 || achievedAmount >= 5000000) {
+          newLevel = "SILVER";
+        }
+        
+        if (achievedAmount > highestDisbursement) {
+          highestDisbursement = achievedAmount;
+          topPartnerId = partner._id;
+        }
+
+        partner.partnerLevel = newLevel;
+        partner.isPartnerOfTheMonth = false;
+
+        // Target increase logic
+        if (target && target.disbursementTarget > 0) {
+          const percentAchieved = (achievedAmount / target.disbursementTarget) * 100;
+          if (percentAchieved >= 100) {
+            target.disbursementTarget = Math.floor(target.disbursementTarget * 1.2); // 20% increase
+          }
+          await target.save();
+        }
+
+        await partner.save();
+      }
+
+      if (topPartnerId) {
+        await User.findByIdAndUpdate(topPartnerId, { isPartnerOfTheMonth: true });
+      }
+
+      return res.json({ success: true, message: "Performance evaluated successfully" });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Performance evaluation failed" });
     }
   }
 );

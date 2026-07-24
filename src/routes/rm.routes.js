@@ -569,6 +569,9 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
         name: `${partner.firstName} ${partner.lastName}`,
         email: partner.email,
         phone: partner.phone,
+        region: partner.region || null,
+        employeeId: partner.employeeId || null,
+        createdAt: partner.createdAt || null,
         status: partner.status,
         rating: partner.rating || 0,
 

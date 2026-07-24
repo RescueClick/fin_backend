@@ -140,6 +140,140 @@ router.post(
   })
 );
 
+/**
+ * Google OAuth login for Partner app (one-tap).
+ * Body: { idToken }
+ * Verifies Google ID token, then issues the same JWT shape as password login.
+ * Any ACTIVE account (Admin / ASM / RSM / RM / Partner / Customer) may sign in this way.
+ */
+router.post(
+  "/google-login",
+  asyncHandler(async (req, res) => {
+    const { idToken } = req.body || {};
+    if (!idToken || typeof idToken !== "string") {
+      throw new ApiError(400, "Google idToken is required", {
+        code: "VALIDATION_ERROR",
+      });
+    }
+
+    let googlePayload;
+    try {
+      const tokenRes = await fetch(
+        `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`
+      );
+      if (!tokenRes.ok) {
+        throw new Error("tokeninfo failed");
+      }
+      googlePayload = await tokenRes.json();
+    } catch {
+      throw new ApiError(401, "Invalid Google token", {
+        code: "AUTH_GOOGLE_INVALID_TOKEN",
+      });
+    }
+
+    const email = String(googlePayload?.email || "")
+      .trim()
+      .toLowerCase();
+    const emailVerified =
+      googlePayload?.email_verified === true ||
+      googlePayload?.email_verified === "true";
+
+    if (!email || !emailVerified) {
+      throw new ApiError(401, "Google account email is not verified", {
+        code: "AUTH_GOOGLE_EMAIL_UNVERIFIED",
+      });
+    }
+
+    const allowedAudiences = [
+      process.env.GOOGLE_WEB_CLIENT_ID,
+      process.env.GOOGLE_ANDROID_CLIENT_ID,
+      process.env.GOOGLE_IOS_CLIENT_ID,
+      process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+    ]
+      .map((v) => String(v || "").trim())
+      .filter(Boolean);
+
+    if (
+      allowedAudiences.length > 0 &&
+      googlePayload?.aud &&
+      !allowedAudiences.includes(String(googlePayload.aud))
+    ) {
+      throw new ApiError(401, "Google token audience mismatch", {
+        code: "AUTH_GOOGLE_AUD_MISMATCH",
+      });
+    }
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      throw new ApiError(
+        404,
+        "No account found for this Google email. Please register first or use email login.",
+        { code: "AUTH_GOOGLE_USER_NOT_FOUND" }
+      );
+    }
+
+    if (user.status === "SUSPENDED") {
+      throw new ApiError(403, "Your account has been suspended. Contact admin.", {
+        code: "AUTH_SUSPENDED",
+      });
+    }
+    if (user.status !== "ACTIVE") {
+      throw new ApiError(
+        403,
+        `Account is not active (status: ${user.status}).`,
+        { code: "AUTH_INACTIVE" }
+      );
+    }
+
+    const token = signAccessToken({
+      sub: String(user._id),
+      role: user.role,
+      rmId: user.rmId ? String(user.rmId) : undefined,
+      asmId: user.asmId ? String(user.asmId) : undefined,
+    });
+
+    let partnerCodeOut = user.partnerCode;
+    let referralCodeOut = user.referralCode;
+    const pub = canonicalPartnerReferralCode(user.partnerCode, user.referralCode);
+    if (pub) {
+      const mismatch =
+        String(user.partnerCode || "").trim() !== pub ||
+        String(user.referralCode || "").trim() !== pub;
+      if (mismatch && /^PT-/i.test(pub)) {
+        await User.updateOne(
+          { _id: user._id },
+          { $set: { partnerCode: pub, referralCode: pub } }
+        );
+      }
+      partnerCodeOut = pub;
+      referralCodeOut = pub;
+    }
+
+    return sendSuccess(res, {
+      message: "Google login successful",
+      data: {
+        token,
+        user: {
+          id: user._id,
+          firstName: user.firstName,
+          lastName: user.lastName,
+          email: user.email,
+          role: user.role,
+          status: user.status,
+          employeeId: user.employeeId,
+          asmId: user.asmId,
+          rmId: user.rmId,
+          asmCode: user.asmCode,
+          rmCode: user.rmCode,
+          partnerCode: partnerCodeOut,
+          referralCode: referralCodeOut,
+          referredBy: user.referredBy,
+        },
+      },
+    });
+  })
+);
+
 // POST /admin/login-as/:userId
 router.post(
   "/login-as/:userId",

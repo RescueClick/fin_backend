@@ -25,6 +25,8 @@ import {
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
 import { emitPayoutCreated } from "../utils/socketEmitter.js";
+import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
+import { createNotification } from "../utils/notificationService.js";
 
 const router = Router();
 
@@ -3856,5 +3858,110 @@ router.post("/rsm-activate", auth, requireRole(ROLES.ASM), async (req, res) => {
   }
 });
 
+// ─── Partner withdraw requests (ASM approve → Admin) ────────────────────────
+
+router.get(
+  "/withdrawals",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    try {
+      const asmId = req.user.sub;
+      const status = String(req.query.status || "PENDING_ASM").trim();
+      const filter = { asmId };
+      if (status && status !== "ALL") filter.status = status;
+
+      const list = await WithdrawalRequest.find(filter)
+        .populate("partnerId", "firstName lastName email phone employeeId partnerCode")
+        .sort({ createdAt: -1 })
+        .lean();
+
+      return res.json({ success: true, data: list });
+    } catch (err) {
+      console.error("ASM withdrawals list:", err);
+      return res.status(500).json({ message: "Failed to load withdrawals" });
+    }
+  }
+);
+
+router.post(
+  "/withdrawals/:id/approve",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    try {
+      const asmId = req.user.sub;
+      const doc = await WithdrawalRequest.findOne({
+        _id: req.params.id,
+        asmId,
+        status: "PENDING_ASM",
+      });
+      if (!doc) {
+        return res.status(404).json({ message: "Withdraw request not found or already processed" });
+      }
+      doc.status = "PENDING_ADMIN";
+      doc.reviewedByAsm = asmId;
+      doc.asmReviewedAt = new Date();
+      await doc.save();
+
+      try {
+        await createNotification(String(doc.partnerId), {
+          type: "payout",
+          title: "Withdraw approved by ASM",
+          message: `Your withdraw request of ₹${Number(doc.amount).toLocaleString("en-IN")} was approved by ASM and sent to Admin.`,
+          data: { withdrawalId: String(doc._id), status: doc.status },
+        });
+      } catch (_) {}
+
+      return res.json({
+        success: true,
+        message: "Withdraw approved. Sent to Admin for payment.",
+        data: doc,
+      });
+    } catch (err) {
+      console.error("ASM withdraw approve:", err);
+      return res.status(500).json({ message: "Failed to approve withdraw" });
+    }
+  }
+);
+
+router.post(
+  "/withdrawals/:id/reject",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    try {
+      const asmId = req.user.sub;
+      const reason = String(req.body?.reason || req.body?.rejectReason || "").trim();
+      const doc = await WithdrawalRequest.findOne({
+        _id: req.params.id,
+        asmId,
+        status: "PENDING_ASM",
+      });
+      if (!doc) {
+        return res.status(404).json({ message: "Withdraw request not found or already processed" });
+      }
+      doc.status = "REJECTED";
+      doc.rejectReason = reason || "Rejected by ASM";
+      doc.reviewedByAsm = asmId;
+      doc.asmReviewedAt = new Date();
+      await doc.save();
+
+      try {
+        await createNotification(String(doc.partnerId), {
+          type: "payout",
+          title: "Withdraw rejected by ASM",
+          message: `Your withdraw request of ₹${Number(doc.amount).toLocaleString("en-IN")} was rejected${reason ? `: ${reason}` : "."}`,
+          data: { withdrawalId: String(doc._id), status: doc.status },
+        });
+      } catch (_) {}
+
+      return res.json({ success: true, message: "Withdraw rejected", data: doc });
+    } catch (err) {
+      console.error("ASM withdraw reject:", err);
+      return res.status(500).json({ message: "Failed to reject withdraw" });
+    }
+  }
+);
 
 export default router;

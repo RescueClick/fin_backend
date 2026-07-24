@@ -1331,12 +1331,26 @@ router.get("/banks", auth, requireRole(ROLES.RSM), async (req, res) => {
     };
 
     const rsmType = String(rsm.rsmType || "").trim().toUpperCase();
-    const filtered = banks.filter((b) => {
+    let filtered = banks.filter((b) => {
       const lt = normalizeLoanType(b.loanType);
       if (rsmType === String(RSM_TYPES.PERSONAL)) return lt === "PERSONAL";
       if (rsmType === String(RSM_TYPES.BUSINESS_HOME)) return lt === "BUSINESS" || lt.startsWith("HOME_LOAN_");
       return true;
     });
+
+    const { pincode, loanType: queryLoanType } = req.query;
+
+    if (queryLoanType) {
+      filtered = filtered.filter(b => normalizeLoanType(b.loanType) === normalizeLoanType(queryLoanType));
+    }
+
+    if (pincode) {
+      filtered = filtered.filter(b => {
+        // If bank has no specified pincodes, we assume it's serviceable everywhere (All India)
+        if (!b.serviceablePincodes || b.serviceablePincodes.length === 0) return true;
+        return b.serviceablePincodes.includes(String(pincode).trim());
+      });
+    }
 
     return res.json(filtered);
   } catch (err) {
@@ -1849,6 +1863,48 @@ router.post("/rm-deactivate", auth, requireRole(ROLES.RSM), async (req, res) => 
   }
 });
 
+// ==================== PARTNERS DIRECTORY (RSM) ====================
+
+// GET /api/rsm/get-partners — partners under RSM → RMs hierarchy
+router.get("/get-partners", auth, requireRole(ROLES.RSM), async (req, res) => {
+  try {
+    const rsmId = req.user.sub;
+    const scope = await loadRsmReportingScope(rsmId);
+
+    const rms = await User.find({
+      role: ROLES.RM,
+      ...scope,
+    })
+      .select("_id firstName lastName employeeId")
+      .lean();
+    const rmIds = rms.map((rm) => rm._id);
+    const rmMap = Object.fromEntries(rms.map((rm) => [String(rm._id), rm]));
+
+    const partners = await User.find({
+      role: ROLES.PARTNER,
+      rmId: { $in: rmIds },
+      status: { $ne: "PENDING" },
+    })
+      .select("-passwordHash -__v")
+      .lean();
+
+    const formatted = partners.map((partner) => {
+      const rm = rmMap[String(partner.rmId)] || null;
+      return {
+        ...partner,
+        rmName: rm ? `${rm.firstName} ${rm.lastName}` : null,
+        rmEmployeeId: rm ? rm.employeeId : null,
+        rmId: rm ? rm._id : partner.rmId || null,
+      };
+    });
+
+    res.json(formatted);
+  } catch (err) {
+    console.error("Error fetching RSM partners:", err);
+    res.status(500).json({ message: "Error fetching RSM partners" });
+  }
+});
+
 // ==================== PARTNER TARGET MANAGEMENT (RSM) ====================
 
 // GET /api/rsm/partners/targets
@@ -1870,7 +1926,7 @@ router.get("/partners/targets", auth, requireRole(ROLES.RSM), async (req, res) =
       role: ROLES.PARTNER,
       rmId: { $in: rmIds },
       status: { $ne: "PENDING" },
-    }).select("firstName lastName employeeId email phone rmId").lean();
+    }).select("firstName lastName employeeId email phone rmId region").lean();
 
     const partnerIds = partners.map((p) => p._id);
 
@@ -1925,6 +1981,7 @@ router.get("/partners/targets", auth, requireRole(ROLES.RSM), async (req, res) =
         partnerEmployeeId: partner.employeeId,
         partnerEmail: partner.email,
         partnerPhone: partner.phone,
+        region: partner.region || null,
         rmId: partner.rmId,
         month: target?.month || (month ? Number(month) : new Date().getMonth() + 1),
         year: target?.year || (year ? Number(year) : new Date().getFullYear()),
