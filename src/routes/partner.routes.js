@@ -4480,8 +4480,8 @@ router.post(
       const amount = Number(req.body?.amount);
       const note = String(req.body?.note || "").trim();
 
-      if (!Number.isFinite(amount) || amount < 1) {
-        return res.status(400).json({ message: "Enter a valid withdraw amount (min ₹1)." });
+      if (!Number.isFinite(amount) || amount < 500) {
+        return res.status(400).json({ message: "Enter a valid withdraw amount (min ₹500)." });
       }
 
       const balance = await getPartnerWalletBalance(partnerId);
