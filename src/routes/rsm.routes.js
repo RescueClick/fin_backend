@@ -1345,10 +1345,14 @@ router.get("/banks", auth, requireRole(ROLES.RSM), async (req, res) => {
     }
 
     if (pincode) {
-      filtered = filtered.filter(b => {
-        // If bank has no specified pincodes, we assume it's serviceable everywhere (All India)
-        if (!b.serviceablePincodes || b.serviceablePincodes.length === 0) return true;
-        return b.serviceablePincodes.includes(String(pincode).trim());
+      const pin = String(pincode).trim();
+      filtered = filtered.filter((b) => {
+        const pins = (b.serviceablePincodes || [])
+          .map((p) => String(p).trim())
+          .filter(Boolean);
+        // Banks with no pincode list must NOT appear in pincode-based search
+        if (pins.length === 0) return false;
+        return pins.includes(pin);
       });
     }
 

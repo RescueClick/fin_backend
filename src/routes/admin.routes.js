@@ -247,14 +247,22 @@ router.post(
         try {
           const parsed = JSON.parse(serviceablePincodes);
           if (Array.isArray(parsed)) {
-            parsedPincodes = parsed.map(p => String(p).trim());
+            parsedPincodes = parsed.map((p) => String(p).trim()).filter(Boolean);
           }
         } catch (e) {
-          // If not JSON array, try comma-separated
-          if (typeof serviceablePincodes === 'string') {
-            parsedPincodes = serviceablePincodes.split(',').map(p => String(p).trim()).filter(Boolean);
+          if (typeof serviceablePincodes === "string") {
+            const matches = String(serviceablePincodes).match(/\d{6}/g);
+            parsedPincodes = matches
+              ? Array.from(new Set(matches))
+              : serviceablePincodes
+                  .split(/[\s,]+/)
+                  .map((p) => String(p).trim())
+                  .filter(Boolean);
           }
         }
+        parsedPincodes = Array.from(
+          new Set(parsedPincodes.map((p) => String(p).trim()).filter(Boolean))
+        );
       }
 
       const bank = await BankMaster.create({
@@ -275,6 +283,175 @@ router.post(
       });
     } catch (err) {
       console.error("Error creating bank:", err);
+      return res.status(500).json({ message: "Internal Server Error" });
+    }
+  }
+);
+
+// PUT /api/admin/banks/:bankId
+// Update bank details (logo optional; pincodes replaceable via CSV/text)
+router.put(
+  "/banks/:bankId",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  upload.single("bankLogo"),
+  async (req, res) => {
+    try {
+      const { bankId } = req.params || {};
+      const existing = await BankMaster.findById(bankId);
+      if (!existing) {
+        return res.status(404).json({ message: "Bank not found" });
+      }
+
+      const {
+        bankName,
+        loanType,
+        portalLoginId,
+        portalPassword,
+        portalLink,
+        rsmTypes,
+        serviceablePincodes,
+        isActive,
+      } = req.body || {};
+
+      const normalizeLoanType = (lt) => {
+        const raw = String(lt || "").trim().toUpperCase();
+        if (!raw) return "";
+        if (raw === "PERSONAL_LOAN") return "PERSONAL";
+        if (raw === "BUSINESS_LOAN") return "BUSINESS";
+        return raw;
+      };
+
+      const nextBankName = bankName != null ? String(bankName).trim() : existing.bankName;
+      const nextLoanType =
+        loanType != null ? normalizeLoanType(loanType) : existing.loanType;
+      const nextPortalLoginId =
+        portalLoginId != null ? String(portalLoginId).trim() : existing.portalLoginId;
+      const nextPortalPassword =
+        portalPassword != null ? String(portalPassword).trim() : existing.portalPassword;
+      const nextPortalLink =
+        portalLink != null ? String(portalLink).trim() : existing.portalLink;
+
+      if (
+        !nextBankName ||
+        !nextLoanType ||
+        !nextPortalLoginId ||
+        !nextPortalPassword ||
+        !nextPortalLink
+      ) {
+        return res.status(400).json({
+          message:
+            "bankName, loanType, portalLoginId, portalPassword and portalLink are required",
+        });
+      }
+
+      let normalizedRsmTypes = existing.rsmTypes || [];
+      if (rsmTypes !== undefined) {
+        if (Array.isArray(rsmTypes)) {
+          normalizedRsmTypes = rsmTypes;
+        } else if (typeof rsmTypes === "string" && rsmTypes.trim() !== "") {
+          normalizedRsmTypes = rsmTypes.includes(",")
+            ? rsmTypes.split(",").map((v) => v.trim())
+            : [rsmTypes.trim()];
+        } else {
+          normalizedRsmTypes = [];
+        }
+      }
+
+      const validRsmTypes = Object.values(RSM_TYPES);
+      const invalid = normalizedRsmTypes.filter((t) => !validRsmTypes.includes(t));
+      if (invalid.length) {
+        return res.status(400).json({
+          message: `Invalid rsmTypes: ${invalid.join(
+            ", "
+          )}. Allowed values: ${validRsmTypes.join(", ")}`,
+        });
+      }
+
+      const isPersonal = (lt) => normalizeLoanType(lt) === "PERSONAL";
+      const isBusiness = (lt) => normalizeLoanType(lt) === "BUSINESS";
+      const isHomeLoan = (lt) => normalizeLoanType(lt).startsWith("HOME_LOAN_");
+
+      if (normalizedRsmTypes.length) {
+        const hasPersonal = normalizedRsmTypes.includes(RSM_TYPES.PERSONAL);
+        const hasBusinessHome = normalizedRsmTypes.includes(RSM_TYPES.BUSINESS_HOME);
+
+        if (hasPersonal && !hasBusinessHome && !isPersonal(nextLoanType)) {
+          return res.status(400).json({
+            message: `Invalid loanType for rsmTypes=PERSONAL. Expected PERSONAL but got "${nextLoanType}".`,
+          });
+        }
+
+        if (
+          hasBusinessHome &&
+          !hasPersonal &&
+          !(isBusiness(nextLoanType) || isHomeLoan(nextLoanType))
+        ) {
+          return res.status(400).json({
+            message: `Invalid loanType for rsmTypes=BUSINESS_HOME. Expected BUSINESS or HOME_LOAN_* but got "${nextLoanType}".`,
+          });
+        }
+      }
+
+      let nextPincodes = existing.serviceablePincodes || [];
+      if (serviceablePincodes !== undefined) {
+        try {
+          const parsed = JSON.parse(serviceablePincodes);
+          if (Array.isArray(parsed)) {
+            nextPincodes = parsed.map((p) => String(p).trim()).filter(Boolean);
+          } else if (typeof serviceablePincodes === "string") {
+            nextPincodes = String(serviceablePincodes)
+              .split(",")
+              .map((p) => String(p).trim())
+              .filter(Boolean);
+          }
+        } catch (e) {
+          if (typeof serviceablePincodes === "string") {
+            const matches = serviceablePincodes.match(/\d{6}/g);
+            nextPincodes = matches
+              ? Array.from(new Set(matches))
+              : serviceablePincodes
+                  .split(/[\s,]+/)
+                  .map((p) => String(p).trim())
+                  .filter(Boolean);
+          } else {
+            nextPincodes = [];
+          }
+        }
+        // Deduplicate
+        nextPincodes = Array.from(new Set(nextPincodes.map((p) => String(p).trim()).filter(Boolean)));
+      }
+
+      existing.bankName = nextBankName;
+      existing.loanType = nextLoanType;
+      existing.portalLoginId = nextPortalLoginId;
+      existing.portalPassword = nextPortalPassword;
+      existing.portalLink = nextPortalLink;
+      existing.rsmTypes = normalizedRsmTypes;
+      existing.serviceablePincodes = nextPincodes;
+      existing.updatedBy = req.user.sub;
+
+      if (isActive !== undefined) {
+        const activeVal =
+          isActive === true ||
+          isActive === "true" ||
+          isActive === 1 ||
+          isActive === "1";
+        existing.isActive = Boolean(activeVal);
+      }
+
+      if (req.file?.location) {
+        existing.bankLogoUrl = req.file.location;
+      }
+
+      await existing.save();
+
+      return res.json({
+        message: "Bank updated successfully",
+        bank: existing,
+      });
+    } catch (err) {
+      console.error("Error updating bank:", err);
       return res.status(500).json({ message: "Internal Server Error" });
     }
   }
