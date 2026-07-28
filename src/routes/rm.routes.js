@@ -22,6 +22,11 @@ import mongoose from "mongoose";
 import mime from "mime-types";
 import { partnerUpload } from "../middleware/profileUpload.js";
 import { upload } from "../middleware/upload.js";
+import {
+  oversizeSingleDocViolation,
+  formatOversizeMessage,
+  deleteS3ObjectsForUploadedFiles,
+} from "../utils/docUploadLimits.js";
 import { FollowUp } from "../models/followUp.js";
 import dayjs from "dayjs";
 import { sendMail } from "../utils/sendMail.js";
@@ -2150,6 +2155,141 @@ router.get(
 //     }
 //   }
 // );
+
+// ✅ RM upload / replace document file (pending + manage form)
+router.post(
+  "/applications/:id/documents",
+  auth,
+  requireRole(ROLES.RM),
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const rmId = req.user.sub;
+      const { id } = req.params;
+      const { docType } = req.query;
+
+      if (!docType) {
+        return res.status(400).json({ message: "docType is required" });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({
+          message: "File is required",
+          receivedFields: Object.keys(req.body || {}),
+        });
+      }
+
+      const violSingle = oversizeSingleDocViolation(req.file, docType);
+      if (violSingle) {
+        await deleteS3ObjectsForUploadedFiles([req.file]);
+        return res.status(400).json({ message: formatOversizeMessage(violSingle) });
+      }
+
+      const partners = await User.find({ rmId, role: ROLES.PARTNER }).select("_id").lean();
+      const partnerIds = partners.map((p) => p._id);
+
+      const application = await Application.findOne({
+        _id: id,
+        $or: [{ rmId }, { partnerId: { $in: partnerIds } }],
+      });
+
+      if (!application) {
+        return res.status(404).json({
+          message: "Application not found or not assigned to this RM",
+        });
+      }
+
+      if (application.rsmId) {
+        await deleteS3ObjectsForUploadedFiles([req.file]);
+        return res.status(403).json({
+          message:
+            "This application has been transferred to RSM and can no longer be modified by RM.",
+        });
+      }
+
+      if (application.status === "DOC_COMPLETE") {
+        await deleteS3ObjectsForUploadedFiles([req.file]);
+        return res.status(403).json({
+          message:
+            "Cannot upload documents while status is DOC_COMPLETE. Set DOC_INCOMPLETE first if documents need updating.",
+        });
+      }
+
+      const normalizedType = String(docType).toUpperCase();
+      const docIndex = application.docs.findIndex(
+        (doc) => doc.docType?.toUpperCase() === normalizedType
+      );
+
+      const now = new Date();
+      const isUpdate = docIndex >= 0;
+      const previousDoc = isUpdate ? application.docs[docIndex] : null;
+
+      // RM-uploaded docs are treated as verified (RM is the verifier)
+      const newDoc = {
+        docType: normalizedType,
+        url: req.file.location || req.file.path,
+        uploadedBy: rmId,
+        status: "VERIFIED",
+        uploadedAt:
+          isUpdate && previousDoc?.uploadedAt ? previousDoc.uploadedAt : now,
+        updatedAt: now,
+        remarks: isUpdate
+          ? previousDoc?.remarks || "Updated by RM"
+          : "Uploaded by RM",
+        verifiedAt: now,
+        verifiedBy: rmId,
+        rejectedAt: null,
+        rejectedBy: null,
+      };
+
+      if (docIndex >= 0) {
+        application.docs[docIndex] = newDoc;
+      } else {
+        application.docs.push(newDoc);
+      }
+
+      if (application.status === "SUBMITTED") {
+        try {
+          application.transition(
+            "DOC_INCOMPLETE",
+            rmId,
+            "Documents uploaded by RM - verification in progress"
+          );
+        } catch (transitionErr) {
+          console.error(
+            "Status transition DOC_INCOMPLETE failed:",
+            transitionErr.message
+          );
+          application.status = "DOC_INCOMPLETE";
+        }
+      }
+
+      await application.save();
+
+      res.json({
+        message: isUpdate
+          ? "Document updated successfully by RM"
+          : "Document uploaded successfully by RM",
+        document: newDoc,
+        isUpdate,
+        applicationStatus: application.status,
+      });
+    } catch (err) {
+      console.error("RM document upload error:", err);
+      if (req.file) {
+        try {
+          await deleteS3ObjectsForUploadedFiles([req.file]);
+        } catch (_) {
+          /* ignore cleanup errors */
+        }
+      }
+      res.status(500).json({
+        message: "Error uploading document",
+        error: err.message,
+      });
+    }
+  }
+);
 
 // ✅ Update document status (REJECTED, VERIFIED, PENDING) with remarks
 // NOTE: This route MUST be before the download route to avoid conflicts
