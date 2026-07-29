@@ -36,6 +36,8 @@ import {
   formatFollowUpLastCall,
   buildPartnerFollowUpSummary,
   isValidFollowUpStatus,
+  partnerPendingDocStats,
+  totalLoansForRm,
 } from "../utils/followUpHelpers.js";
 import { sendMail } from "../utils/sendMail.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
@@ -502,6 +504,7 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
     const targetByPartnerId = Object.fromEntries(
       monthlyTargets.map((t) => [String(t.assignedTo), t])
     );
+    const pendingStats = await partnerPendingDocStats(partnerIds);
 
     const partnerData = partners.map((partner) => {
       const pid = String(partner._id);
@@ -572,6 +575,12 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
       const payoutDone = pPay.payoutDone || 0;
       const payoutPendingAmount = pPay.payoutPending || 0;
       const revenueGenerated = pPay.totalAll || 0;
+      const pending = pendingStats.get(pid) || {
+        applicationCountNeedingInfo: 0,
+        pendingDocsCount: 0,
+        remainingDocTypes: [],
+        appsNeedingMoreInfo: [],
+      };
 
       return {
         id: partner._id,
@@ -602,6 +611,15 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
         // Lifetime disbursed book
         totalDisbursed,
         disbursedFilesLifetime: life.disbursedFiles || 0,
+
+        // Deal / forms / pending docs for RM follow-up
+        applicationCount: totalApplications,
+        formsFilled: totalApplications,
+        moreInfoRequired: pending.applicationCountNeedingInfo > 0,
+        appsNeedingMoreInfoCount: pending.applicationCountNeedingInfo,
+        pendingDocsCount: pending.pendingDocsCount,
+        remainingDocTypes: pending.remainingDocTypes,
+        appsNeedingMoreInfo: pending.appsNeedingMoreInfo,
 
         // Current month achievement vs Target (same rules as GET /partners/targets)
         period: { month: currentMonth, year: currentYear },
@@ -755,20 +773,22 @@ router.get(
       const partners = await User.find({
         role: ROLES.PARTNER,
         rmId,
-        status: { $ne: "PENDING" },
+        // Include PENDING so loan counts match Manage Loans (same partner set)
       })
         .select("employeeId firstName lastName phone email status partnerCode")
         .lean();
 
       const partnerIds = partners.map((p) => p._id);
-      const [followMap, appCounts] = await Promise.all([
+      const [followMap, appCounts, pendingStats, totalLoans] = await Promise.all([
         latestFollowUpsByTargets({
           targetIds: partnerIds,
           followUpType: "PARTNER",
           period,
           partnerIdMode: true,
         }),
-        applicationCountsByPartner(partnerIds, period),
+        applicationCountsByPartner(partnerIds, null),
+        partnerPendingDocStats(partnerIds),
+        totalLoansForRm(rmId, partnerIds),
       ]);
 
       let items = partners.map((partner) => {
@@ -777,6 +797,12 @@ router.get(
         const applicationCount = appCounts.get(pid) || 0;
         const hasFilledForm = applicationCount > 0;
         const performance = hasFilledForm ? "working" : "non_working";
+        const pending = pendingStats.get(pid) || {
+          applicationCountNeedingInfo: 0,
+          pendingDocsCount: 0,
+          remainingDocTypes: [],
+          appsNeedingMoreInfo: [],
+        };
 
         return {
           employeeId: partner?.employeeId,
@@ -793,6 +819,11 @@ router.get(
           applicationCount,
           hasFilledForm,
           performance,
+          moreInfoRequired: pending.applicationCountNeedingInfo > 0,
+          appsNeedingMoreInfoCount: pending.applicationCountNeedingInfo,
+          pendingDocsCount: pending.pendingDocsCount,
+          remainingDocTypes: pending.remainingDocTypes,
+          appsNeedingMoreInfo: pending.appsNeedingMoreInfo,
         };
       });
 
@@ -811,7 +842,12 @@ router.get(
         items = items.filter((i) => !i.hasFilledForm);
       }
 
-      const summary = buildPartnerFollowUpSummary(items);
+      const summary = buildPartnerFollowUpSummary(items, totalLoans);
+      summary.moreInfoRequired = items.filter((i) => i.moreInfoRequired).length;
+      summary.pendingDocsTotal = items.reduce(
+        (s, i) => s + (i.pendingDocsCount || 0),
+        0
+      );
 
       res.json({
         period: period
@@ -1945,6 +1981,29 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       )
       .slice(0, 8);
 
+    // Enrich partner snapshot with forms + pending docs
+    const [appCountsDash, pendingDash] = await Promise.all([
+      applicationCountsByPartner(partnerIds, null),
+      partnerPendingDocStats(partnerIds),
+    ]);
+    for (const row of partnerPayoutSummary) {
+      const st = pendingDash.get(row.id) || {
+        applicationCountNeedingInfo: 0,
+        pendingDocsCount: 0,
+        remainingDocTypes: [],
+      };
+      row.applicationCount = appCountsDash.get(row.id) || 0;
+      row.formsFilled = row.applicationCount;
+      row.moreInfoRequired = st.applicationCountNeedingInfo > 0;
+      row.appsNeedingMoreInfoCount = st.applicationCountNeedingInfo;
+      row.pendingDocsCount = st.pendingDocsCount;
+      row.remainingDocTypes = st.remainingDocTypes || [];
+    }
+
+    const partnersNeedingMoreInfo = [...pendingDash.values()].filter(
+      (s) => s.applicationCountNeedingInfo > 0
+    ).length;
+
     // Response with RSM details
     res.json({
       totals: {
@@ -1954,6 +2013,8 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
         totalRevenue,
         avgRating,
         inProcessApplications,
+        partnersNeedingMoreInfo,
+        formsFilledTotal: [...appCountsDash.values()].reduce((a, b) => a + b, 0),
       },
       // Current month target and achievement
       currentMonthTarget: {

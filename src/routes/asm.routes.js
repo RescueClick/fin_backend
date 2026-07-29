@@ -1270,8 +1270,8 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM), async (req, res) => 
         followUpType: "RM",
         period,
       }),
-      applicationCountsByRm(rmIds, period),
-      partnerFillStatsByRm(rmIds, period),
+      applicationCountsByRm(rmIds, null),
+      partnerFillStatsByRm(rmIds, null),
     ]);
 
     let items = rms.map((rm) => {

@@ -2,6 +2,7 @@ import dayjs from "dayjs";
 import mongoose from "mongoose";
 import { Application } from "../models/Application.js";
 import { FollowUp } from "../models/followUp.js";
+import { findMissingMandatoryDocs } from "./loanMandatoryDocRules.js";
 
 const CALL_STATUSES = ["Connected", "Ringing", "Switch Off", "Not Reachable"];
 
@@ -106,14 +107,17 @@ export async function latestFollowUpsByTargets({
 }
 
 /**
- * Count applications grouped by partnerId (optional createdAt period).
+ * Count applications grouped by partnerId.
+ * Matches RM Manage Loans: no deletedAt filter (same as GET /rm/customers).
  */
-export async function applicationCountsByPartner(partnerIds, period) {
+export async function applicationCountsByPartner(partnerIds, period = null) {
   if (!partnerIds?.length) return new Map();
   const ids = partnerIds.map((id) =>
     id instanceof mongoose.Types.ObjectId ? id : new mongoose.Types.ObjectId(id)
   );
-  const match = { partnerId: { $in: ids } };
+  const match = {
+    partnerId: { $in: ids },
+  };
   if (period) {
     match.createdAt = { $gte: period.start, $lte: period.end };
   }
@@ -127,14 +131,28 @@ export async function applicationCountsByPartner(partnerIds, period) {
 }
 
 /**
- * Count applications grouped by rmId.
+ * Total loan applications visible to an RM (same scope as Manage Loans /customers).
  */
-export async function applicationCountsByRm(rmIds, period) {
+export async function totalLoansForRm(rmId, partnerIds = []) {
+  const ids = (partnerIds || []).map((id) =>
+    id instanceof mongoose.Types.ObjectId ? id : new mongoose.Types.ObjectId(id)
+  );
+  const or = [{ rmId }];
+  if (ids.length) or.push({ partnerId: { $in: ids } });
+  return Application.countDocuments({ $or: or });
+}
+
+/**
+ * Count applications grouped by rmId (Manage Loans style — no deletedAt filter).
+ */
+export async function applicationCountsByRm(rmIds, period = null) {
   if (!rmIds?.length) return new Map();
   const ids = rmIds.map((id) =>
     id instanceof mongoose.Types.ObjectId ? id : new mongoose.Types.ObjectId(id)
   );
-  const match = { rmId: { $in: ids } };
+  const match = {
+    rmId: { $in: ids },
+  };
   if (period) {
     match.createdAt = { $gte: period.start, $lte: period.end };
   }
@@ -148,9 +166,10 @@ export async function applicationCountsByRm(rmIds, period) {
 }
 
 /**
- * Per RM: how many partners have ≥1 application in period.
+ * Per RM: how many partners have ≥1 application (lifetime totals).
+ * Period is ignored for fill stats so loan counts match partner total loans.
  */
-export async function partnerFillStatsByRm(rmIds, period) {
+export async function partnerFillStatsByRm(rmIds, _period = null) {
   if (!rmIds?.length) return new Map();
   const ids = rmIds.map((id) =>
     id instanceof mongoose.Types.ObjectId ? id : new mongoose.Types.ObjectId(id)
@@ -174,7 +193,8 @@ export async function partnerFillStatsByRm(rmIds, period) {
   }
 
   const allPartnerIds = partners.map((p) => p._id);
-  const appCounts = await applicationCountsByPartner(allPartnerIds, period);
+  // Lifetime counts — do not filter by calendar period
+  const appCounts = await applicationCountsByPartner(allPartnerIds, null);
 
   const result = new Map();
   for (const rmId of ids) {
@@ -198,13 +218,27 @@ export function formatFollowUpLastCall(value) {
   return dayjs(value).format("DD MMM YYYY, hh:mm a");
 }
 
-export function buildPartnerFollowUpSummary(rows) {
+export function buildPartnerFollowUpSummary(rows, totalLoans = null) {
   const total = rows.length;
-  const filled = rows.filter((r) => r.hasFilledForm).length;
-  const notFilled = total - filled;
+  const filledPartners = rows.filter((r) => r.hasFilledForm).length;
+  const notFilled = total - filledPartners;
   const working = rows.filter((r) => r.performance === "working").length;
   const nonWorking = total - working;
-  return { total, filled, notFilled, working, nonWorking };
+  const loansFromRows = rows.reduce(
+    (s, r) => s + (Number(r.applicationCount) || 0),
+    0
+  );
+  const loans = totalLoans != null ? Number(totalLoans) : loansFromRows;
+  return {
+    total,
+    // "Filled loan form" card = total applications (same as Manage Loans), not partner count
+    filled: loans,
+    filledPartners,
+    notFilled,
+    working,
+    nonWorking,
+    totalLoans: loans,
+  };
 }
 
 export function buildRmFollowUpSummary(rows) {
@@ -225,4 +259,97 @@ export function buildRmFollowUpSummary(rows) {
     partnersFilled,
     partnersNotFilled,
   };
+}
+
+const INCOMPLETE_APP_STATUSES = ["DRAFT", "SUBMITTED", "DOC_INCOMPLETE"];
+const DOC_NEEDS_ACTION = new Set(["PENDING", "REJECTED", "UPDATED"]);
+
+function humanizeDocType(docType) {
+  return String(docType || "")
+    .replace(/_/g, " ")
+    .replace(/\bOR\b/g, "/")
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * Per partner: apps needing more docs + remaining doc type labels.
+ * Used by RM Follow-up / Partners / Dashboard deal views.
+ */
+export async function partnerPendingDocStats(partnerIds) {
+  if (!partnerIds?.length) return new Map();
+  const ids = partnerIds.map((id) =>
+    id instanceof mongoose.Types.ObjectId ? id : new mongoose.Types.ObjectId(id)
+  );
+
+  const result = new Map();
+  for (const id of ids) {
+    result.set(String(id), {
+      applicationCountNeedingInfo: 0,
+      pendingDocsCount: 0,
+      remainingDocTypes: [],
+      appsNeedingMoreInfo: [],
+    });
+  }
+
+  const allApps = await Application.find({
+    partnerId: { $in: ids },
+    $and: [
+      { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
+      {
+        status: {
+          $nin: ["DISBURSED", "REJECTED", "CANCELLED", "CLOSED"],
+        },
+      },
+    ],
+  })
+    .select("partnerId appNo status loanType docs customer")
+    .lean();
+
+  for (const app of allApps) {
+    const pid = String(app.partnerId);
+    if (!result.has(pid)) continue;
+
+    const missing = findMissingMandatoryDocs(
+      app.loanType,
+      app.customer || {},
+      app.docs || []
+    );
+
+    const actionDocs = (app.docs || [])
+      .filter((d) => DOC_NEEDS_ACTION.has(String(d.status || "").toUpperCase()))
+      .map((d) => d.docType);
+
+    const remainingSet = new Set([
+      ...missing.map(humanizeDocType),
+      ...actionDocs.map(humanizeDocType),
+    ]);
+
+    const isIncompleteStatus = INCOMPLETE_APP_STATUSES.includes(app.status);
+    if (!isIncompleteStatus && actionDocs.length === 0 && missing.length === 0) {
+      continue;
+    }
+    // Only incomplete pipeline statuses, or apps with rejected/pending/updated docs
+    if (!isIncompleteStatus && actionDocs.length === 0) {
+      continue;
+    }
+
+    const remainingDocTypes = [...remainingSet];
+    const entry = result.get(pid);
+    entry.applicationCountNeedingInfo += 1;
+    entry.pendingDocsCount += Math.max(remainingDocTypes.length, 1);
+    for (const t of remainingDocTypes) {
+      if (!entry.remainingDocTypes.includes(t)) entry.remainingDocTypes.push(t);
+    }
+    entry.appsNeedingMoreInfo.push({
+      appId: app._id,
+      appNo: app.appNo,
+      status: app.status,
+      loanType: app.loanType,
+      remainingDocTypes,
+      remainingCount: remainingDocTypes.length,
+    });
+  }
+
+  return result;
 }
