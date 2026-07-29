@@ -392,6 +392,7 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
       disbursedLifetimeByPartner,
       disbursedThisMonthByPartner,
       appTotalsByPartner,
+      appsThisMonthByPartner,
       approvedCountByPartner,
       monthlyTargets,
     ] = await Promise.all([
@@ -470,6 +471,15 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
         {
           $match: {
             partnerId: { $in: partnerIds },
+            createdAt: { $gte: monthStart, $lt: monthEnd },
+          },
+        },
+        { $group: { _id: "$partnerId", total: { $sum: 1 } } },
+      ]),
+      Application.aggregate([
+        {
+          $match: {
+            partnerId: { $in: partnerIds },
             status: "APPROVED",
           },
         },
@@ -498,13 +508,21 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
     const totalAppsMap = Object.fromEntries(
       appTotalsByPartner.map((r) => [String(r._id), r.total])
     );
+    const appsThisMonthMap = Object.fromEntries(
+      appsThisMonthByPartner.map((r) => [String(r._id), r.total])
+    );
     const approvedMap = Object.fromEntries(
       approvedCountByPartner.map((r) => [String(r._id), r.total])
     );
     const targetByPartnerId = Object.fromEntries(
       monthlyTargets.map((t) => [String(t.assignedTo), t])
     );
-    const pendingStats = await partnerPendingDocStats(partnerIds);
+    let pendingStats = new Map();
+    try {
+      pendingStats = await partnerPendingDocStats(partnerIds);
+    } catch (pendingErr) {
+      console.error("partnerPendingDocStats failed:", pendingErr);
+    }
 
     const partnerData = partners.map((partner) => {
       const pid = String(partner._id);
@@ -615,6 +633,7 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
         // Deal / forms / pending docs for RM follow-up
         applicationCount: totalApplications,
         formsFilled: totalApplications,
+        appsThisMonth: appsThisMonthMap[pid] || 0,
         moreInfoRequired: pending.applicationCountNeedingInfo > 0,
         appsNeedingMoreInfoCount: pending.applicationCountNeedingInfo,
         pendingDocsCount: pending.pendingDocsCount,
@@ -638,9 +657,9 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
         performanceDisbursement: `${disbursementPerfPct}%`,
         performanceFiles: `${filePerfPct}%`,
 
-        // Legacy / UI aliases
+        // Legacy / UI aliases — deals = loan forms (not only disbursed)
         assignedTarget,
-        dealsThisMonth: achievedFileCountMonth,
+        dealsThisMonth: appsThisMonthMap[pid] || 0,
         dealsClosedThisMonth: achievedFileCountMonth,
         revenueGenerated,
         successRate,
