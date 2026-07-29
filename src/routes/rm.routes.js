@@ -29,6 +29,14 @@ import {
 } from "../utils/docUploadLimits.js";
 import { FollowUp } from "../models/followUp.js";
 import dayjs from "dayjs";
+import {
+  parseFollowUpPeriod,
+  latestFollowUpsByTargets,
+  applicationCountsByPartner,
+  formatFollowUpLastCall,
+  buildPartnerFollowUpSummary,
+  isValidFollowUpStatus,
+} from "../utils/followUpHelpers.js";
 import { sendMail } from "../utils/sendMail.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendApplicationStatusEmail, sendDocumentStatusEmail } from "../utils/emailService.js";
@@ -740,40 +748,80 @@ router.get(
   async (req, res) => {
     try {
       const rmId = req.user.sub;
+      const period = parseFollowUpPeriod(req.query);
+      const statusFilter = String(req.query.status || "").trim();
+      const performanceFilter = String(req.query.performance || "").trim(); // working | non_working | filled | not_filled
 
-      // Fetch partners assigned to this RM
       const partners = await User.find({
         role: ROLES.PARTNER,
         rmId,
         status: { $ne: "PENDING" },
       })
-        .select("employeeId firstName lastName phone email status")
+        .select("employeeId firstName lastName phone email status partnerCode")
         .lean();
 
-      const partnerData = await Promise.all(
-        partners.map(async (partner) => {
-          // Get last follow-up (latest one)
-          const lastFollowUp = await FollowUp.findOne({
-            partnerId: partner._id,
-          })
-            .sort({ updatedAt: -1 })
-            .lean();
+      const partnerIds = partners.map((p) => p._id);
+      const [followMap, appCounts] = await Promise.all([
+        latestFollowUpsByTargets({
+          targetIds: partnerIds,
+          followUpType: "PARTNER",
+          period,
+          partnerIdMode: true,
+        }),
+        applicationCountsByPartner(partnerIds, period),
+      ]);
 
-          return {
-            employeeId: partner?.employeeId,
-            partnerId: partner._id,
-            name: `${partner.firstName} ${partner.lastName}`,
-            phone: partner.phone,
-            status: lastFollowUp?.status || "N/A",
-            remarks: lastFollowUp?.remarks || "",
-            lastCall: lastFollowUp?.lastCall
-              ? dayjs(lastFollowUp.lastCall).format("DD MMM YYYY, hh:mm a")
-              : null,
-          };
-        })
-      );
+      let items = partners.map((partner) => {
+        const pid = String(partner._id);
+        const lastFollowUp = followMap.get(pid);
+        const applicationCount = appCounts.get(pid) || 0;
+        const hasFilledForm = applicationCount > 0;
+        const performance = hasFilledForm ? "working" : "non_working";
 
-      res.json(partnerData);
+        return {
+          employeeId: partner?.employeeId,
+          partnerId: partner._id,
+          partnerCode: partner.partnerCode || null,
+          name: `${partner.firstName || ""} ${partner.lastName || ""}`.trim(),
+          phone: partner.phone,
+          email: partner.email,
+          accountStatus: partner.status,
+          status: lastFollowUp?.status || "N/A",
+          remarks: lastFollowUp?.remarks || "",
+          lastCall: formatFollowUpLastCall(lastFollowUp?.lastCall),
+          lastCallRaw: lastFollowUp?.lastCall || null,
+          applicationCount,
+          hasFilledForm,
+          performance,
+        };
+      });
+
+      if (statusFilter && statusFilter !== "N/A") {
+        items = items.filter((i) => i.status === statusFilter);
+      } else if (statusFilter === "N/A") {
+        items = items.filter((i) => i.status === "N/A");
+      }
+
+      if (performanceFilter === "working" || performanceFilter === "filled") {
+        items = items.filter((i) => i.hasFilledForm);
+      } else if (
+        performanceFilter === "non_working" ||
+        performanceFilter === "not_filled"
+      ) {
+        items = items.filter((i) => !i.hasFilledForm);
+      }
+
+      const summary = buildPartnerFollowUpSummary(items);
+
+      res.json({
+        period: period
+          ? { start: period.start, end: period.end, label: period.label }
+          : null,
+        summary,
+        items,
+        // backward compatible flat list for older clients
+        data: items,
+      });
     } catch (err) {
       console.error("Error fetching partner follow-ups:", err);
       res.status(500).json({ message: "Error fetching partner follow-ups" });
@@ -787,20 +835,42 @@ router.post(
   requireRole(ROLES.RM),
   async (req, res) => {
     try {
+      const rmId = req.user.sub;
       const { partnerId } = req.params;
       const { status, remarks, lastCall } = req.body;
 
-      let parsedDate = new Date(); // default current date
+      if (!isValidFollowUpStatus(status)) {
+        return res.status(400).json({
+          message: "Valid status is required (Connected, Ringing, Switch Off, Not Reachable)",
+        });
+      }
+
+      const partner = await User.findOne({
+        _id: partnerId,
+        role: ROLES.PARTNER,
+        rmId,
+      }).select("_id");
+      if (!partner) {
+        return res.status(404).json({
+          message: "Partner not found or not assigned to this RM",
+        });
+      }
+
+      let parsedDate = new Date();
       if (lastCall) {
-        parsedDate = dayjs(lastCall, "DD MMM YYYY, hh:mm a").toDate();
+        const parsed = dayjs(lastCall, "DD MMM YYYY, hh:mm a");
+        parsedDate = parsed.isValid() ? parsed.toDate() : new Date(lastCall);
+        if (Number.isNaN(parsedDate.getTime())) parsedDate = new Date();
       }
 
       const followUp = new FollowUp({
         partnerId,
+        targetId: partnerId,
+        followUpType: "PARTNER",
         status,
-        remarks,
+        remarks: remarks || "",
         lastCall: parsedDate,
-        updatedBy: req.user.sub,
+        updatedBy: rmId,
       });
 
       await followUp.save();
@@ -809,7 +879,7 @@ router.post(
         message: "Follow-up updated successfully",
         followUp: {
           ...followUp.toObject(),
-          lastCall: dayjs(followUp.lastCall).format("DD MMM YYYY, hh:mm a"),
+          lastCall: formatFollowUpLastCall(followUp.lastCall),
         },
       });
     } catch (err) {

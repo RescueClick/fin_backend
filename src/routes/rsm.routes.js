@@ -37,6 +37,16 @@ import {
   normalizeRsmTypeValue,
   rmReportingLineMatch,
 } from "../utils/rmRsmHierarchy.js";
+import {
+  parseFollowUpPeriod,
+  latestFollowUpsByTargets,
+  applicationCountsByRm,
+  partnerFillStatsByRm,
+  formatFollowUpLastCall,
+  buildRmFollowUpSummary,
+  isValidFollowUpStatus,
+} from "../utils/followUpHelpers.js";
+import { FollowUp } from "../models/followUp.js";
 
 const router = Router();
 
@@ -1559,11 +1569,10 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM), async (req, res
       return res.status(404).json({ message: "RM not found or not under this RSM" });
     }
 
-    if (!status || !["Connected", "Ringing", "Switch Off", "Not Reachable"].includes(status)) {
+    if (!isValidFollowUpStatus(status)) {
       return res.status(400).json({ message: "Valid status is required" });
     }
 
-    const FollowUp = (await import("../models/followUp.js")).FollowUp;
     const followUp = new FollowUp({
       targetId: rmId,
       followUpType: "RM",
@@ -1580,6 +1589,7 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM), async (req, res
       followUp: {
         ...followUp.toObject(),
         lastCall: followUp.lastCall.toISOString(),
+        lastCallFormatted: formatFollowUpLastCall(followUp.lastCall),
       },
     });
   } catch (error) {
@@ -1589,73 +1599,109 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM), async (req, res
 });
 
 // GET /api/rsm/rms/follow-ups
-// RSM gets all RM follow-ups
+// RSM gets all RM follow-ups (+ partner fill performance)
 router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const scope = await loadRsmReportingScope(rsmId);
+    const period = parseFollowUpPeriod(req.query);
+    const statusFilter = String(req.query.status || "").trim();
+    const performanceFilter = String(req.query.performance || "").trim();
 
     const rms = await User.find({
       role: ROLES.RM,
       ...scope,
-    }).lean();
+    })
+      .select("firstName lastName employeeId email phone status")
+      .lean();
     const rmIds = rms.map((rm) => rm._id);
 
-    const FollowUp = (await import("../models/followUp.js")).FollowUp;
+    const [followMap, appCounts, fillStats] = await Promise.all([
+      latestFollowUpsByTargets({
+        targetIds: rmIds,
+        followUpType: "RM",
+        period,
+      }),
+      applicationCountsByRm(rmIds, period),
+      partnerFillStatsByRm(rmIds, period),
+    ]);
 
-    // Get latest follow-up for each RM
-    const followUps = await FollowUp.find({
-      targetId: { $in: rmIds },
-      followUpType: "RM",
-    })
-      .sort({ lastCall: -1 })
-      .populate("targetId", "firstName lastName employeeId email phone")
-      .populate("updatedBy", "firstName lastName employeeId")
-      .lean();
+    let items = rms.map((rm) => {
+      const rk = String(rm._id);
+      const followUp = followMap.get(rk);
+      const applicationCount = appCounts.get(rk) || 0;
+      const stats = fillStats.get(rk) || {
+        partnerCount: 0,
+        partnersFilled: 0,
+        partnersNotFilled: 0,
+      };
+      const performance = applicationCount > 0 ? "working" : "non_working";
 
-    // Group by RM and get latest
-    const rmFollowUpsMap = {};
-    followUps.forEach((fu) => {
-      const rmId = fu.targetId._id.toString();
-      if (!rmFollowUpsMap[rmId] || new Date(fu.lastCall) > new Date(rmFollowUpsMap[rmId].lastCall)) {
-        rmFollowUpsMap[rmId] = fu;
-      }
-    });
-
-    // Format response
-    const formatted = rms.map((rm) => {
-      const followUp = rmFollowUpsMap[rm._id.toString()];
       return {
         rm: {
           id: rm._id,
-          name: `${rm.firstName} ${rm.lastName}`,
+          name: `${rm.firstName || ""} ${rm.lastName || ""}`.trim(),
           email: rm.email,
           phone: rm.phone,
           employeeId: rm.employeeId,
+          accountStatus: rm.status,
         },
         followUp: followUp
           ? {
-            status: followUp.status,
-            remarks: followUp.remarks,
-            lastCall: followUp.lastCall,
-            updatedBy: followUp.updatedBy
-              ? {
-                name: `${followUp.updatedBy.firstName} ${followUp.updatedBy.lastName}`,
-                employeeId: followUp.updatedBy.employeeId,
-              }
-              : null,
-          }
+              status: followUp.status,
+              remarks: followUp.remarks,
+              lastCall: followUp.lastCall,
+              lastCallFormatted: formatFollowUpLastCall(followUp.lastCall),
+              updatedBy: followUp.updatedBy
+                ? {
+                    name: `${followUp.updatedBy.firstName || ""} ${followUp.updatedBy.lastName || ""}`.trim(),
+                    employeeId: followUp.updatedBy.employeeId,
+                  }
+                : null,
+            }
           : null,
+        applicationCount,
+        partnerCount: stats.partnerCount,
+        partnersFilled: stats.partnersFilled,
+        partnersNotFilled: stats.partnersNotFilled,
+        hasFilledForm: stats.partnersFilled > 0,
+        performance,
+        status: followUp?.status || "N/A",
+        remarks: followUp?.remarks || "",
+        lastCall: formatFollowUpLastCall(followUp?.lastCall),
       };
     });
 
-    res.json(formatted);
+    if (statusFilter && statusFilter !== "N/A") {
+      items = items.filter((i) => i.status === statusFilter);
+    } else if (statusFilter === "N/A") {
+      items = items.filter((i) => i.status === "N/A");
+    }
+
+    if (performanceFilter === "working" || performanceFilter === "filled") {
+      items = items.filter((i) => i.performance === "working");
+    } else if (
+      performanceFilter === "non_working" ||
+      performanceFilter === "not_filled"
+    ) {
+      items = items.filter((i) => i.performance === "non_working");
+    }
+
+    const summary = buildRmFollowUpSummary(items);
+
+    res.json({
+      period: period
+        ? { start: period.start, end: period.end, label: period.label }
+        : null,
+      summary,
+      items,
+      data: items,
+    });
   } catch (error) {
     console.error("Error fetching RM follow-ups:", error);
     res.status(500).json({ message: "Server error" });
   }
 });
-
 
 
 

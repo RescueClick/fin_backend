@@ -1086,17 +1086,15 @@ router.post("/rsm/:rsmId/follow-up", auth, requireRole(ROLES.ASM), async (req, r
     const { rsmId } = req.params;
     const { status, remarks } = req.body;
 
-    // Verify RSM belongs to this ASM
     const rsm = await User.findOne({ _id: rsmId, asmId, role: ROLES.RSM });
     if (!rsm) {
       return res.status(404).json({ message: "RSM not found or not under this ASM" });
     }
 
-    if (!status || !["Connected", "Ringing", "Switch Off", "Not Reachable"].includes(status)) {
+    if (!isValidFollowUpStatus(status)) {
       return res.status(400).json({ message: "Valid status is required" });
     }
 
-    const FollowUp = (await import("../models/followUp.js")).FollowUp;
     const followUp = new FollowUp({
       targetId: rsmId,
       followUpType: "RSM",
@@ -1113,6 +1111,7 @@ router.post("/rsm/:rsmId/follow-up", auth, requireRole(ROLES.ASM), async (req, r
       followUp: {
         ...followUp.toObject(),
         lastCall: followUp.lastCall.toISOString(),
+        lastCallFormatted: formatFollowUpLastCall(followUp.lastCall),
       },
     });
   } catch (error) {
@@ -1122,67 +1121,232 @@ router.post("/rsm/:rsmId/follow-up", auth, requireRole(ROLES.ASM), async (req, r
 });
 
 // GET /api/asm/rsms/follow-ups
-// ASM gets all RSM follow-ups
 router.get("/rsms/follow-ups", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
     const asmId = req.user.sub;
+    const period = parseFollowUpPeriod(req.query);
+    const statusFilter = String(req.query.status || "").trim();
 
-    // Get all RSMs under this ASM
-    const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
+    const rsms = await User.find({ asmId, role: ROLES.RSM })
+      .select("firstName lastName employeeId email phone rsmType status")
+      .lean();
     const rsmIds = rsms.map((rsm) => rsm._id);
 
-    const FollowUp = (await import("../models/followUp.js")).FollowUp;
-
-    // Get latest follow-up for each RSM
-    const followUps = await FollowUp.find({
-      targetId: { $in: rsmIds },
+    const followMap = await latestFollowUpsByTargets({
+      targetIds: rsmIds,
       followUpType: "RSM",
-    })
-      .sort({ lastCall: -1 })
-      .populate("targetId", "firstName lastName employeeId email phone")
-      .populate("updatedBy", "firstName lastName employeeId")
-      .lean();
-
-    // Group by RSM and get latest
-    const rsmFollowUpsMap = {};
-    followUps.forEach((fu) => {
-      const rsmId = fu.targetId._id.toString();
-      if (!rsmFollowUpsMap[rsmId] || new Date(fu.lastCall) > new Date(rsmFollowUpsMap[rsmId].lastCall)) {
-        rsmFollowUpsMap[rsmId] = fu;
-      }
+      period,
     });
 
-    // Format response
-    const formatted = rsms.map((rsm) => {
-      const followUp = rsmFollowUpsMap[rsm._id.toString()];
+    let items = rsms.map((rsm) => {
+      const followUp = followMap.get(String(rsm._id));
       return {
         rsm: {
           id: rsm._id,
-          name: `${rsm.firstName} ${rsm.lastName}`,
+          name: `${rsm.firstName || ""} ${rsm.lastName || ""}`.trim(),
           email: rsm.email,
           phone: rsm.phone,
           employeeId: rsm.employeeId,
           rsmType: rsm.rsmType,
+          accountStatus: rsm.status,
         },
         followUp: followUp
           ? {
-            status: followUp.status,
-            remarks: followUp.remarks,
-            lastCall: followUp.lastCall,
-            updatedBy: followUp.updatedBy
-              ? {
-                name: `${followUp.updatedBy.firstName} ${followUp.updatedBy.lastName}`,
-                employeeId: followUp.updatedBy.employeeId,
-              }
-              : null,
-          }
+              status: followUp.status,
+              remarks: followUp.remarks,
+              lastCall: followUp.lastCall,
+              lastCallFormatted: formatFollowUpLastCall(followUp.lastCall),
+              updatedBy: followUp.updatedBy
+                ? {
+                    name: `${followUp.updatedBy.firstName || ""} ${followUp.updatedBy.lastName || ""}`.trim(),
+                    employeeId: followUp.updatedBy.employeeId,
+                  }
+                : null,
+            }
           : null,
+        status: followUp?.status || "N/A",
+        remarks: followUp?.remarks || "",
+        lastCall: formatFollowUpLastCall(followUp?.lastCall),
       };
     });
 
-    res.json(formatted);
+    if (statusFilter && statusFilter !== "N/A") {
+      items = items.filter((i) => i.status === statusFilter);
+    } else if (statusFilter === "N/A") {
+      items = items.filter((i) => i.status === "N/A");
+    }
+
+    res.json({
+      period: period
+        ? { start: period.start, end: period.end, label: period.label }
+        : null,
+      summary: { total: items.length },
+      items,
+      data: items,
+    });
   } catch (error) {
     console.error("Error fetching RSM follow-ups:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// POST /api/asm/rm/:rmId/follow-up  (ASM → RM as requested)
+router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.ASM), async (req, res) => {
+  try {
+    const asmId = req.user.sub;
+    const { rmId } = req.params;
+    const { status, remarks } = req.body;
+
+    const rsms = await User.find({ asmId, role: ROLES.RSM }).select("_id").lean();
+    const rsmIds = rsms.map((r) => r._id);
+
+    const rm = await User.findOne({
+      _id: rmId,
+      role: ROLES.RM,
+      $or: [
+        { personalRsmId: { $in: rsmIds } },
+        { businessHomeRsmId: { $in: rsmIds } },
+      ],
+    });
+
+    if (!rm) {
+      return res.status(404).json({ message: "RM not found or not under this ASM" });
+    }
+
+    if (!isValidFollowUpStatus(status)) {
+      return res.status(400).json({ message: "Valid status is required" });
+    }
+
+    const followUp = new FollowUp({
+      targetId: rmId,
+      followUpType: "RM",
+      status,
+      remarks: remarks || "",
+      lastCall: new Date(),
+      updatedBy: asmId,
+    });
+
+    await followUp.save();
+
+    res.json({
+      message: "Follow-up recorded successfully",
+      followUp: {
+        ...followUp.toObject(),
+        lastCall: followUp.lastCall.toISOString(),
+        lastCallFormatted: formatFollowUpLastCall(followUp.lastCall),
+      },
+    });
+  } catch (error) {
+    console.error("Error recording RM follow-up (ASM):", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// GET /api/asm/rms/follow-ups
+router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM), async (req, res) => {
+  try {
+    const asmId = req.user.sub;
+    const period = parseFollowUpPeriod(req.query);
+    const statusFilter = String(req.query.status || "").trim();
+    const performanceFilter = String(req.query.performance || "").trim();
+
+    const rsms = await User.find({ asmId, role: ROLES.RSM }).select("_id").lean();
+    const rsmIds = rsms.map((r) => r._id);
+
+    const rms = await User.find({
+      role: ROLES.RM,
+      $or: [
+        { personalRsmId: { $in: rsmIds } },
+        { businessHomeRsmId: { $in: rsmIds } },
+      ],
+    })
+      .select("firstName lastName employeeId email phone status personalRsmId businessHomeRsmId")
+      .lean();
+    const rmIds = rms.map((rm) => rm._id);
+
+    const [followMap, appCounts, fillStats] = await Promise.all([
+      latestFollowUpsByTargets({
+        targetIds: rmIds,
+        followUpType: "RM",
+        period,
+      }),
+      applicationCountsByRm(rmIds, period),
+      partnerFillStatsByRm(rmIds, period),
+    ]);
+
+    let items = rms.map((rm) => {
+      const rk = String(rm._id);
+      const followUp = followMap.get(rk);
+      const applicationCount = appCounts.get(rk) || 0;
+      const stats = fillStats.get(rk) || {
+        partnerCount: 0,
+        partnersFilled: 0,
+        partnersNotFilled: 0,
+      };
+      const performance = applicationCount > 0 ? "working" : "non_working";
+
+      return {
+        rm: {
+          id: rm._id,
+          name: `${rm.firstName || ""} ${rm.lastName || ""}`.trim(),
+          email: rm.email,
+          phone: rm.phone,
+          employeeId: rm.employeeId,
+          accountStatus: rm.status,
+        },
+        followUp: followUp
+          ? {
+              status: followUp.status,
+              remarks: followUp.remarks,
+              lastCall: followUp.lastCall,
+              lastCallFormatted: formatFollowUpLastCall(followUp.lastCall),
+              updatedBy: followUp.updatedBy
+                ? {
+                    name: `${followUp.updatedBy.firstName || ""} ${followUp.updatedBy.lastName || ""}`.trim(),
+                    employeeId: followUp.updatedBy.employeeId,
+                  }
+                : null,
+            }
+          : null,
+        applicationCount,
+        partnerCount: stats.partnerCount,
+        partnersFilled: stats.partnersFilled,
+        partnersNotFilled: stats.partnersNotFilled,
+        hasFilledForm: stats.partnersFilled > 0,
+        performance,
+        status: followUp?.status || "N/A",
+        remarks: followUp?.remarks || "",
+        lastCall: formatFollowUpLastCall(followUp?.lastCall),
+      };
+    });
+
+    if (statusFilter && statusFilter !== "N/A") {
+      items = items.filter((i) => i.status === statusFilter);
+    } else if (statusFilter === "N/A") {
+      items = items.filter((i) => i.status === "N/A");
+    }
+
+    if (performanceFilter === "working" || performanceFilter === "filled") {
+      items = items.filter((i) => i.performance === "working");
+    } else if (
+      performanceFilter === "non_working" ||
+      performanceFilter === "not_filled"
+    ) {
+      items = items.filter((i) => i.performance === "non_working");
+    }
+
+    const summary = buildRmFollowUpSummary(items);
+
+    res.json({
+      period: period
+        ? { start: period.start, end: period.end, label: period.label }
+        : null,
+      summary,
+      items,
+      data: items,
+    });
+  } catch (error) {
+    console.error("Error fetching RM follow-ups (ASM):", error);
     res.status(500).json({ message: "Server error" });
   }
 });
