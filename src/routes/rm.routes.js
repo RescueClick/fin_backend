@@ -465,29 +465,58 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
       Application.aggregate([
         { $match: { partnerId: { $in: partnerIds } } },
         {
-          $group: {
-            _id: "$partnerId",
-            total: { $sum: 1 },
-            filedAmount: {
-              $sum: {
-                $convert: {
-                  input: {
-                    $ifNull: [
-                      "$requestedAmount",
-                      {
-                        $ifNull: [
-                          "$customer.loanAmount",
-                          { $ifNull: ["$loanAmount", 0] },
-                        ],
-                      },
-                    ],
+          $addFields: {
+            // Same source as Manage Loans: customer required/requested loan amount
+            _submittedLoanAmount: {
+              $let: {
+                vars: {
+                  fromCustomer: {
+                    $convert: {
+                      input: "$customer.loanAmount",
+                      to: "double",
+                      onError: 0,
+                      onNull: 0,
+                    },
                   },
-                  to: "double",
-                  onError: 0,
-                  onNull: 0,
+                  fromRequested: {
+                    $convert: {
+                      input: "$requestedAmount",
+                      to: "double",
+                      onError: 0,
+                      onNull: 0,
+                    },
+                  },
+                  fromRoot: {
+                    $convert: {
+                      input: "$loanAmount",
+                      to: "double",
+                      onError: 0,
+                      onNull: 0,
+                    },
+                  },
+                },
+                in: {
+                  $cond: [
+                    { $gt: ["$$fromCustomer", 0] },
+                    "$$fromCustomer",
+                    {
+                      $cond: [
+                        { $gt: ["$$fromRequested", 0] },
+                        "$$fromRequested",
+                        "$$fromRoot",
+                      ],
+                    },
+                  ],
                 },
               },
             },
+          },
+        },
+        {
+          $group: {
+            _id: "$partnerId",
+            total: { $sum: 1 },
+            filedAmount: { $sum: "$_submittedLoanAmount" },
             approvedCount: {
               $sum: {
                 $cond: [{ $eq: ["$status", "APPROVED"] }, 1, 0],
@@ -498,22 +527,30 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
                 $cond: [
                   { $eq: ["$status", "APPROVED"] },
                   {
-                    $convert: {
-                      input: {
-                        $ifNull: [
-                          "$approvedLoanAmount",
+                    $cond: [
+                      {
+                        $gt: [
                           {
-                            $ifNull: [
-                              "$requestedAmount",
-                              "$customer.loanAmount",
-                            ],
+                            $convert: {
+                              input: "$approvedLoanAmount",
+                              to: "double",
+                              onError: 0,
+                              onNull: 0,
+                            },
                           },
+                          0,
                         ],
                       },
-                      to: "double",
-                      onError: 0,
-                      onNull: 0,
-                    },
+                      {
+                        $convert: {
+                          input: "$approvedLoanAmount",
+                          to: "double",
+                          onError: 0,
+                          onNull: 0,
+                        },
+                      },
+                      "$_submittedLoanAmount",
+                    ],
                   },
                   0,
                 ],
@@ -529,22 +566,30 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
                 $cond: [
                   { $eq: ["$status", "DISBURSED"] },
                   {
-                    $convert: {
-                      input: {
-                        $ifNull: [
-                          "$approvedLoanAmount",
+                    $cond: [
+                      {
+                        $gt: [
                           {
-                            $ifNull: [
-                              "$requestedAmount",
-                              "$customer.loanAmount",
-                            ],
+                            $convert: {
+                              input: "$approvedLoanAmount",
+                              to: "double",
+                              onError: 0,
+                              onNull: 0,
+                            },
                           },
+                          0,
                         ],
                       },
-                      to: "double",
-                      onError: 0,
-                      onNull: 0,
-                    },
+                      {
+                        $convert: {
+                          input: "$approvedLoanAmount",
+                          to: "double",
+                          onError: 0,
+                          onNull: 0,
+                        },
+                      },
+                      "$_submittedLoanAmount",
+                    ],
                   },
                   0,
                 ],
