@@ -391,9 +391,8 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
       incentiveByPartner,
       disbursedLifetimeByPartner,
       disbursedThisMonthByPartner,
-      appTotalsByPartner,
+      loanBookByPartner,
       appsThisMonthByPartner,
-      approvedCountByPartner,
       monthlyTargets,
     ] = await Promise.all([
       Payout.aggregate([
@@ -465,22 +464,100 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
       ]),
       Application.aggregate([
         { $match: { partnerId: { $in: partnerIds } } },
-        { $group: { _id: "$partnerId", total: { $sum: 1 } } },
+        {
+          $group: {
+            _id: "$partnerId",
+            total: { $sum: 1 },
+            filedAmount: {
+              $sum: {
+                $convert: {
+                  input: {
+                    $ifNull: [
+                      "$requestedAmount",
+                      {
+                        $ifNull: [
+                          "$customer.loanAmount",
+                          { $ifNull: ["$loanAmount", 0] },
+                        ],
+                      },
+                    ],
+                  },
+                  to: "double",
+                  onError: 0,
+                  onNull: 0,
+                },
+              },
+            },
+            approvedCount: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "APPROVED"] }, 1, 0],
+              },
+            },
+            approvedAmount: {
+              $sum: {
+                $cond: [
+                  { $eq: ["$status", "APPROVED"] },
+                  {
+                    $convert: {
+                      input: {
+                        $ifNull: [
+                          "$approvedLoanAmount",
+                          {
+                            $ifNull: [
+                              "$requestedAmount",
+                              "$customer.loanAmount",
+                            ],
+                          },
+                        ],
+                      },
+                      to: "double",
+                      onError: 0,
+                      onNull: 0,
+                    },
+                  },
+                  0,
+                ],
+              },
+            },
+            disbursedCount: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "DISBURSED"] }, 1, 0],
+              },
+            },
+            disbursedAmount: {
+              $sum: {
+                $cond: [
+                  { $eq: ["$status", "DISBURSED"] },
+                  {
+                    $convert: {
+                      input: {
+                        $ifNull: [
+                          "$approvedLoanAmount",
+                          {
+                            $ifNull: [
+                              "$requestedAmount",
+                              "$customer.loanAmount",
+                            ],
+                          },
+                        ],
+                      },
+                      to: "double",
+                      onError: 0,
+                      onNull: 0,
+                    },
+                  },
+                  0,
+                ],
+              },
+            },
+          },
+        },
       ]),
       Application.aggregate([
         {
           $match: {
             partnerId: { $in: partnerIds },
             createdAt: { $gte: monthStart, $lt: monthEnd },
-          },
-        },
-        { $group: { _id: "$partnerId", total: { $sum: 1 } } },
-      ]),
-      Application.aggregate([
-        {
-          $match: {
-            partnerId: { $in: partnerIds },
-            status: "APPROVED",
           },
         },
         { $group: { _id: "$partnerId", total: { $sum: 1 } } },
@@ -505,14 +582,11 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
     const monthAchMap = Object.fromEntries(
       disbursedThisMonthByPartner.map((r) => [String(r._id), r])
     );
-    const totalAppsMap = Object.fromEntries(
-      appTotalsByPartner.map((r) => [String(r._id), r.total])
+    const loanBookMap = Object.fromEntries(
+      loanBookByPartner.map((r) => [String(r._id), r])
     );
     const appsThisMonthMap = Object.fromEntries(
       appsThisMonthByPartner.map((r) => [String(r._id), r.total])
-    );
-    const approvedMap = Object.fromEntries(
-      approvedCountByPartner.map((r) => [String(r._id), r.total])
     );
     const targetByPartnerId = Object.fromEntries(
       monthlyTargets.map((t) => [String(t.assignedTo), t])
@@ -530,14 +604,24 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
       const pInc = incentiveMap[pid] || {};
       const life = lifetimeMap[pid] || {};
       const monthAch = monthAchMap[pid] || {};
+      const loanBook = loanBookMap[pid] || {};
       const targetDoc = targetByPartnerId[pid];
 
-      const totalDisbursed = life.totalDisbursed || 0;
-      const totalApplications = totalAppsMap[pid] || 0;
-      const approvedCount = approvedMap[pid] || 0;
+      const totalDisbursed =
+        life.totalDisbursed || loanBook.disbursedAmount || 0;
+      const totalApplications = loanBook.total || 0;
+      const filedAmount = loanBook.filedAmount || 0;
+      const approvedCount = loanBook.approvedCount || 0;
+      const approvedAmount = loanBook.approvedAmount || 0;
+      const disbursedCount =
+        life.disbursedFiles || loanBook.disbursedCount || 0;
+      const disbursedAmount =
+        life.totalDisbursed || loanBook.disbursedAmount || 0;
       const successRate =
         totalApplications > 0
-          ? Math.round((approvedCount / totalApplications) * 100)
+          ? Math.round(
+              ((approvedCount + disbursedCount) / totalApplications) * 100
+            )
           : 0;
 
       const fileCountTarget = targetDoc?.fileCountTarget ?? 4;
@@ -628,7 +712,22 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
 
         // Lifetime disbursed book
         totalDisbursed,
-        disbursedFilesLifetime: life.disbursedFiles || 0,
+        disbursedFilesLifetime: disbursedCount,
+
+        // Loan book for RM to judge partner performance
+        filedAmount,
+        approvedCount,
+        approvedAmount,
+        disbursedCount,
+        disbursedAmount,
+        loanBook: {
+          forms: totalApplications,
+          filedAmount,
+          approvedCount,
+          approvedAmount,
+          disbursedCount,
+          disbursedAmount,
+        },
 
         // Deal / forms / pending docs for RM follow-up
         applicationCount: totalApplications,
