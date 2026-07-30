@@ -461,6 +461,11 @@ router.post(
       // Transition
       app.transition(to, rsmId, note);
 
+      // Persist rejection remark on the application so partners can see it in app/web
+      if (to === "REJECTED" && note && String(note).trim()) {
+        app.remarks = String(note).trim();
+      }
+
       // ✅ Auto-update document statuses based on application status change
       const now = new Date();
       if (to === "APPROVED" || to === "DISBURSED") {

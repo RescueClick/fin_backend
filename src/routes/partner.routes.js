@@ -2135,6 +2135,32 @@ router.post(
   }
 );
 
+/** Partner-visible apps: include REJECTED until scheduled delete runs (deletedAt in future). */
+function partnerVisibleAppsFilter(partnerId) {
+  return {
+    partnerId,
+    isArchived: { $ne: true },
+    $or: [
+      { deletedAt: null },
+      { deletedAt: { $gt: new Date() } },
+    ],
+  };
+}
+
+function resolveAppRemarks(app) {
+  if (app?.remarks) return app.remarks;
+  const history = app?.stageHistory;
+  if (Array.isArray(history) && history.length) {
+    for (let i = history.length - 1; i >= 0; i--) {
+      const entry = history[i];
+      if (entry?.note && String(entry.note).trim()) {
+        return entry.note;
+      }
+    }
+  }
+  return null;
+}
+
 /** Partner views own applications with customer + payout info */
 router.get(
   "/get-applications",
@@ -2142,10 +2168,7 @@ router.get(
   requireRole(ROLES.PARTNER),
   async (req, res) => {
     try {
-      const apps = await Application.find({
-        partnerId: req.user.sub,
-        deletedAt: null,
-      })
+      const apps = await Application.find(partnerVisibleAppsFilter(req.user.sub))
         .populate("customerId", "firstName lastName email phone") // fetch linked user
         .lean();
 
@@ -2162,7 +2185,12 @@ router.get(
             "amount status note createdAt"
           ).lean();
 
-          return { ...app, status: maskedStatus, payouts };
+          return {
+            ...app,
+            status: maskedStatus,
+            remarks: resolveAppRemarks(app),
+            payouts,
+          };
         })
       );
 
@@ -2277,11 +2305,8 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
   try {
     const partnerId = req.user.sub; // Partner logged in
 
-    // Find all applications under this Partner
-    const applications = await Application.find({
-      partnerId,
-      deletedAt: null
-    })
+    // Find all applications under this Partner (incl. REJECTED until auto-delete)
+    const applications = await Application.find(partnerVisibleAppsFilter(partnerId))
       .populate("customerId", "employeeId firstName lastName email phone")
       .populate("rmId", "firstName lastName email phone")
       .lean();
@@ -2317,7 +2342,7 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       status: app.status === "LOGIN" ? "DOC_COMPLETE" : app.status,
       payoutAmount: payoutMap[app._id.toString()] || 0, // ✅ only payout amount
       docs: app.docs || [], // ✅ Include documents for incomplete doc tracking
-      remarks: app.remarks || null, // ✅ Include application rejection remarks
+      remarks: resolveAppRemarks(app), // rejection remark from app.remarks or stageHistory
       rm: {
         rmId: app.rmId?._id,
         name: `${app.rmId?.firstName ?? ""} ${app.rmId?.lastName ?? ""}`.trim(),
@@ -2384,8 +2409,7 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     // 1️⃣ Build filter for Applications (Fetch all for this period/partner)
     // ------------------
     const match = {
-      partnerId: new mongoose.Types.ObjectId(partnerId),
-      deletedAt: null,
+      ...partnerVisibleAppsFilter(new mongoose.Types.ObjectId(partnerId)),
     };
 
     // Note: We'll filter by date in-memory for some stats to allowed
