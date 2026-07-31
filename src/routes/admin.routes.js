@@ -52,6 +52,7 @@ import {
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
 import { bulkMovePartnersToRm } from "../utils/bulkMovePartnersToRm.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
+import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import {
   deriveCurrentTargetContext,
   rebalanceHierarchyTargetsReplace,
@@ -1238,7 +1239,8 @@ router.post(
   }
 );
 
-// GET /get-customers?customerId=xxxx — Customer Applications list (non-deleted apps)
+// GET /get-customers?customerId=xxxx — Customer Applications list
+// Include rejected apps still in cleanup grace period (deletedAt in the future).
 router.get(
   "/get-customers",
   auth,
@@ -1247,10 +1249,9 @@ router.get(
     try {
       const { customerId } = req.query;
 
-      const query = {
-        deletedAt: null,
-        ...(customerId ? { customerId } : {}),
-      };
+      const query = activeApplicationsFilter(
+        customerId ? { customerId } : {}
+      );
 
       const applications = await Application.find(query)
         .populate({
@@ -1580,27 +1581,26 @@ router.get(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      // Applications stats (exclude soft-deleted)
-      const activeAppFilter = { deletedAt: null };
+      // Applications stats — keep rejected apps visible until cleanup date passes
+      const activeAppFilter = activeApplicationsFilter();
       const totalFiles = await Application.countDocuments(activeAppFilter);
-      const rejectedFiles = await Application.countDocuments({
-        ...activeAppFilter,
-        status: "REJECTED",
-      });
-      const approvedFiles = await Application.countDocuments({
-        ...activeAppFilter,
-        status: "APPROVED",
-      });
-      const inProcessFiles = await Application.countDocuments({
-        ...activeAppFilter,
-        status: {
-          $in: ["SUBMITTED", "KYC_PENDING", "KYC_COMPLETE", "UNDER_REVIEW"],
-        },
-      });
+      const rejectedFiles = await Application.countDocuments(
+        activeApplicationsFilter({ status: "REJECTED" })
+      );
+      const approvedFiles = await Application.countDocuments(
+        activeApplicationsFilter({ status: "APPROVED" })
+      );
+      const inProcessFiles = await Application.countDocuments(
+        activeApplicationsFilter({
+          status: {
+            $in: ["SUBMITTED", "KYC_PENDING", "KYC_COMPLETE", "UNDER_REVIEW"],
+          },
+        })
+      );
 
       // Total disbursed = revenue (sum of approvedLoanAmount of DISBURSED apps)
       const revenueAgg = await Application.aggregate([
-        { $match: { status: "DISBURSED", deletedAt: null } },
+        { $match: activeApplicationsFilter({ status: "DISBURSED" }) },
         {
           $group: {
             _id: null,
@@ -1645,12 +1645,12 @@ router.get(
       const totalRSM = await User.countDocuments({ role: ROLES.RSM });
       const totalPartners = await User.countDocuments({ role: ROLES.PARTNER });
 
-      // Customers = unique people with at least one active (non-deleted) loan application.
-      // Do NOT count orphan CUSTOMER users with no application — that inflated the dashboard vs Customer page.
-      const customerIds = await Application.distinct("customerId", {
-        deletedAt: null,
-        customerId: { $ne: null },
-      });
+      // Customers = unique people with a still-visible loan application
+      // (includes rejected apps until scheduled deletedAt cleanup).
+      const customerIds = await Application.distinct(
+        "customerId",
+        activeApplicationsFilter({ customerId: { $ne: null } })
+      );
       const totalCustomers = customerIds.length;
 
       // Keep raw user-account count available for ops if needed
