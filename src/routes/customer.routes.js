@@ -12,6 +12,7 @@ import {
   deleteS3ObjectsForUploadedFiles,
   normalizeDocTypeForLimits,
 } from "../utils/docUploadLimits.js";
+import { openLoanApplicationFilter } from "../utils/loanReapplyPolicy.js";
 
 const router = Router();
 /** Partner views own applications (with status & docs) */
@@ -90,14 +91,17 @@ router.post(
       }
 
       if (customerUser) {
-        const existingApp = await Application.findOne({
-          customerId: customerUser._id,
-          deletedAt: null,
-        });
+        // Rejected/disbursed history is kept; only an open loan file blocks a new apply
+        const existingApp = await Application.findOne(
+          openLoanApplicationFilter(customerUser._id)
+        );
         if (existingApp) {
-          return res
-            .status(400)
-            .json({ message: "Application already exists for this customer" });
+          return res.status(400).json({
+            message:
+              "An open loan application already exists for this customer. Finish or wait until it is closed/rejected before applying again.",
+            existingAppNo: existingApp.appNo,
+            existingStatus: existingApp.status,
+          });
         }
       }
 

@@ -38,6 +38,7 @@ import {
 import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { Config } from "../models/Config.js";
+import { openLoanApplicationFilter } from "../utils/loanReapplyPolicy.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import {
   getReferralWebBaseUrl,
@@ -1074,11 +1075,27 @@ router.post(
           ? [references]
           : [];
 
-      // Check for existing application
+      // Draft/incomplete can be updated; REJECTED history is kept and allows a fresh apply
       let existingApp = await Application.findOne({
         customerId: customerUser._id,
-        deletedAt: null,
-      });
+        status: { $in: ["DRAFT", "DOC_INCOMPLETE"] },
+        isArchived: { $ne: true },
+        $or: [{ deletedAt: null }, { deletedAt: { $gt: new Date() } }],
+      }).sort({ updatedAt: -1 });
+
+      if (!existingApp) {
+        const openApp = await Application.findOne(
+          openLoanApplicationFilter(customerUser._id)
+        ).sort({ updatedAt: -1 });
+        if (openApp) {
+          return res.status(400).json({
+            message:
+              "An open loan application already exists for this customer. After it is rejected or closed, they can apply again — the old file is kept.",
+            existingAppNo: openApp.appNo,
+            existingStatus: openApp.status,
+          });
+        }
+      }
 
       const customerData = {
         firstName: customer.firstName,
@@ -1541,11 +1558,27 @@ router.post(
           ? [references]
           : [];
 
-      // Check for existing application
+      // Draft/incomplete can be updated; REJECTED history is kept and allows a fresh apply
       let existingApp = await Application.findOne({
         customerId: customerUser._id,
-        deletedAt: null,
-      });
+        status: { $in: ["DRAFT", "DOC_INCOMPLETE"] },
+        isArchived: { $ne: true },
+        $or: [{ deletedAt: null }, { deletedAt: { $gt: new Date() } }],
+      }).sort({ updatedAt: -1 });
+
+      if (!existingApp) {
+        const openApp = await Application.findOne(
+          openLoanApplicationFilter(customerUser._id)
+        ).sort({ updatedAt: -1 });
+        if (openApp) {
+          return res.status(400).json({
+            message:
+              "An open loan application already exists for this customer. After it is rejected or closed, they can apply again — the old file is kept.",
+            existingAppNo: openApp.appNo,
+            existingStatus: openApp.status,
+          });
+        }
+      }
 
       const customerData = {
         firstName: customer.firstName,
