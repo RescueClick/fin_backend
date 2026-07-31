@@ -23,6 +23,7 @@ import {
   LOCKED_INCENTIVE_STATUS,
 } from "../utils/reassignmentPolicy.js";
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
+import { bulkMovePartnersToRm, getRmIdsUnderAsm } from "../utils/bulkMovePartnersToRm.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
 import { emitPayoutCreated } from "../utils/socketEmitter.js";
 import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
@@ -163,6 +164,33 @@ router.get("/get-rsms", auth, requireRole(ROLES.ASM), async (req, res) => {
     res.status(500).json({ message: "Error fetching RSMs" });
   }
 });
+
+// Bulk move partners From RM → To RM (ASM hierarchy only; open workload)
+router.post(
+  "/partners/bulk-move-rm",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    try {
+      const { partnerIds, fromRmId, toRmId, dryRun } = req.body || {};
+      const result = await bulkMovePartnersToRm({
+        partnerIds,
+        fromRmId,
+        toRmId,
+        actorId: req.user.sub,
+        actorRole: ROLES.ASM,
+        dryRun: Boolean(dryRun),
+        req,
+      });
+      return res.json(result);
+    } catch (err) {
+      console.error("Error in ASM /partners/bulk-move-rm:", err);
+      return res
+        .status(err.status || 500)
+        .json({ message: err.message || "Failed to move partners" });
+    }
+  }
+);
 
 router.get("/get-rm", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
@@ -399,6 +427,13 @@ router.get(
     try {
       const asmId = req.user.sub;
       const { rmId } = req.params;
+
+      const allowedRmIds = await getRmIdsUnderAsm(asmId);
+      if (!allowedRmIds.some((id) => String(id) === String(rmId))) {
+        return res
+          .status(403)
+          .json({ message: "RM is not under your ASM hierarchy" });
+      }
 
       const partners = await User.find({
         role: ROLES.PARTNER,

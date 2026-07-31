@@ -50,6 +50,7 @@ import {
   LOCKED_INCENTIVE_STATUS,
 } from "../utils/reassignmentPolicy.js";
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
+import { bulkMovePartnersToRm } from "../utils/bulkMovePartnersToRm.js";
 import {
   deriveCurrentTargetContext,
   rebalanceHierarchyTargetsReplace,
@@ -1094,6 +1095,33 @@ router.get(
     } catch (err) {
       console.error("Error fetching unassigned partners:", err);
       res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// Bulk move partners From RM → To RM (open workload only)
+router.post(
+  "/partners/bulk-move-rm",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { partnerIds, fromRmId, toRmId, dryRun } = req.body || {};
+      const result = await bulkMovePartnersToRm({
+        partnerIds,
+        fromRmId,
+        toRmId,
+        actorId: req.user.sub,
+        actorRole: ROLES.SUPER_ADMIN,
+        dryRun: Boolean(dryRun),
+        req,
+      });
+      return res.json(result);
+    } catch (err) {
+      console.error("Error in /partners/bulk-move-rm:", err);
+      return res
+        .status(err.status || 500)
+        .json({ message: err.message || "Failed to move partners" });
     }
   }
 );
