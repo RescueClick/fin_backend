@@ -30,6 +30,7 @@ export async function findCustomersForPartner(partnerId) {
 /**
  * Keep Customer User linked to the owning partner and current RM.
  * Does not change Application.partnerId (ownership stays with the same partner).
+ * Never steals a customer already linked to a different partner.
  */
 export async function syncCustomersRmForPartners({
   partnerIds,
@@ -43,21 +44,45 @@ export async function syncCustomersRmForPartners({
     const appRows = await appQuery.lean();
     const fromApps = appRows.map((r) => r.customerId).filter(Boolean);
 
-    const result = await User.updateMany(
+    // Already under this partner — only refresh RM
+    const linkedUpdate = await User.updateMany(
       {
         role: ROLES.CUSTOMER,
-        $or: [{ partnerId }, { _id: { $in: fromApps } }],
+        partnerId,
       },
       {
         $set: {
-          partnerId,
           rmId: toRmId,
           updatedAt: new Date(),
         },
       },
       session ? { session } : undefined
     );
-    synced += result.modifiedCount || 0;
+    synced += linkedUpdate.modifiedCount || 0;
+
+    // Apps under this partner but User.partnerId never set — attach without stealing
+    if (fromApps.length) {
+      const orphanUpdate = await User.updateMany(
+        {
+          role: ROLES.CUSTOMER,
+          _id: { $in: fromApps },
+          $or: [
+            { partnerId: null },
+            { partnerId: { $exists: false } },
+            { partnerId },
+          ],
+        },
+        {
+          $set: {
+            partnerId,
+            rmId: toRmId,
+            updatedAt: new Date(),
+          },
+        },
+        session ? { session } : undefined
+      );
+      synced += orphanUpdate.modifiedCount || 0;
+    }
   }
   return synced;
 }
