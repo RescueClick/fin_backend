@@ -1643,6 +1643,8 @@ router.get(
       const totalASM = await User.countDocuments({ role: ROLES.ASM });
       const totalRM = await User.countDocuments({ role: ROLES.RM });
       const totalRSM = await User.countDocuments({ role: ROLES.RSM });
+      const totalPartners = await User.countDocuments({ role: ROLES.PARTNER });
+
       // Customers = unique people with at least one active (non-deleted) loan application.
       // Do NOT count orphan CUSTOMER users with no application — that inflated the dashboard vs Customer page.
       const customerIds = await Application.distinct("customerId", {
