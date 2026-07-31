@@ -54,6 +54,10 @@ import { bulkMovePartnersToRm } from "../utils/bulkMovePartnersToRm.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import {
+  softHideTimestamp,
+  dataPreservationBlockMessage,
+} from "../utils/dataProtection.js";
+import {
   deriveCurrentTargetContext,
   rebalanceHierarchyTargetsReplace,
 } from "../utils/targetRebalanceService.js";
@@ -1441,7 +1445,7 @@ router.get(
   }
 );
 
-// ✅ DELETE /admin/customer/:customerId - Delete customer and all their loan applications (Admin only)
+// Soft-hide customer + applications (NO hard delete — preserves loan book / docs)
 router.delete(
   "/customer/:customerId",
   auth,
@@ -1454,61 +1458,45 @@ router.delete(
         return res.status(400).json({ message: "Invalid customer ID" });
       }
 
-      // Find the customer
       const customer = await User.findOne({
         _id: customerId,
-        role: ROLES.CUSTOMER
+        role: ROLES.CUSTOMER,
       });
 
       if (!customer) {
         return res.status(404).json({ message: "Customer not found" });
       }
 
-      // Find all applications for this customer
-      const applications = await Application.find({
-        customerId: customerId
-      });
+      const now = softHideTimestamp();
 
-      // Delete all documents/files associated with applications
-      for (const app of applications) {
-        if (app.docs && Array.isArray(app.docs)) {
-          for (const doc of app.docs) {
-            if (doc.url) {
-              try {
-                const filePath = doc.url.startsWith('/')
-                  ? path.join(process.cwd(), doc.url)
-                  : doc.url;
-                if (fs.existsSync(filePath)) {
-                  fs.unlinkSync(filePath);
-                }
-              } catch (fileErr) {
-                console.error(`Error deleting file ${doc.url}:`, fileErr.message);
-                // Continue even if file deletion fails
-              }
-            }
-          }
+      // Hide applications from UI; keep Mongo rows + documents for recovery/audit
+      const appUpdate = await Application.updateMany(
+        { customerId },
+        {
+          $set: {
+            deletedAt: now,
+            updatedAt: now,
+          },
         }
-      }
+      );
 
-      // Delete all applications for this customer
-      const deletedAppsCount = await Application.deleteMany({
-        customerId: customerId
-      });
-
-      // Delete the customer user
-      await User.deleteOne({ _id: customerId });
+      customer.status = "SUSPENDED";
+      customer.deletedAt = now;
+      await customer.save();
 
       res.json({
-        message: "Customer and all associated loan applications deleted successfully",
-        customerId: customerId,
+        message:
+          "Customer and applications soft-deleted (hidden). Data is retained and can be recovered from the database.",
+        customerId,
         customerName: `${customer.firstName} ${customer.lastName}`,
-        deletedApplications: deletedAppsCount.deletedCount,
+        softDeletedApplications: appUpdate.modifiedCount || 0,
+        hardDeleted: false,
       });
     } catch (error) {
-      console.error("Error deleting customer:", error);
+      console.error("Error soft-deleting customer:", error);
       res.status(500).json({
         message: "Failed to delete customer",
-        error: error.message
+        error: error.message,
       });
     }
   }
@@ -2597,7 +2585,8 @@ router.post(
   }
 );
 
-// Permanently delete/reject a partner request with all documents
+// Reject PENDING partner registration only.
+// Active partners with loan book cannot be hard-deleted (prevents data loss).
 router.delete(
   "/partner/:partnerId",
   auth,
@@ -2615,25 +2604,32 @@ router.delete(
         return res.status(404).json({ message: "Partner not found" });
       }
 
-      // Delete all applications associated with this partner
-      await Application.deleteMany({ partnerId: partner._id });
+      const [appCount, payoutCount, customerCount] = await Promise.all([
+        Application.countDocuments({ partnerId: partner._id }),
+        Payout.countDocuments({ partnerId: partner._id }),
+        User.countDocuments({ role: ROLES.CUSTOMER, partnerId: partner._id }),
+      ]);
 
-      // Delete all payouts associated with this partner
-      await Payout.deleteMany({ partnerId: partner._id });
+      if (
+        String(partner.status || "").toUpperCase() !== "PENDING" ||
+        appCount > 0 ||
+        payoutCount > 0 ||
+        customerCount > 0
+      ) {
+        return res.status(400).json({
+          message: dataPreservationBlockMessage("partner"),
+          hint: "Use partner deactivate + reassign to another partner. Hard delete is only allowed for PENDING registrations with no applications.",
+          status: partner.status,
+          applications: appCount,
+          payouts: payoutCount,
+          customers: customerCount,
+        });
+      }
 
-      // Delete all targets assigned to this partner
+      // PENDING registration with no loan data — remove registration only
       await Target.deleteMany({ assignedTo: partner._id });
-
-      // Reassign customers to null (or handle as needed)
-      await User.updateMany(
-        { partnerId: partner._id },
-        { $unset: { partnerId: "" } }
-      );
-
-      // Delete the partner user account (this will also remove their documents from S3 if configured)
       await User.deleteOne({ _id: partner._id });
 
-      // 📧 Send rejection email
       try {
         await sendMail({
           to: partner.email,
@@ -2642,25 +2638,27 @@ router.delete(
             <p>Dear ${partner.firstName} ${partner.lastName},</p>
             <p>We regret to inform you that your Partner registration request has been <b>rejected</b>.</p>
             <p><b>Partner ID:</b> ${partner.partnerCode || partner.employeeId || "-"}</p>
-            <p>All associated documents and data have been removed from our system.</p>
-            <p>If you believe this action was incorrect, please contact support immediately.</p>
+            <p>If you believe this action was incorrect, please contact support.</p>
             <br/>
             <p>Regards,<br/>DhanSource Capital</p>
           `,
         });
-        console.log("📧 Rejection mail sent to:", partner.email);
       } catch (mailErr) {
         console.error("❌ Failed to send rejection email:", mailErr.message);
       }
 
       res.json({
-        message: "Partner request rejected and deleted permanently. All associated data removed.",
+        message: "Pending partner registration rejected. No loan applications were deleted.",
         id: partner._id,
         email: partner.email,
+        hardDeletedApplications: 0,
       });
     } catch (error) {
-      console.error("Error deleting Partner:", error);
-      res.status(500).json({ message: "Failed to delete Partner" });
+      console.error("Error rejecting partner:", error);
+      res.status(500).json({
+        message: "Failed to reject partner",
+        error: error.message,
+      });
     }
   }
 );

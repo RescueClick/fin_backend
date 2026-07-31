@@ -823,8 +823,7 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
 
 // ==================== PARTNER MANAGEMENT (RM) ====================
 
-// DELETE /api/rm/partners/:partnerId
-// RM can soft-delete (deactivate) a partner under them
+// Soft-deactivate partner under RM — keep rmId so hierarchy/data is recoverable
 router.delete(
   "/partners/:partnerId",
   auth,
@@ -834,7 +833,6 @@ router.delete(
       const rmId = req.user.sub;
       const { partnerId } = req.params;
 
-      // Ensure this partner belongs to the logged-in RM
       const partner = await User.findOne({
         _id: partnerId,
         role: ROLES.PARTNER,
@@ -847,18 +845,23 @@ router.delete(
         });
       }
 
-      // Soft delete: mark suspended and set deletedAt
+      const appCount = await Application.countDocuments({
+        partnerId: partner._id,
+      });
+
+      // Soft suspend only — never clear rmId / never delete applications
       partner.status = "SUSPENDED";
       partner.deletedAt = new Date();
-
-      // Optionally also detach from RM
-      partner.rmId = null;
-
       await partner.save();
 
       return res.json({
-        message: "Partner deleted successfully from this RM",
+        message:
+          appCount > 0
+            ? "Partner suspended. Applications and customers are retained under this partner/RM."
+            : "Partner suspended successfully.",
         partnerId: partner._id,
+        applicationsRetained: appCount,
+        rmIdCleared: false,
       });
     } catch (err) {
       console.error("Error deleting partner from RM:", err);

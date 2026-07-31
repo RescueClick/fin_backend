@@ -3262,8 +3262,7 @@ router.post("/update/:rmId", auth, requireRole(ROLES.ASM), async (req, res) => {
   }
 });
 
-// ✅ Delete RM (ASM only)
-// DELETE /rm/:rmId
+// Soft-deactivate RM only when no partners remain. Never unset partner.rmId (data loss risk).
 router.delete(
   "/delete/:rmId",
   auth,
@@ -3272,20 +3271,31 @@ router.delete(
     try {
       const { rmId } = req.params;
 
-      // Check if RM exists
       const rm = await User.findOne({ _id: rmId, role: ROLES.RM });
       if (!rm) return res.status(404).json({ message: "RM not found" });
 
-      // Optionally reassign partners under this RM before deleting
-      await User.updateMany(
-        { role: ROLES.PARTNER, rmId },
-        { $unset: { rmId: "" } } // remove rmId link
-      );
+      const partnerCount = await User.countDocuments({
+        role: ROLES.PARTNER,
+        rmId,
+      });
 
-      // Delete the RM
-      await User.findByIdAndDelete(rmId);
+      if (partnerCount > 0) {
+        return res.status(400).json({
+          message:
+            "Cannot delete RM while partners are linked. Use RM deactivate and reassign partners first so applications/customers are not orphaned.",
+          partners: partnerCount,
+        });
+      }
 
-      res.json({ message: "RM deleted successfully" });
+      rm.status = "SUSPENDED";
+      rm.deletedAt = new Date();
+      await rm.save();
+
+      res.json({
+        message: "RM soft-deactivated. Account retained for audit; no partner links were cleared.",
+        rmId,
+        hardDeleted: false,
+      });
     } catch (err) {
       console.error(err);
       res.status(500).json({ message: err.message });
