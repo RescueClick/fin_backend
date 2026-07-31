@@ -125,6 +125,8 @@ router.post(
               passwordHash: await argon2.hash(customer.password || tempPassword),
               role: ROLES.CUSTOMER,
               status: "ACTIVE",
+              partnerId: req.user.role === ROLES.PARTNER ? userId : undefined,
+              rmId: req.user.role === ROLES.PARTNER ? partner?.rmId : undefined,
             });
             created = true;
             console.log(`✅ Customer created with unique employeeId: ${employeeId}`);
@@ -143,6 +145,16 @@ router.post(
               throw createError;
             }
           }
+        }
+      }
+
+      if (customerUser && req.user.role === ROLES.PARTNER) {
+        const linkPatch = {};
+        if (!customerUser.partnerId) linkPatch.partnerId = userId;
+        if (!customerUser.rmId && partner?.rmId) linkPatch.rmId = partner.rmId;
+        if (Object.keys(linkPatch).length) {
+          await User.updateOne({ _id: customerUser._id }, { $set: linkPatch });
+          Object.assign(customerUser, linkPatch);
         }
       }
 

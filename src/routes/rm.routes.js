@@ -22,6 +22,7 @@ import mongoose from "mongoose";
 import mime from "mime-types";
 import { partnerUpload } from "../middleware/profileUpload.js";
 import { upload } from "../middleware/upload.js";
+import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import {
   oversizeSingleDocViolation,
   formatOversizeMessage,
@@ -890,10 +891,8 @@ router.get(
           .json({ message: "Partner not found under this RM" });
       }
 
-      // 2. Fetch Customers under this Partner
-      const customers = await User.find({ role: ROLES.CUSTOMER, partnerId })
-        .select("-passwordHash -__v")
-        .lean();
+      // 2. Fetch Customers under this Partner (apps + User.partnerId so counts don't drop)
+      const customers = await findCustomersForPartner(partnerId);
 
       // 3. Prepare single object response
       const response = {

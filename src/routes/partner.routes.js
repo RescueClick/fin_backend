@@ -909,9 +909,10 @@ router.post(
       let assignedPartnerId = null;
       let assignedRmId = null;
       let assignedAsmId = null;
+      let referralPartner = null;
 
       if (partnerReferralCode) {
-        const referralPartner = await User.findOne({
+        referralPartner = await User.findOne({
           partnerCode: partnerReferralCode.trim(),
           role: ROLES.PARTNER,
           status: "ACTIVE",
@@ -964,6 +965,8 @@ router.post(
               passwordHash: await argon2.hash(customer.password || tempPassword),
               role: ROLES.CUSTOMER,
               status: "ACTIVE",
+              partnerId: assignedPartnerId || undefined,
+              rmId: assignedRmId || undefined,
               referredBy: referralPartner?._id || undefined,
               referralRewardStatus: referralPartner?._id ? "PENDING" : "NONE",
             });
@@ -984,6 +987,17 @@ router.post(
               throw createError;
             }
           }
+        }
+      }
+
+      // Keep existing customer attached to owning partner/RM when fields were never set
+      if (customerUser && assignedPartnerId) {
+        const linkPatch = {};
+        if (!customerUser.partnerId) linkPatch.partnerId = assignedPartnerId;
+        if (!customerUser.rmId && assignedRmId) linkPatch.rmId = assignedRmId;
+        if (Object.keys(linkPatch).length) {
+          await User.updateOne({ _id: customerUser._id }, { $set: linkPatch });
+          Object.assign(customerUser, linkPatch);
         }
       }
 
@@ -1418,6 +1432,8 @@ router.post(
               passwordHash: await argon2.hash(customer.password || tempPassword),
               role: ROLES.CUSTOMER,
               status: "ACTIVE",
+              partnerId: assignedPartnerId || undefined,
+              rmId: assignedRmId || undefined,
               referredBy: referralPartner?._id || undefined,
               referralRewardStatus: referralPartner?._id ? "PENDING" : "NONE",
             });
@@ -1438,6 +1454,17 @@ router.post(
               throw createError;
             }
           }
+        }
+      }
+
+      // Keep existing customer attached to owning partner/RM when fields were never set
+      if (customerUser && assignedPartnerId) {
+        const linkPatch = {};
+        if (!customerUser.partnerId) linkPatch.partnerId = assignedPartnerId;
+        if (!customerUser.rmId && assignedRmId) linkPatch.rmId = assignedRmId;
+        if (Object.keys(linkPatch).length) {
+          await User.updateOne({ _id: customerUser._id }, { $set: linkPatch });
+          Object.assign(customerUser, linkPatch);
         }
       }
 
@@ -1816,7 +1843,19 @@ router.post(
           passwordHash: await argon2.hash(tempPassword),
           role: ROLES.CUSTOMER,
           status: "ACTIVE",
+          partnerId,
+          rmId: assignedRmId,
         });
+      }
+
+      if (customerUser) {
+        const linkPatch = {};
+        if (!customerUser.partnerId) linkPatch.partnerId = partnerId;
+        if (!customerUser.rmId && assignedRmId) linkPatch.rmId = assignedRmId;
+        if (Object.keys(linkPatch).length) {
+          await User.updateOne({ _id: customerUser._id }, { $set: linkPatch });
+          Object.assign(customerUser, linkPatch);
+        }
       }
 
       // Create application skeleton

@@ -24,6 +24,7 @@ import {
 } from "../utils/reassignmentPolicy.js";
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
 import { bulkMovePartnersToRm, getRmIdsUnderAsm } from "../utils/bulkMovePartnersToRm.js";
+import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
 import { emitPayoutCreated } from "../utils/socketEmitter.js";
 import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
@@ -2401,10 +2402,8 @@ router.get(
           .json({ message: "Partner not found under your ASM hierarchy" });
       }
 
-      // 2. Fetch Customers under this Partner
-      const customers = await User.find({ role: ROLES.CUSTOMER, partnerId })
-        .select("-passwordHash -__v")
-        .lean();
+      // 2. Fetch Customers under this Partner (apps + User.partnerId so counts don't drop)
+      const customers = await findCustomersForPartner(partnerId);
 
       // 3. Response formatting
       const formatted = customers.map((cust) => ({

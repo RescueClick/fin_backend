@@ -12,6 +12,10 @@ import {
   LOCKED_APPLICATION_STATUSES,
 } from "./reassignmentPolicy.js";
 import { persistReassignmentAudit } from "./reassignmentAuditService.js";
+import {
+  findCustomersForPartner,
+  syncCustomersRmForPartners,
+} from "./partnerCustomerSync.js";
 
 export const BULK_MOVE_MAX_BATCH = 100;
 
@@ -145,10 +149,17 @@ export async function bulkMovePartnersToRm({
     Application.countDocuments(lockedAppsFilter),
   ]);
 
+  let customerCount = 0;
+  for (const pid of movablePartnerIds) {
+    const custs = await findCustomersForPartner(pid);
+    customerCount += custs.length;
+  }
+
   const preview = {
     movedPartners: partners.length,
     movedApplications: openAppCount,
     skippedLockedApplications: lockedAppCount,
+    syncedCustomers: customerCount,
     partners: partners.map((p) => ({
       id: p._id,
       name: `${p.firstName || ""} ${p.lastName || ""}`.trim(),
@@ -176,6 +187,7 @@ export async function bulkMovePartnersToRm({
   const session = await mongoose.startSession();
   let movedPartners = 0;
   let movedApplications = 0;
+  let syncedCustomers = 0;
   let audit = null;
 
   try {
@@ -191,8 +203,22 @@ export async function bulkMovePartnersToRm({
       );
       movedPartners = partnerUpdate.modifiedCount || 0;
 
-      const appSet = { rmId: toId, updatedAt: new Date() };
-      if (newAsmId) appSet.asmId = newAsmId;
+      // Keep customers on the same partner; only refresh RM linkage so counts stay in sync
+      syncedCustomers = await syncCustomersRmForPartners({
+        partnerIds: movablePartnerIds,
+        toRmId: toId,
+        session,
+      });
+
+      const appSet = {
+        rmId: toId,
+        "customer.rmId": toId,
+        updatedAt: new Date(),
+      };
+      if (newAsmId) {
+        appSet.asmId = newAsmId;
+        appSet["customer.asmId"] = newAsmId;
+      }
 
       const appUpdate = await Application.updateMany(
         openAppsFilter,
@@ -218,10 +244,11 @@ export async function bulkMovePartnersToRm({
     movedPartners,
     movedApplications,
     skippedLockedApplications: lockedAppCount,
+    syncedCustomers,
     partners: preview.partners,
     fromRm: preview.fromRm,
     toRm: preview.toRm,
     audit,
-    message: `Moved ${movedPartners} partner(s) and ${movedApplications} open application(s) to the new RM. ${lockedAppCount} settled application(s) kept historical RM.`,
+    message: `Moved ${movedPartners} partner(s), synced ${syncedCustomers} customer(s), and ${movedApplications} open application(s) to the new RM. ${lockedAppCount} settled application(s) kept historical RM. Customers stay with the same partner.`,
   };
 }

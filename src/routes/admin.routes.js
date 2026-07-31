@@ -51,6 +51,7 @@ import {
 } from "../utils/reassignmentPolicy.js";
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
 import { bulkMovePartnersToRm } from "../utils/bulkMovePartnersToRm.js";
+import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import {
   deriveCurrentTargetContext,
   rebalanceHierarchyTargetsReplace,
@@ -1397,51 +1398,31 @@ router.get(
 
   async (req, res) => {
     try {
-      const list = await User.find({
-        role: ROLES.CUSTOMER,
-
-        partnerId: req.params.partnerId,
+      const partner = await User.findOne({
+        _id: req.params.partnerId,
+        role: ROLES.PARTNER,
       })
-
-        .select("-passwordHash -__v")
-
+        .select("firstName lastName employeeId rmId")
         .populate({
-          path: "partnerId",
-
-          select: "firstName lastName employeeId rmId",
-
-          populate: {
-            path: "rmId", // also get RM details under Partner
-
-            select: "firstName lastName employeeId",
-          },
+          path: "rmId",
+          select: "firstName lastName employeeId",
         })
-
         .lean();
 
-      // ✅ Flatten partner + rm details into same object
+      if (!partner) {
+        return res.status(404).json({ message: "Partner not found" });
+      }
 
-      const formatted = list.map((customer) => {
-        const partner = customer.partnerId;
+      const list = await findCustomersForPartner(req.params.partnerId);
+      const rm = partner.rmId;
 
-        const rm = partner?.rmId;
-
-        delete customer.partnerId;
-
-        return {
-          ...customer,
-
-          partnerName: partner
-            ? `${partner.firstName} ${partner.lastName}`
-            : null,
-
-          partnerEmployeeId: partner ? partner.employeeId : null,
-
-          rmName: rm ? `${rm.firstName} ${rm.lastName}` : null,
-
-          rmEmployeeId: rm ? rm.employeeId : null,
-        };
-      });
+      const formatted = list.map((customer) => ({
+        ...customer,
+        partnerName: `${partner.firstName} ${partner.lastName}`,
+        partnerEmployeeId: partner.employeeId,
+        rmName: rm ? `${rm.firstName} ${rm.lastName}` : null,
+        rmEmployeeId: rm ? rm.employeeId : null,
+      }));
 
       res.json(formatted);
     } catch (err) {
