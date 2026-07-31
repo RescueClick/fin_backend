@@ -1238,17 +1238,19 @@ router.post(
   }
 );
 
-// GET /get-customers?customerId=xxxx
+// GET /get-customers?customerId=xxxx — Customer Applications list (non-deleted apps)
 router.get(
   "/get-customers",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const { customerId } = req.query; // get customerId from query
+      const { customerId } = req.query;
 
-      // Build the query
-      const query = customerId ? { customerId } : {}; // if no customerId, return all
+      const query = {
+        deletedAt: null,
+        ...(customerId ? { customerId } : {}),
+      };
 
       const applications = await Application.find(query)
         .populate({
@@ -1267,25 +1269,30 @@ router.get(
             select: "firstName lastName employeeId",
           },
         })
-        .select("appNo loanType approvedLoanAmount status createdAt customer")
+        .select("appNo loanType approvedLoanAmount status createdAt customer customerId")
         .lean();
 
       const formatted = applications.map((app) => {
-        const c = app.customer || {}; // embedded customer info
-        const customerUser = app.customerId || {}; // main User document
+        const c = app.customer || {};
+        const customerUser = app.customerId || {};
         const p = app.partnerId || {};
         const r = app.rmId || {};
         const a = r.asmId || {};
+        const userMongoId =
+          customerUser._id ||
+          (typeof app.customerId === "object" ? app.customerId?._id : app.customerId) ||
+          null;
 
         return {
-          _id: c._id || customerUser._id || null, // use customerId._id if embedded customer is missing
+          _id: app._id,
+          applicationId: app._id,
           appNo: app.appNo,
           firstName: c.firstName || customerUser.firstName || null,
           lastName: c.lastName || customerUser.lastName || null,
-          userId: customerUser._id || null,
+          userId: userMongoId,
           employeeId: customerUser.employeeId || null,
-          email: c.email || null,
-          phone: c.phone || null,
+          email: c.email || customerUser.email || null,
+          phone: c.phone || customerUser.phone || null,
           loanType: app.loanType,
           loanAmount: c.loanAmount || 0,
           disburseAmount: app.approvedLoanAmount || 0,
@@ -1573,15 +1580,19 @@ router.get(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      // Applications stats
-      const totalFiles = await Application.countDocuments();
+      // Applications stats (exclude soft-deleted)
+      const activeAppFilter = { deletedAt: null };
+      const totalFiles = await Application.countDocuments(activeAppFilter);
       const rejectedFiles = await Application.countDocuments({
+        ...activeAppFilter,
         status: "REJECTED",
       });
       const approvedFiles = await Application.countDocuments({
+        ...activeAppFilter,
         status: "APPROVED",
       });
       const inProcessFiles = await Application.countDocuments({
+        ...activeAppFilter,
         status: {
           $in: ["SUBMITTED", "KYC_PENDING", "KYC_COMPLETE", "UNDER_REVIEW"],
         },
@@ -1589,7 +1600,7 @@ router.get(
 
       // Total disbursed = revenue (sum of approvedLoanAmount of DISBURSED apps)
       const revenueAgg = await Application.aggregate([
-        { $match: { status: "DISBURSED" } },
+        { $match: { status: "DISBURSED", deletedAt: null } },
         {
           $group: {
             _id: null,
@@ -1632,8 +1643,16 @@ router.get(
       const totalASM = await User.countDocuments({ role: ROLES.ASM });
       const totalRM = await User.countDocuments({ role: ROLES.RM });
       const totalRSM = await User.countDocuments({ role: ROLES.RSM });
-      const totalPartners = await User.countDocuments({ role: ROLES.PARTNER });
-      const totalCustomers = await User.countDocuments({
+      // Customers = unique people with at least one active (non-deleted) loan application.
+      // Do NOT count orphan CUSTOMER users with no application — that inflated the dashboard vs Customer page.
+      const customerIds = await Application.distinct("customerId", {
+        deletedAt: null,
+        customerId: { $ne: null },
+      });
+      const totalCustomers = customerIds.length;
+
+      // Keep raw user-account count available for ops if needed
+      const totalCustomerAccounts = await User.countDocuments({
         role: ROLES.CUSTOMER,
       });
 
@@ -1650,6 +1669,7 @@ router.get(
         totalRSM,
         totalPartners,
         totalCustomers,
+        totalCustomerAccounts,
       });
     } catch (err) {
       console.error("Dashboard error:", err);
