@@ -2296,7 +2296,7 @@ router.post(
 );
 
 
-// Permanently delete an ASM (only after deactivation)
+// Soft-retain ASM account (never hard-delete — keeps historical Application.asmId refs)
 router.delete(
   "/asm/:asmId",
   auth,
@@ -2314,20 +2314,36 @@ router.delete(
         return res.status(404).json({ message: "ASM not found" });
       }
 
-      // Enforce safety: only allow delete once already deactivated
       if (asm.status === "ACTIVE") {
         return res
           .status(400)
-          .json({ message: "Deactivate ASM before deleting the account" });
+          .json({ message: "Deactivate ASM before removing the account" });
       }
 
+      const [rsmCount, rmCount] = await Promise.all([
+        User.countDocuments({ role: ROLES.RSM, asmId }),
+        User.countDocuments({ role: ROLES.RM, asmId }),
+      ]);
+      if (rsmCount > 0 || rmCount > 0) {
+        return res.status(400).json({
+          message:
+            "Cannot remove ASM while RSMs/RMs remain linked. Reassign hierarchy first so loan data is not orphaned.",
+          rsms: rsmCount,
+          rms: rmCount,
+        });
+      }
+
+      asm.status = "SUSPENDED";
+      asm.deletedAt = softHideTimestamp();
+      await asm.save();
       await Target.deleteMany({ assignedTo: asm._id });
-      await User.deleteOne({ _id: asm._id });
 
       res.json({
-        message: "ASM account deleted permanently",
+        message:
+          "ASM soft-removed. Account retained for audit; no applications or customers were deleted.",
         id: asm._id,
         email: asm.email,
+        hardDeleted: false,
       });
     } catch (error) {
       console.error("Error deleting ASM:", error);
@@ -2444,7 +2460,7 @@ router.post(
   }
 );
 
-// Permanently delete an RSM (only after deactivation)
+// Soft-retain RSM account (never hard-delete)
 router.delete(
   "/rsm/:rsmId",
   auth,
@@ -2465,7 +2481,7 @@ router.delete(
       if (rsm.status === "ACTIVE") {
         return res
           .status(400)
-          .json({ message: "Deactivate RSM before deleting the account" });
+          .json({ message: "Deactivate RSM before removing the account" });
       }
 
       const rmStillLinked = await User.countDocuments({
@@ -2475,17 +2491,22 @@ router.delete(
       if (rmStillLinked > 0) {
         return res.status(400).json({
           message:
-            "Cannot delete RSM while RMs are still assigned. Reassign them first.",
+            "Cannot remove RSM while RMs are still assigned. Reassign them first so loan data is not orphaned.",
+          rms: rmStillLinked,
         });
       }
 
+      rsm.status = "SUSPENDED";
+      rsm.deletedAt = softHideTimestamp();
+      await rsm.save();
       await Target.deleteMany({ assignedTo: rsm._id });
-      await User.deleteOne({ _id: rsm._id });
 
       res.json({
-        message: "RSM account deleted permanently",
+        message:
+          "RSM soft-removed. Account retained for audit; no applications or customers were deleted.",
         id: rsm._id,
         email: rsm.email,
+        hardDeleted: false,
       });
     } catch (error) {
       console.error("Error deleting RSM:", error);
@@ -2494,7 +2515,7 @@ router.delete(
   }
 );
 
-// Permanently delete an RM (only after deactivation)
+// Soft-retain RM account (never hard-delete — keeps Application.rmId history)
 router.delete(
   "/rm/:rmId",
   auth,
@@ -2515,16 +2536,32 @@ router.delete(
       if (rm.status === "ACTIVE") {
         return res
           .status(400)
-          .json({ message: "Deactivate RM before deleting the account" });
+          .json({ message: "Deactivate RM before removing the account" });
       }
 
+      const partnerCount = await User.countDocuments({
+        role: ROLES.PARTNER,
+        rmId,
+      });
+      if (partnerCount > 0) {
+        return res.status(400).json({
+          message:
+            "Cannot remove RM while partners remain linked. Use RM deactivate + reassign first.",
+          partners: partnerCount,
+        });
+      }
+
+      rm.status = "SUSPENDED";
+      rm.deletedAt = softHideTimestamp();
+      await rm.save();
       await Target.deleteMany({ assignedTo: rm._id });
-      await User.deleteOne({ _id: rm._id });
 
       res.json({
-        message: "RM account deleted permanently",
+        message:
+          "RM soft-removed. Account retained for audit; no applications or customers were deleted.",
         id: rm._id,
         email: rm.email,
+        hardDeleted: false,
       });
     } catch (error) {
       console.error("Error deleting RM:", error);
