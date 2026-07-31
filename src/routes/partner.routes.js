@@ -38,7 +38,7 @@ import {
 import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { Config } from "../models/Config.js";
-import { openLoanApplicationFilter } from "../utils/loanReapplyPolicy.js";
+import { findCustomerApplyBlocker } from "../utils/loanReapplyPolicy.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import {
   getReferralWebBaseUrl,
@@ -1075,7 +1075,7 @@ router.post(
           ? [references]
           : [];
 
-      // Draft/incomplete can be updated; REJECTED history is kept and allows a fresh apply
+      // Draft/incomplete can be updated; REJECTED history kept — reapply only after 3 months
       let existingApp = await Application.findOne({
         customerId: customerUser._id,
         status: { $in: ["DRAFT", "DOC_INCOMPLETE"] },
@@ -1084,15 +1084,14 @@ router.post(
       }).sort({ updatedAt: -1 });
 
       if (!existingApp) {
-        const openApp = await Application.findOne(
-          openLoanApplicationFilter(customerUser._id)
-        ).sort({ updatedAt: -1 });
-        if (openApp) {
+        const blocker = await findCustomerApplyBlocker(customerUser._id);
+        if (blocker) {
           return res.status(400).json({
-            message:
-              "An open loan application already exists for this customer. After it is rejected or closed, they can apply again — the old file is kept.",
-            existingAppNo: openApp.appNo,
-            existingStatus: openApp.status,
+            message: blocker.message,
+            reason: blocker.type,
+            existingAppNo: blocker.app?.appNo,
+            existingStatus: blocker.app?.status,
+            canApplyAfter: blocker.unlockAt || null,
           });
         }
       }
@@ -1558,7 +1557,7 @@ router.post(
           ? [references]
           : [];
 
-      // Draft/incomplete can be updated; REJECTED history is kept and allows a fresh apply
+      // Draft/incomplete can be updated; REJECTED history kept — reapply only after 3 months
       let existingApp = await Application.findOne({
         customerId: customerUser._id,
         status: { $in: ["DRAFT", "DOC_INCOMPLETE"] },
@@ -1567,15 +1566,14 @@ router.post(
       }).sort({ updatedAt: -1 });
 
       if (!existingApp) {
-        const openApp = await Application.findOne(
-          openLoanApplicationFilter(customerUser._id)
-        ).sort({ updatedAt: -1 });
-        if (openApp) {
+        const blocker = await findCustomerApplyBlocker(customerUser._id);
+        if (blocker) {
           return res.status(400).json({
-            message:
-              "An open loan application already exists for this customer. After it is rejected or closed, they can apply again — the old file is kept.",
-            existingAppNo: openApp.appNo,
-            existingStatus: openApp.status,
+            message: blocker.message,
+            reason: blocker.type,
+            existingAppNo: blocker.app?.appNo,
+            existingStatus: blocker.app?.status,
+            canApplyAfter: blocker.unlockAt || null,
           });
         }
       }
