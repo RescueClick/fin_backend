@@ -126,6 +126,7 @@ export async function bulkMovePartnersToRm({
 
   const movablePartnerIds = partners.map((p) => p._id);
 
+  const allAppsFilter = { partnerId: { $in: movablePartnerIds } };
   const openAppsFilter = buildReassignableApplicationFilter({
     partnerId: { $in: movablePartnerIds },
   });
@@ -134,7 +135,8 @@ export async function bulkMovePartnersToRm({
     status: { $in: LOCKED_APPLICATION_STATUSES },
   };
 
-  const [openAppCount, lockedAppCount] = await Promise.all([
+  const [allAppCount, openAppCount, lockedAppCount] = await Promise.all([
+    Application.countDocuments(allAppsFilter),
     Application.countDocuments(openAppsFilter),
     Application.countDocuments(lockedAppsFilter),
   ]);
@@ -147,8 +149,10 @@ export async function bulkMovePartnersToRm({
 
   const preview = {
     movedPartners: partners.length,
-    movedApplications: openAppCount,
-    skippedLockedApplications: lockedAppCount,
+    movedApplications: allAppCount,
+    openApplications: openAppCount,
+    settledApplicationsAlsoMoving: lockedAppCount,
+    skippedLockedApplications: 0,
     syncedCustomers: customerCount,
     partners: partners.map((p) => ({
       id: p._id,
@@ -226,23 +230,15 @@ export async function bulkMovePartnersToRm({
         appSet["customer.asmId"] = newAsmId;
       }
 
+      // Move ALL apps for these partners (open + DISBURSED/REJECTED) to new RM.
+      // Partner ownership stays the same — only reporting boss (RM/ASM) follows the partner
+      // so search/lists are not split between old RM and new RM.
       const appUpdate = await Application.updateMany(
-        openAppsFilter,
+        { partnerId: { $in: movablePartnerIds } },
         { $set: appSet },
         { session }
       );
       movedApplications = appUpdate.modifiedCount || 0;
-
-      // Backfill apps that have this partner but missing rmId (common on old DISBURSED files)
-      // so Customer / payout screens can still show RM + ASM from the partner's current RM.
-      await Application.updateMany(
-        {
-          partnerId: { $in: movablePartnerIds },
-          $or: [{ rmId: null }, { rmId: { $exists: false } }],
-        },
-        { $set: appSet },
-        { session }
-      );
 
       audit = buildReassignmentAudit({
         changedBy: actorId,
@@ -260,12 +256,12 @@ export async function bulkMovePartnersToRm({
     dryRun: false,
     movedPartners,
     movedApplications,
-    skippedLockedApplications: lockedAppCount,
+    skippedLockedApplications: 0,
     syncedCustomers,
     partners: preview.partners,
     fromRm: preview.fromRm,
     toRm: preview.toRm,
     audit,
-    message: `Moved ${movedPartners} partner(s), synced ${syncedCustomers} customer(s), and ${movedApplications} open application(s) to the new RM. ${lockedAppCount} settled application(s) kept historical RM. Customers stay with the same partner.`,
+    message: `Moved ${movedPartners} partner(s), synced ${syncedCustomers} customer(s), and ${movedApplications} application(s) (including disbursed/rejected) to the new RM. Partner ownership unchanged. DONE payouts stay with the same partner.`,
   };
 }

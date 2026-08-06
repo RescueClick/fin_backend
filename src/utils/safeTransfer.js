@@ -103,31 +103,19 @@ export async function reassignRmWorkload({
 
   const appSet = buildAppRmHierarchySet(toId, toAsmId);
 
-  // Open apps by old rmId OR by partners under old RM (covers null rmId)
-  const openFilter = buildReassignableApplicationFilter({
+  // All apps for these partners (open + settled) follow the new RM for search/lists.
+  // Partner ownership (partnerId) and DONE payouts stay unchanged.
+  const appFilter = {
     $or: [
       { rmId: fromId },
       ...(partnerIds.length ? [{ partnerId: { $in: partnerIds } }] : []),
     ],
-  });
+  };
   const appUpdate = await Application.updateMany(
-    openFilter,
+    appFilter,
     { $set: appSet },
     sessionOpt(session)
   );
-
-  // Backfill any apps for these partners still missing rmId (incl. settled)
-  let backfill = { modifiedCount: 0 };
-  if (partnerIds.length) {
-    backfill = await Application.updateMany(
-      {
-        partnerId: { $in: partnerIds },
-        $or: [{ rmId: null }, { rmId: { $exists: false } }],
-      },
-      { $set: appSet },
-      sessionOpt(session)
-    );
-  }
 
   const syncedCustomers = partnerIds.length
     ? await syncCustomersRmForPartners({
@@ -141,7 +129,7 @@ export async function reassignRmWorkload({
   return {
     movedPartners: partnerUpdate.modifiedCount || 0,
     movedApplications: appUpdate.modifiedCount || 0,
-    backfilledMissingRm: backfill.modifiedCount || 0,
+    backfilledMissingRm: 0,
     syncedCustomers,
     partnerIds,
     toAsmId,
