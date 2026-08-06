@@ -30,6 +30,10 @@ import {
 } from "../utils/reassignmentPolicy.js";
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
 import {
+  reassignRmWorkload,
+  reassignPartnerWorkload,
+} from "../utils/safeTransfer.js";
+import {
   deriveCurrentTargetContext,
   rebalanceHierarchyTargetsReplace,
 } from "../utils/targetRebalanceService.js";
@@ -1788,6 +1792,7 @@ router.post("/rm-deactivate", auth, requireRole(ROLES.RSM), async (req, res) => 
     let applicationsModifiedCount = 0;
     let customersUpdated = 0;
     let reassignmentAudit;
+    let transferStats;
     await session.withTransaction(async () => {
       const oldRm = await User.findOne({
         _id: rmId,
@@ -1809,38 +1814,14 @@ router.post("/rm-deactivate", auth, requireRole(ROLES.RSM), async (req, res) => 
         throw new Error("Cannot deactivate RM. The selected replacement active RM was not found.");
       }
 
-      const partners = await User.find(
-        { role: ROLES.PARTNER, rmId: rmId },
-        "_id"
-      ).session(session);
-      const partnerIds = partners.map((p) => p._id);
-      const partnersUpdated = await User.updateMany(
-        { role: ROLES.PARTNER, rmId: rmId },
-        { $set: { rmId: newRm._id } },
-        { session }
-      );
-      partnersModifiedCount = partnersUpdated.modifiedCount || 0;
-
-      const appsUpdated = await Application.updateMany(
-        buildReassignableApplicationFilter({
-          $or: [
-            { rmId: rmId },
-            { partnerId: { $in: partnerIds } },
-          ],
-        }),
-        { $set: { rmId: newRm._id } },
-        { session }
-      );
-      applicationsModifiedCount = appsUpdated.modifiedCount || 0;
-
-      if (partnerIds.length > 0) {
-        const customerUpdate = await User.updateMany(
-          { partnerId: { $in: partnerIds } },
-          { $set: { rmId: newRm._id } },
-          { session }
-        );
-        customersUpdated = customerUpdate.modifiedCount || 0;
-      }
+      transferStats = await reassignRmWorkload({
+        oldRmId: rmId,
+        newRmId,
+        session,
+      });
+      partnersModifiedCount = transferStats.movedPartners || 0;
+      applicationsModifiedCount = transferStats.movedApplications || 0;
+      customersUpdated = transferStats.syncedCustomers || 0;
 
       deactivatedRm = await User.findByIdAndUpdate(
         rmId,
@@ -2066,8 +2047,10 @@ router.post("/partner-deactivate", auth, requireRole(ROLES.RSM), async (req, res
     const { oldPartnerId, newPartnerId } = req.body;
     const rsmId = req.user.sub;
 
-    if (!oldPartnerId) {
-      return res.status(400).json({ message: "oldPartnerId is required" });
+    if (!oldPartnerId || !newPartnerId) {
+      return res
+        .status(400)
+        .json({ message: "Both oldPartnerId and newPartnerId are required" });
     }
 
     const scope = await loadRsmReportingScope(rsmId);
@@ -2088,6 +2071,7 @@ router.post("/partner-deactivate", auth, requireRole(ROLES.RSM), async (req, res
     let preservedIncentivesPaid = 0;
     let deactivatedPartner = null;
     let reassignmentAudit = null;
+    let transferStats = null;
 
     await session.withTransaction(async () => {
       const oldPartner = await User.findById(oldId).session(session);
@@ -2098,46 +2082,28 @@ router.post("/partner-deactivate", auth, requireRole(ROLES.RSM), async (req, res
         throw new Error("Partner not under your management");
       }
 
-      if (newPartnerId) {
-        const newId = new mongoose.Types.ObjectId(newPartnerId);
-        const newPartner = await User.findById(newId).session(session);
-        if (
-          !newPartner ||
-          newPartner.role !== ROLES.PARTNER ||
-          !rmIds.some((id) => String(id) === String(newPartner.rmId)) ||
-          String(newPartner._id) === String(oldPartner._id)
-        ) {
-          throw new Error("Valid newPartnerId under your RSM is required");
-        }
-
-        const customerUpdate = await User.updateMany(
-          { role: ROLES.CUSTOMER, partnerId: oldId },
-          { $set: { partnerId: newId } },
-          { session }
-        );
-        reassignedCustomers = customerUpdate.modifiedCount || 0;
-
-        const appUpdate = await Application.updateMany(
-          buildReassignableApplicationFilter({ partnerId: oldId }),
-          { $set: { partnerId: newId } },
-          { session }
-        );
-        reassignedApplications = appUpdate.modifiedCount || 0;
-
-        const payoutUpdate = await Payout.updateMany(
-          { partnerId: oldId, payOutStatus: REASSIGNABLE_PAYOUT_STATUS },
-          { $set: { partnerId: newId } },
-          { session }
-        );
-        reassignedPayouts = payoutUpdate.modifiedCount || 0;
-
-        const incentiveUpdate = await Incentive.updateMany(
-          { partnerId: oldId, status: REASSIGNABLE_INCENTIVE_STATUS },
-          { $set: { partnerId: newId } },
-          { session }
-        );
-        reassignedIncentives = incentiveUpdate.modifiedCount || 0;
+      const newId = new mongoose.Types.ObjectId(newPartnerId);
+      const newPartner = await User.findById(newId).session(session);
+      if (
+        !newPartner ||
+        newPartner.role !== ROLES.PARTNER ||
+        !rmIds.some((id) => String(id) === String(newPartner.rmId)) ||
+        String(newPartner._id) === String(oldPartner._id)
+      ) {
+        throw new Error("Valid newPartnerId under your RSM is required");
       }
+
+      transferStats = await reassignPartnerWorkload({
+        oldPartnerId,
+        newPartnerId,
+        session,
+      });
+      reassignedCustomers = transferStats.movedCustomers || 0;
+      reassignedApplications = transferStats.movedApplications || 0;
+      reassignedPayouts = transferStats.movedPayouts || 0;
+      reassignedIncentives = transferStats.movedIncentives || 0;
+      preservedPayoutsDone = transferStats.lockedPayouts || 0;
+      preservedIncentivesPaid = transferStats.lockedIncentives || 0;
 
       deactivatedPartner = await User.findByIdAndUpdate(
         oldId,
@@ -2145,19 +2111,10 @@ router.post("/partner-deactivate", auth, requireRole(ROLES.RSM), async (req, res
         { new: true, session }
       );
 
-      preservedPayoutsDone = await Payout.countDocuments({
-        partnerId: oldId,
-        payOutStatus: LOCKED_PAYOUT_STATUS,
-      }).session(session);
-      preservedIncentivesPaid = await Incentive.countDocuments({
-        partnerId: oldId,
-        status: LOCKED_INCENTIVE_STATUS,
-      }).session(session);
-
       reassignmentAudit = buildReassignmentAudit({
         changedBy: req.user.sub,
         oldUserId: oldPartnerId,
-        newUserId: newPartnerId || null,
+        newUserId: newPartnerId,
         action: "rsm_partner_deactivate",
       });
       await persistReassignmentAudit(reassignmentAudit, req, session);

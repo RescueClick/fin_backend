@@ -35,6 +35,7 @@ export async function findCustomersForPartner(partnerId) {
 export async function syncCustomersRmForPartners({
   partnerIds,
   toRmId,
+  toAsmId = null,
   session = null,
 }) {
   let synced = 0;
@@ -44,18 +45,19 @@ export async function syncCustomersRmForPartners({
     const appRows = await appQuery.lean();
     const fromApps = appRows.map((r) => r.customerId).filter(Boolean);
 
-    // Already under this partner — only refresh RM
+    const setFields = {
+      rmId: toRmId,
+      updatedAt: new Date(),
+      ...(toAsmId ? { asmId: toAsmId } : {}),
+    };
+
+    // Already under this partner — only refresh RM (+ ASM if known)
     const linkedUpdate = await User.updateMany(
       {
         role: ROLES.CUSTOMER,
         partnerId,
       },
-      {
-        $set: {
-          rmId: toRmId,
-          updatedAt: new Date(),
-        },
-      },
+      { $set: setFields },
       session ? { session } : undefined
     );
     synced += linkedUpdate.modifiedCount || 0;
@@ -75,8 +77,7 @@ export async function syncCustomersRmForPartners({
         {
           $set: {
             partnerId,
-            rmId: toRmId,
-            updatedAt: new Date(),
+            ...setFields,
           },
         },
         session ? { session } : undefined

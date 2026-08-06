@@ -6,19 +6,21 @@ import { User } from "../models/User.js";
 import { ROLES } from "../config/roles.js";
 
 /** All RM ids that belong under an ASM (RSM chain + direct asmId). */
-export async function getRmIdsUnderAsm(asmId) {
-  const rsms = await User.find({ role: ROLES.RSM, asmId }).select("_id").lean();
+export async function getRmIdsUnderAsm(asmId, session = null) {
+  let rsmQuery = User.find({ role: ROLES.RSM, asmId }).select("_id");
+  if (session) rsmQuery = rsmQuery.session(session);
+  const rsms = await rsmQuery.lean();
   const rsmIds = rsms.map((r) => r._id);
-  const rms = await User.find({
+  let rmQuery = User.find({
     role: ROLES.RM,
     $or: [
       { personalRsmId: { $in: rsmIds } },
       { businessHomeRsmId: { $in: rsmIds } },
       { asmId },
     ],
-  })
-    .select("_id")
-    .lean();
+  }).select("_id");
+  if (session) rmQuery = rmQuery.session(session);
+  const rms = await rmQuery.lean();
   return rms.map((r) => r._id);
 }
 

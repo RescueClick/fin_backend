@@ -56,6 +56,7 @@ import {
   LOCKED_INCENTIVE_STATUS,
 } from "../utils/reassignmentPolicy.js";
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
+import { reassignPartnerWorkload } from "../utils/safeTransfer.js";
 import {
   deriveCurrentTargetContext,
   rebalanceHierarchyTargetsReplace,
@@ -1411,8 +1412,10 @@ router.post(
       const { oldPartnerId, newPartnerId } = req.body;
       const rmId = req.user.sub;
 
-      if (!oldPartnerId) {
-        return res.status(400).json({ message: "oldPartnerId is required" });
+      if (!oldPartnerId || !newPartnerId) {
+        return res
+          .status(400)
+          .json({ message: "Both oldPartnerId and newPartnerId are required" });
       }
 
       const oldId = new mongoose.Types.ObjectId(oldPartnerId);
@@ -1424,6 +1427,7 @@ router.post(
       let preservedIncentivesPaid = 0;
       let deactivatedPartner = null;
       let reassignmentAudit = null;
+      let transferStats = null;
 
       await session.withTransaction(async () => {
         // 1️⃣ Validate old partner
@@ -1435,46 +1439,28 @@ router.post(
           throw new Error("Partner not under your management");
         }
 
-        if (newPartnerId) {
-          const newId = new mongoose.Types.ObjectId(newPartnerId);
-          const newPartner = await User.findById(newId).session(session);
-          if (
-            !newPartner ||
-            newPartner.role !== ROLES.PARTNER ||
-            String(newPartner.rmId) !== String(rmId) ||
-            String(newPartner._id) === String(oldPartner._id)
-          ) {
-            throw new Error("Valid newPartnerId under same RM is required");
-          }
-
-          const customerUpdate = await User.updateMany(
-            { role: ROLES.CUSTOMER, partnerId: oldId },
-            { $set: { partnerId: newId } },
-            { session }
-          );
-          reassignedCustomers = customerUpdate.modifiedCount || 0;
-
-          const appUpdate = await Application.updateMany(
-            buildReassignableApplicationFilter({ partnerId: oldId }),
-            { $set: { partnerId: newId } },
-            { session }
-          );
-          reassignedApplications = appUpdate.modifiedCount || 0;
-
-          const payoutUpdate = await Payout.updateMany(
-            { partnerId: oldId, payOutStatus: REASSIGNABLE_PAYOUT_STATUS },
-            { $set: { partnerId: newId } },
-            { session }
-          );
-          reassignedPayouts = payoutUpdate.modifiedCount || 0;
-
-          const incentiveUpdate = await Incentive.updateMany(
-            { partnerId: oldId, status: REASSIGNABLE_INCENTIVE_STATUS },
-            { $set: { partnerId: newId } },
-            { session }
-          );
-          reassignedIncentives = incentiveUpdate.modifiedCount || 0;
+        const newId = new mongoose.Types.ObjectId(newPartnerId);
+        const newPartner = await User.findById(newId).session(session);
+        if (
+          !newPartner ||
+          newPartner.role !== ROLES.PARTNER ||
+          String(newPartner.rmId) !== String(rmId) ||
+          String(newPartner._id) === String(oldPartner._id)
+        ) {
+          throw new Error("Valid newPartnerId under same RM is required");
         }
+
+        transferStats = await reassignPartnerWorkload({
+          oldPartnerId,
+          newPartnerId,
+          session,
+        });
+        reassignedCustomers = transferStats.movedCustomers || 0;
+        reassignedApplications = transferStats.movedApplications || 0;
+        reassignedPayouts = transferStats.movedPayouts || 0;
+        reassignedIncentives = transferStats.movedIncentives || 0;
+        preservedPayoutsDone = transferStats.lockedPayouts || 0;
+        preservedIncentivesPaid = transferStats.lockedIncentives || 0;
 
         deactivatedPartner = await User.findByIdAndUpdate(
           oldId,
@@ -1482,19 +1468,10 @@ router.post(
           { new: true, session }
         );
 
-        preservedPayoutsDone = await Payout.countDocuments({
-          partnerId: oldId,
-          payOutStatus: LOCKED_PAYOUT_STATUS,
-        }).session(session);
-        preservedIncentivesPaid = await Incentive.countDocuments({
-          partnerId: oldId,
-          status: LOCKED_INCENTIVE_STATUS,
-        }).session(session);
-
         reassignmentAudit = buildReassignmentAudit({
           changedBy: req.user.sub,
           oldUserId: oldPartnerId,
-          newUserId: newPartnerId || null,
+          newUserId: newPartnerId,
           action: "rm_partner_deactivate",
         });
         await persistReassignmentAudit(reassignmentAudit, req, session);

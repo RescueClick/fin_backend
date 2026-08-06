@@ -55,6 +55,11 @@ import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import {
+  reassignRmWorkload,
+  reassignPartnerWorkload,
+  reassignAsmWorkload,
+} from "../utils/safeTransfer.js";
+import {
   softHideTimestamp,
   dataPreservationBlockMessage,
 } from "../utils/dataProtection.js";
@@ -1885,41 +1890,13 @@ router.post(
       let oldAsm;
       let newAsm;
       let reassignmentAudit;
+      let transferStats;
       await session.withTransaction(async () => {
-        await User.updateMany(
-          { role: ROLES.RSM, asmId: oldAsmId },
-          { $set: { asmId: newAsmId } },
-          { session }
-        );
-
-        const rms = await User.find({ role: ROLES.RM, asmId: oldAsmId }, "_id").session(session);
-        const rmIds = rms.map((rm) => rm._id);
-
-        await User.updateMany(
-          { role: ROLES.RM, asmId: oldAsmId },
-          { $set: { asmId: newAsmId } },
-          { session }
-        );
-
-        const partners = await User.find(
-          { role: ROLES.PARTNER, rmId: { $in: rmIds } },
-          "_id"
-        ).session(session);
-        const partnerIds = partners.map((p) => p._id);
-
-        await User.updateMany(
-          { role: ROLES.PARTNER, rmId: { $in: rmIds } },
-          { $set: { asmId: newAsmId } },
-          { session }
-        );
-
-        if (partnerIds.length > 0) {
-          await User.updateMany(
-            { partnerId: { $in: partnerIds } },
-            { $set: { asmId: newAsmId } },
-            { session }
-          );
-        }
+        transferStats = await reassignAsmWorkload({
+          oldAsmId,
+          newAsmId,
+          session,
+        });
 
         oldAsm = await User.findOneAndUpdate(
           { _id: oldAsmId, role: ROLES.ASM },
@@ -1985,8 +1962,9 @@ router.post(
 
       res.json({
         message:
-          "All RMs, Partners, and Customers reassigned to new ASM. Old ASM deactivated and notified.",
+          "All RMs, Partners, Customers and open applications reassigned to new ASM. Settled history preserved. Old ASM deactivated.",
         reassignmentAudit,
+        transferStats,
       });
     } catch (error) {
       if (error.message === "New ASM not found or invalid") {
@@ -2162,29 +2140,13 @@ router.post(
       let oldRm;
       let newRm;
       let reassignmentAudit;
+      let transferStats;
       await session.withTransaction(async () => {
-        const partners = await User.find({ role: ROLES.PARTNER, rmId: oldRmId }, "_id").session(session);
-        const partnerIds = partners.map((p) => p._id);
-
-        await User.updateMany(
-          { role: ROLES.PARTNER, rmId: oldRmId },
-          { $set: { rmId: newRmId } },
-          { session }
-        );
-
-        await Application.updateMany(
-          buildReassignableApplicationFilter({ rmId: oldRmId }),
-          { $set: { rmId: newRmId } },
-          { session }
-        );
-
-        if (partnerIds.length > 0) {
-          await User.updateMany(
-            { partnerId: { $in: partnerIds } },
-            { $set: { rmId: newRmId } },
-            { session }
-          );
-        }
+        transferStats = await reassignRmWorkload({
+          oldRmId,
+          newRmId,
+          session,
+        });
 
         oldRm = await User.findOneAndUpdate(
           { _id: oldRmId, role: ROLES.RM },
@@ -2192,6 +2154,9 @@ router.post(
           { new: true, session }
         );
         newRm = await User.findById(newRmId).session(session);
+        if (!newRm || newRm.role !== ROLES.RM) {
+          throw new Error("New RM not found or invalid");
+        }
         reassignmentAudit = buildReassignmentAudit({
           changedBy: req.user.sub,
           oldUserId: oldRmId,
@@ -2218,8 +2183,10 @@ router.post(
       }
 
       res.json({
-        message: "RM deactivated and Partners reassigned successfully.",
+        message:
+          "RM deactivated. Partners, customers and open applications reassigned with hierarchy intact. Settled loans preserved.",
         reassignmentAudit,
+        transferStats,
       });
     } catch (error) {
       console.error("Error in /rm-deactivate:", error);
@@ -2244,49 +2211,16 @@ router.post(
         return res.status(400).json({ message: "Both oldPartnerId and newPartnerId are required" });
       }
 
-      let customerUpdate;
-      let appUpdate;
-      let payoutUpdate;
-      let incentiveUpdate;
-      let lockedPayouts = 0;
-      let lockedIncentives = 0;
+      let transferStats;
       let oldPartner;
       let reassignmentAudit;
 
       await session.withTransaction(async () => {
-        // 1. Reassign all Customers from old Partner to new Partner
-        customerUpdate = await User.updateMany(
-          { role: ROLES.CUSTOMER, partnerId: oldPartnerId },
-          { $set: { partnerId: newPartnerId } },
-          { session }
-        );
-
-        // 2. Reassign all Applications from old Partner to new Partner
-        appUpdate = await Application.updateMany(
-          buildReassignableApplicationFilter({ partnerId: oldPartnerId }),
-          { $set: { partnerId: newPartnerId } },
-          { session }
-        );
-
-        // 3. Reassign only unsettled payout/incentive ownership
-        payoutUpdate = await Payout.updateMany(
-          { partnerId: oldPartnerId, payOutStatus: REASSIGNABLE_PAYOUT_STATUS },
-          { $set: { partnerId: newPartnerId } },
-          { session }
-        );
-        incentiveUpdate = await Incentive.updateMany(
-          { partnerId: oldPartnerId, status: REASSIGNABLE_INCENTIVE_STATUS },
-          { $set: { partnerId: newPartnerId } },
-          { session }
-        );
-        lockedPayouts = await Payout.countDocuments({
-          partnerId: oldPartnerId,
-          payOutStatus: LOCKED_PAYOUT_STATUS,
-        }).session(session);
-        lockedIncentives = await Incentive.countDocuments({
-          partnerId: oldPartnerId,
-          status: LOCKED_INCENTIVE_STATUS,
-        }).session(session);
+        transferStats = await reassignPartnerWorkload({
+          oldPartnerId,
+          newPartnerId,
+          session,
+        });
 
         oldPartner = await User.findOneAndUpdate(
           { _id: oldPartnerId, role: ROLES.PARTNER },
@@ -2330,8 +2264,9 @@ router.post(
 
       res.json({
         message:
-          "Partner deactivated and active workload reassigned successfully. Settled finance/history is preserved.",
+          "Partner deactivated and active workload reassigned with RM/ASM hierarchy. Settled finance/history is preserved.",
         reassignmentAudit,
+        transferStats,
       });
     } catch (error) {
       if (error.message === "Old Partner not found") {

@@ -198,15 +198,22 @@ export async function bulkMovePartnersToRm({
           role: ROLES.PARTNER,
           rmId: fromId,
         },
-        { $set: { rmId: toId, updatedAt: new Date() } },
+        {
+          $set: {
+            rmId: toId,
+            ...(newAsmId ? { asmId: newAsmId } : {}),
+            updatedAt: new Date(),
+          },
+        },
         { session }
       );
       movedPartners = partnerUpdate.modifiedCount || 0;
 
-      // Keep customers on the same partner; only refresh RM linkage so counts stay in sync
+      // Keep customers on the same partner; only refresh RM (+ ASM) linkage
       syncedCustomers = await syncCustomersRmForPartners({
         partnerIds: movablePartnerIds,
         toRmId: toId,
+        toAsmId: newAsmId,
         session,
       });
 
