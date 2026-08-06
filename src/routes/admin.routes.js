@@ -1277,29 +1277,65 @@ router.get(
         })
         .populate({
           path: "partnerId",
-          select: "firstName lastName employeeId",
+          select: "firstName lastName employeeId rmId",
+          populate: {
+            path: "rmId",
+            select: "firstName lastName employeeId asmId personalRsmId businessHomeRsmId",
+            populate: [
+              { path: "asmId", select: "firstName lastName employeeId" },
+              {
+                path: "personalRsmId",
+                select: "asmId firstName lastName employeeId",
+                populate: { path: "asmId", select: "firstName lastName employeeId" },
+              },
+              {
+                path: "businessHomeRsmId",
+                select: "asmId firstName lastName employeeId",
+                populate: { path: "asmId", select: "firstName lastName employeeId" },
+              },
+            ],
+          },
         })
         .populate({
           path: "rmId",
-          select: "firstName lastName employeeId asmId",
-          populate: {
-            path: "asmId",
-            select: "firstName lastName employeeId",
-          },
+          select: "firstName lastName employeeId asmId personalRsmId businessHomeRsmId",
+          populate: [
+            { path: "asmId", select: "firstName lastName employeeId" },
+            {
+              path: "personalRsmId",
+              select: "asmId firstName lastName employeeId",
+              populate: { path: "asmId", select: "firstName lastName employeeId" },
+            },
+            {
+              path: "businessHomeRsmId",
+              select: "asmId firstName lastName employeeId",
+              populate: { path: "asmId", select: "firstName lastName employeeId" },
+            },
+          ],
         })
         .select("appNo loanType approvedLoanAmount status createdAt customer customerId")
         .lean();
+
+      const pickAsm = (rm) =>
+        rm?.asmId ||
+        rm?.personalRsmId?.asmId ||
+        rm?.businessHomeRsmId?.asmId ||
+        null;
 
       const formatted = applications.map((app) => {
         const c = app.customer || {};
         const customerUser = app.customerId || {};
         const p = app.partnerId || {};
-        const r = app.rmId || {};
-        const a = r.asmId || {};
+        // Prefer app RM; if missing (common after incomplete transfers), use partner's current RM
+        const r = app.rmId || p.rmId || {};
+        const a = pickAsm(r) || {};
         const userMongoId =
           customerUser._id ||
           (typeof app.customerId === "object" ? app.customerId?._id : app.customerId) ||
           null;
+        const displayName = [c.firstName || customerUser.firstName, c.lastName || customerUser.lastName]
+          .filter(Boolean)
+          .join(" ");
 
         return {
           _id: app._id,
@@ -1307,6 +1343,7 @@ router.get(
           appNo: app.appNo,
           firstName: c.firstName || customerUser.firstName || null,
           lastName: c.lastName || customerUser.lastName || null,
+          userName: displayName || null,
           userId: userMongoId,
           employeeId: customerUser.employeeId || null,
           email: c.email || customerUser.email || null,

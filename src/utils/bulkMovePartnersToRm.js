@@ -226,6 +226,17 @@ export async function bulkMovePartnersToRm({
       );
       movedApplications = appUpdate.modifiedCount || 0;
 
+      // Backfill apps that have this partner but missing rmId (common on old DISBURSED files)
+      // so Customer / payout screens can still show RM + ASM from the partner's current RM.
+      await Application.updateMany(
+        {
+          partnerId: { $in: movablePartnerIds },
+          $or: [{ rmId: null }, { rmId: { $exists: false } }],
+        },
+        { $set: appSet },
+        { session }
+      );
+
       audit = buildReassignmentAudit({
         changedBy: actorId,
         oldUserId: fromId,
