@@ -16,24 +16,14 @@ import {
   findCustomersForPartner,
   syncCustomersRmForPartners,
 } from "./partnerCustomerSync.js";
+import {
+  getRmIdsUnderAsm,
+  resolveAsmIdForRm,
+} from "./asmHierarchy.js";
+
+export { getRmIdsUnderAsm } from "./asmHierarchy.js";
 
 export const BULK_MOVE_MAX_BATCH = 100;
-
-export async function getRmIdsUnderAsm(asmId) {
-  const rsms = await User.find({ role: ROLES.RSM, asmId }).select("_id").lean();
-  const rsmIds = rsms.map((r) => r._id);
-  const rms = await User.find({
-    role: ROLES.RM,
-    $or: [
-      { personalRsmId: { $in: rsmIds } },
-      { businessHomeRsmId: { $in: rsmIds } },
-      { asmId },
-    ],
-  })
-    .select("_id")
-    .lean();
-  return rms.map((r) => r._id);
-}
 
 function toObjectId(id, label = "id") {
   if (!mongoose.Types.ObjectId.isValid(String(id))) {
@@ -183,7 +173,8 @@ export async function bulkMovePartnersToRm({
     return { dryRun: true, ...preview, audit: null };
   }
 
-  const newAsmId = toRm.asmId || null;
+  // Prefer direct asmId; else resolve via RSM so ASM partner lists stay correct
+  const newAsmId = await resolveAsmIdForRm(toRm);
   const session = await mongoose.startSession();
   let movedPartners = 0;
   let movedApplications = 0;
@@ -192,6 +183,15 @@ export async function bulkMovePartnersToRm({
 
   try {
     await session.withTransaction(async () => {
+      // Backfill RM.asmId when missing so populate/match paths also work
+      if (newAsmId && !toRm.asmId) {
+        await User.updateOne(
+          { _id: toId, role: ROLES.RM },
+          { $set: { asmId: newAsmId, updatedAt: new Date() } },
+          { session }
+        );
+      }
+
       const partnerUpdate = await User.updateMany(
         {
           _id: { $in: movablePartnerIds },
@@ -213,7 +213,6 @@ export async function bulkMovePartnersToRm({
       const appSet = {
         rmId: toId,
         "customer.rmId": toId,
-        updatedAt: new Date(),
       };
       if (newAsmId) {
         appSet.asmId = newAsmId;

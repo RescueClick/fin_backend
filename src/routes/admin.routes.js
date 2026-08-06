@@ -53,6 +53,7 @@ import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
 import { bulkMovePartnersToRm } from "../utils/bulkMovePartnersToRm.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
+import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import {
   softHideTimestamp,
   dataPreservationBlockMessage,
@@ -1025,20 +1026,32 @@ router.get(
       })
         .select("-passwordHash -__v")
         .populate({
-          path: "rmId", // populate RM details
-          select: "firstName lastName employeeId asmId",
-          populate: {
-            path: "asmId", // populate ASM details if hierarchy goes higher
-            select: "firstName lastName employeeId",
-          },
+          path: "rmId",
+          select: "firstName lastName employeeId asmId personalRsmId businessHomeRsmId",
+          populate: [
+            { path: "asmId", select: "firstName lastName employeeId" },
+            {
+              path: "personalRsmId",
+              select: "asmId firstName lastName employeeId",
+              populate: { path: "asmId", select: "firstName lastName employeeId" },
+            },
+            {
+              path: "businessHomeRsmId",
+              select: "asmId firstName lastName employeeId",
+              populate: { path: "asmId", select: "firstName lastName employeeId" },
+            },
+          ],
         })
         .lean();
 
       const formatted = list.map((partner) => {
         const rm = partner.rmId;
-        const asm = rm?.asmId;
+        const asm =
+          rm?.asmId ||
+          rm?.personalRsmId?.asmId ||
+          rm?.businessHomeRsmId?.asmId ||
+          null;
 
-        // Remove nested objects to flatten hierarchy
         delete partner.rmId;
 
         return {
@@ -4274,13 +4287,13 @@ router.post(
 // Admin gets pending payout customers (disbursed loans without DONE payout)
 router.get("/customers/pending-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
   try {
-    // Fetch all disbursed applications
-    const applications = await Application.find({ status: "DISBURSED" })
+    const applications = await Application.find(
+      activeApplicationsFilter({ status: "DISBURSED" })
+    )
       .populate("customerId", "employeeId firstName lastName email phone")
       .populate("partnerId", "firstName lastName email phone")
       .lean();
 
-    // Get all payouts for these applications
     const appIds = applications.map((app) => app._id);
     const payouts = await Payout.find({ application: { $in: appIds } })
       .select("application amount payOutStatus")
@@ -4292,17 +4305,15 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.SUPER_ADMIN), a
         .map((p) => p.application.toString())
     );
 
-    // Only consider applications with DISBURSED and NOT already DONE
     const disbursedApps = applications.filter(
-      (app) =>
-        app.status === "DISBURSED" && !doneAppIds.has(app._id.toString())
+      (app) => !doneAppIds.has(app._id.toString())
     );
 
-    // Map to customer format (include proposed payout amount if any)
     const customers = disbursedApps.map((app) => {
       const payout = payouts.find(
         (p) => p.application.toString() === app._id.toString()
       );
+      const disbursedAt = getDisbursedAt(app);
 
       return {
         customerId: app.customerId?._id,
@@ -4326,6 +4337,8 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.SUPER_ADMIN), a
         },
         applicationId: app._id,
         createdAt: app.createdAt,
+        disbursedAt,
+        updatedAt: disbursedAt || app.updatedAt,
       };
     });
 
@@ -4342,8 +4355,7 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.SUPER_ADMIN), a
 // Admin gets done payout customers
 router.get("/customers/done-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
   try {
-    // Fetch all applications
-    const applications = await Application.find()
+    const applications = await Application.find(activeApplicationsFilter())
       .populate("customerId", "employeeId firstName lastName email phone")
       .populate("partnerId", "firstName lastName email phone")
       .lean();
@@ -4363,9 +4375,10 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.SUPER_ADMIN), asyn
     });
 
     const customers = applications
-      .filter((app) => doneMap[app._id.toString()]) // only apps with DONE payout
+      .filter((app) => doneMap[app._id.toString()])
       .map((app) => {
         const payout = doneMap[app._id.toString()];
+        const disbursedAt = getDisbursedAt(app);
         return {
           customerId: app.customerId?._id,
           customerEmployeeId: app.customerId?.employeeId || null,
@@ -4388,6 +4401,8 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.SUPER_ADMIN), asyn
           },
           applicationId: app._id,
           createdAt: app.createdAt,
+          disbursedAt,
+          updatedAt: disbursedAt || app.updatedAt,
         };
       });
 
@@ -4782,31 +4797,43 @@ router.get("/partners/targets", auth, requireRole(ROLES.SUPER_ADMIN), async (req
     }).lean();
 
     // Get relevant applications for achievement calculation
-    const relevantApps = await Application.find({
-      partnerId: { $in: partnerIds },
-      status: { $ne: "DRAFT" },
-      ...(year && month ? {
-        updatedAt: {
-          $gte: new Date(year, month - 1, 1),
-          $lt: new Date(year, month, 1)
-        }
-      } : {})
-    }).lean();
+    // Use createdAt / disbursedAt — not updatedAt (RM moves were floating counts)
+    const allApps = await Application.find(
+      activeApplicationsFilter({
+        partnerId: { $in: partnerIds },
+        status: { $ne: "DRAFT" },
+      })
+    ).lean();
+
+    const startDate =
+      year && month ? new Date(Number(year), Number(month) - 1, 1) : null;
+    const endDate =
+      year && month ? new Date(Number(year), Number(month), 1) : null;
 
     // Combine partner data with targets and achievements
     const partnerTargets = partners.map((partner) => {
       const target = targets.find(
         (t) => t.assignedTo.toString() === partner._id.toString()
       );
-      const partnerApps = relevantApps.filter(
+      const partnerAppsAll = allApps.filter(
         (app) => app.partnerId.toString() === partner._id.toString()
       );
+      const partnerApps =
+        startDate && endDate
+          ? partnerAppsAll.filter((app) =>
+              isDateInRange(new Date(app.createdAt), startDate, endDate)
+            )
+          : partnerAppsAll;
 
       const fileCountTarget = target?.fileCountTarget || 4;
       const disbursementTarget = target?.disbursementTarget || 2000000;
       const achievedFileCount = partnerApps.length;
-      const achievedDisbursement = partnerApps
-        .filter(app => app.status === "DISBURSED")
+      const achievedDisbursement = partnerAppsAll
+        .filter((app) => {
+          if (app.status !== "DISBURSED") return false;
+          if (!startDate || !endDate) return true;
+          return isDateInRange(getDisbursedAt(app), startDate, endDate);
+        })
         .reduce(
           (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
           0
@@ -4944,23 +4971,25 @@ router.get(
         year: targetYear,
       }).lean();
 
-      // Relevant applications (non-draft) in the period
-      const relevantApps = await Application.find({
-        partnerId: { $in: partnerIds },
-        status: { $ne: "DRAFT" },
-        updatedAt: {
-          $gte: startDate,
-          $lt: endDate,
-        },
-      }).lean();
+      // Relevant applications (non-draft). Period uses createdAt / disbursedAt
+      // so RM→RM moves (which bump updatedAt) do not make file/disburse counts float.
+      const relevantApps = await Application.find(
+        activeApplicationsFilter({
+          partnerId: { $in: partnerIds },
+          status: { $ne: "DRAFT" },
+        })
+      ).lean();
 
       // Compute incentive metrics for each partner (same as ASM logic)
       const incentiveData = partners.map((partner) => {
         const partnerTargets = targets.filter(
           (t) => t.assignedTo.toString() === partner._id.toString()
         );
-        const partnerApps = relevantApps.filter(
+        const partnerAppsAll = relevantApps.filter(
           (app) => app.partnerId.toString() === partner._id.toString()
+        );
+        const partnerApps = partnerAppsAll.filter((app) =>
+          isDateInRange(new Date(app.createdAt), startDate, endDate)
         );
 
         const target = partnerTargets[0] || {};
@@ -4969,8 +4998,11 @@ router.get(
           target.disbursementTarget || target.targetValue || 2000000;
 
         const achievedFileCount = partnerApps.length;
-        const achievedDisbursement = partnerApps
-          .filter((app) => app.status === "DISBURSED")
+        const achievedDisbursement = partnerAppsAll
+          .filter((app) => {
+            if (app.status !== "DISBURSED") return false;
+            return isDateInRange(getDisbursedAt(app), startDate, endDate);
+          })
           .reduce(
             (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
             0

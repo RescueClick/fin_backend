@@ -23,7 +23,14 @@ import {
   LOCKED_INCENTIVE_STATUS,
 } from "../utils/reassignmentPolicy.js";
 import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
-import { bulkMovePartnersToRm, getRmIdsUnderAsm } from "../utils/bulkMovePartnersToRm.js";
+import { bulkMovePartnersToRm } from "../utils/bulkMovePartnersToRm.js";
+import {
+  getRmIdsUnderAsm,
+  getAsmScopeIds,
+  getDisbursedAt,
+  isDateInRange,
+} from "../utils/asmHierarchy.js";
+import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
 import { emitPayoutCreated } from "../utils/socketEmitter.js";
@@ -275,38 +282,49 @@ router.get("/get-rm", auth, requireRole(ROLES.ASM), async (req, res) => {
 // Get partners (ASM)
 router.get("/get-partners", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
-    const asmId = req.user.sub; // ✅ logged-in ASM ID
+    const asmId = req.user.sub;
+    // Use full hierarchy (RSM chain + RM.asmId). Do NOT filter populate by
+    // rm.asmId alone — many RMs only link via personalRsmId/businessHomeRsmId,
+    // which made partners "disappear" after RM→RM moves.
+    const rmIds = await getRmIdsUnderAsm(asmId);
 
-    // Fetch only partners whose RM belongs to this ASM
     const list = await User.find({
       role: ROLES.PARTNER,
       status: { $ne: "PENDING" },
+      rmId: { $in: rmIds },
     })
       .select("-passwordHash -__v")
       .populate({
-        path: "rmId", // populate RM details
-        match: { asmId }, // ✅ filter only RMs under this ASM
-        select: "firstName lastName employeeId asmId",
-        populate: {
-          path: "asmId",
-          select: "firstName lastName employeeId",
-        },
+        path: "rmId",
+        select: "firstName lastName employeeId asmId personalRsmId businessHomeRsmId",
+        populate: [
+          { path: "asmId", select: "firstName lastName employeeId" },
+          {
+            path: "personalRsmId",
+            select: "asmId firstName lastName employeeId",
+            populate: { path: "asmId", select: "firstName lastName employeeId" },
+          },
+          {
+            path: "businessHomeRsmId",
+            select: "asmId firstName lastName employeeId",
+            populate: { path: "asmId", select: "firstName lastName employeeId" },
+          },
+        ],
       })
       .lean();
 
-    // Filter out partners without matching RMs
-    const filtered = list.filter((partner) => partner.rmId);
-
-    const formatted = filtered.map((partner) => {
+    const formatted = list.map((partner) => {
       const rm = partner.rmId;
-      const asm = rm?.asmId;
+      const asm =
+        rm?.asmId ||
+        rm?.personalRsmId?.asmId ||
+        rm?.businessHomeRsmId?.asmId ||
+        null;
       const BASE_URL = process.env.BACKEND_URL || "http://localhost:5000";
-      // ✅ safely fetch profile pic
       let profilePicUrl = null;
       if (Array.isArray(partner.docs)) {
         const selfieDoc = partner.docs.find((doc) => doc.docType === "SELFIE");
         if (selfieDoc?.url) {
-          // normalize path and prepend BASE_URL only if needed
           const cleanPath = selfieDoc.url
             .replace(/\\/g, "/")
             .replace(/^\/+/, "");
@@ -323,7 +341,7 @@ router.get("/get-partners", auth, requireRole(ROLES.ASM), async (req, res) => {
         rmId: rm ? rm._id : null,
         asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
         asmEmployeeId: asm ? asm.employeeId : null,
-        asmId: asm ? asm._id : null,
+        asmId: asm ? asm._id : asmId,
         profilePic: profilePicUrl,
       };
     });
@@ -339,35 +357,25 @@ router.get("/get-customers", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
     const asmId = req.user.sub;
 
-    // Build hierarchy: ASM → RSMs → RMs → Partners
-    const rsms = await User.find({ asmId, role: ROLES.RSM }).select("_id").lean();
-    const rsmIds = rsms.map((r) => r._id);
-    const rms = await User.find({
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } },
-      ],
-    }).select("_id").lean();
-    const rmIds = rms.map((r) => r._id);
-    const partnersList = await User.find({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-    }).select("_id firstName lastName employeeId").lean();
-    const partnerIds = partnersList.map((p) => p._id);
+    const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(asmId);
 
     const applications = await Application.find({
-      $or: [
-        { asmId },
-        { rsmId: { $in: rsmIds } },
-        { rmId: { $in: rmIds } },
-        { partnerId: { $in: partnerIds } },
+      $and: [
+        activeApplicationsFilter(),
+        {
+          $or: [
+            { asmId },
+            { rsmId: { $in: rsmIds } },
+            { rmId: { $in: rmIds } },
+            { partnerId: { $in: partnerIds } },
+          ],
+        },
       ],
     })
       .populate("customerId", "employeeId _id firstName lastName email phone")
       .populate("partnerId", "firstName lastName employeeId")
       .populate("rmId", "firstName lastName employeeId")
-      .select("appNo loanType approvedLoanAmount status createdAt customer")
+      .select("appNo loanType approvedLoanAmount status createdAt customer stageHistory")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -485,22 +493,8 @@ router.get(
   async (req, res) => {
     try {
       const asmId = req.user.sub;
+      const rmIds = await getRmIdsUnderAsm(asmId);
 
-      // Get all RSMs under this ASM
-      const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
-      const rsmIds = rsms.map((rsm) => rsm._id);
-
-      // Get all RMs under these RSMs
-      const rms = await User.find({
-        role: ROLES.RM,
-        $or: [
-          { personalRsmId: { $in: rsmIds } },
-          { businessHomeRsmId: { $in: rsmIds } }
-        ]
-      }).lean();
-      const rmIds = rms.map((rm) => rm._id);
-
-      // Get all partners under these RMs
       const partners = await User.find({
         role: ROLES.PARTNER,
         rmId: { $in: rmIds },
@@ -1722,41 +1716,26 @@ router.post("/payouts/create", auth, requireRole(ROLES.ASM), async (req, res) =>
 router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
     const asmId = req.user.sub;
+    const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(asmId);
 
-    // Get all RSMs under this ASM
-    const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
-    const rsmIds = rsms.map((rsm) => rsm._id);
-
-    // Get all RMs under these RSMs
-    const rms = await User.find({
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } }
-      ]
-    }).lean();
-    const rmIds = rms.map((rm) => rm._id);
-
-    // Get all partners under these RMs
-    const partners = await User.find({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-    }).select("_id").lean();
-    const partnerIds = partners.map(p => p._id);
-
-    // Fetch all applications under this ASM hierarchy
+    // Scope by current partners (survives RM moves) + historical rm/rsm on settled files
     const applications = await Application.find({
-      $or: [
-        { rsmId: { $in: rsmIds } },
-        { rmId: { $in: rmIds } },
-        { partnerId: { $in: partnerIds } }
-      ]
+      $and: [
+        activeApplicationsFilter({ status: "DISBURSED" }),
+        {
+          $or: [
+            { asmId },
+            { rsmId: { $in: rsmIds } },
+            { rmId: { $in: rmIds } },
+            { partnerId: { $in: partnerIds } },
+          ],
+        },
+      ],
     })
       .populate("customerId", "employeeId firstName lastName email phone")
       .populate("partnerId", "firstName lastName email phone")
       .lean();
 
-    // Get all payouts for these applications
     const appIds = applications.map((app) => app._id);
     const payouts = await Payout.find({ application: { $in: appIds } })
       .select("application amount payOutStatus")
@@ -1768,17 +1747,15 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
         .map((p) => p.application.toString())
     );
 
-    // Only consider applications with DISBURSED and NOT already DONE
     const disbursedApps = applications.filter(
-      (app) =>
-        app.status === "DISBURSED" && !doneAppIds.has(app._id.toString())
+      (app) => !doneAppIds.has(app._id.toString())
     );
 
-    // Map to customer format (include proposed payout amount if any)
     const customers = disbursedApps.map((app) => {
       const payout = payouts.find(
         (p) => p.application.toString() === app._id.toString()
       );
+      const disbursedAt = getDisbursedAt(app);
 
       return {
         customerId: app.customerId?._id,
@@ -1802,6 +1779,9 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
         },
         applicationId: app._id,
         createdAt: app.createdAt,
+        disbursedAt,
+        // So month filter can match disbursement month, not only create month
+        updatedAt: disbursedAt || app.updatedAt,
       };
     });
 
@@ -1819,35 +1799,20 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
 router.get("/customers/done-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
     const asmId = req.user.sub;
+    const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(asmId);
 
-    // Get all RSMs under this ASM
-    const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
-    const rsmIds = rsms.map((rsm) => rsm._id);
-
-    // Get all RMs under these RSMs
-    const rms = await User.find({
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } }
-      ]
-    }).lean();
-    const rmIds = rms.map((rm) => rm._id);
-
-    // Get all partners under these RMs
-    const partners = await User.find({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-    }).select("_id").lean();
-    const partnerIds = partners.map(p => p._id);
-
-    // Fetch all applications under this ASM hierarchy
     const applications = await Application.find({
-      $or: [
-        { rsmId: { $in: rsmIds } },
-        { rmId: { $in: rmIds } },
-        { partnerId: { $in: partnerIds } }
-      ]
+      $and: [
+        activeApplicationsFilter(),
+        {
+          $or: [
+            { asmId },
+            { rsmId: { $in: rsmIds } },
+            { rmId: { $in: rmIds } },
+            { partnerId: { $in: partnerIds } },
+          ],
+        },
+      ],
     })
       .populate("customerId", "employeeId firstName lastName email phone")
       .populate("partnerId", "firstName lastName email phone")
@@ -1868,9 +1833,10 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.ASM), async (req, 
     });
 
     const customers = applications
-      .filter((app) => doneMap[app._id.toString()]) // only apps with DONE payout
+      .filter((app) => doneMap[app._id.toString()])
       .map((app) => {
         const payout = doneMap[app._id.toString()];
+        const disbursedAt = getDisbursedAt(app);
         return {
           customerId: app.customerId?._id,
           customerEmployeeId: app.customerId?.employeeId || null,
@@ -1893,6 +1859,8 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.ASM), async (req, 
           },
           applicationId: app._id,
           createdAt: app.createdAt,
+          disbursedAt,
+          updatedAt: disbursedAt || app.updatedAt,
         };
       });
 
@@ -2115,26 +2083,11 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
     const asmId = req.user.sub;
     const { year, month } = req.query;
 
-    // Get all RSMs under this ASM
-    const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
-    const rsmIds = rsms.map((rsm) => rsm._id);
-
-    // Get all RMs under these RSMs
-    const rms = await User.find({
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } }
-      ]
-    }).lean();
-    const rmIds = rms.map((rm) => rm._id);
-
-    // Get all partners under these RMs
+    const { partnerIds } = await getAsmScopeIds(asmId);
     const partners = await User.find({
-      rmId: { $in: rmIds },
+      _id: { $in: partnerIds },
       role: ROLES.PARTNER,
     }).lean();
-    const partnerIds = partners.map((p) => p._id);
 
     // Build date filter
     const currentDate = new Date();
@@ -2152,14 +2105,14 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       year: targetYear,
     }).lean();
 
-    // Get relevant applications for achievement calculation
+    // Load apps by partner — period uses createdAt / disbursedAt (stable under RM moves)
     const relevantApps = await Application.find({
-      partnerId: { $in: partnerIds },
-      status: { $ne: "DRAFT" },
-      updatedAt: {
-        $gte: startDate,
-        $lt: endDate,
-      },
+      $and: [
+        activeApplicationsFilter({
+          partnerId: { $in: partnerIds },
+          status: { $ne: "DRAFT" },
+        }),
+      ],
     }).lean();
 
     // Calculate achievements using Hybrid Target Model (for display only)
@@ -2167,36 +2120,38 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       const partnerTargets = targets.filter(
         (t) => t.assignedTo.toString() === partner._id.toString()
       );
-      const partnerApps = relevantApps.filter(
+      const partnerAppsAll = relevantApps.filter(
         (app) => app.partnerId.toString() === partner._id.toString()
       );
 
-      // Get target values (use hybrid model if available, else fallback to legacy)
-      const target = partnerTargets[0] || {};
-      const fileCountTarget = target.fileCountTarget || 4; // Default 4 files
-      const disbursementTarget = target.disbursementTarget || target.targetValue || 2000000; // Default ₹20L
+      // Files in month = created in month (not updatedAt — RM move was bumping counts)
+      const partnerApps = partnerAppsAll.filter((app) =>
+        isDateInRange(new Date(app.createdAt), startDate, endDate)
+      );
 
-      // Calculate achievements
+      const target = partnerTargets[0] || {};
+      const fileCountTarget = target.fileCountTarget || 4;
+      const disbursementTarget = target.disbursementTarget || target.targetValue || 2000000;
+
       const achievedFileCount = partnerApps.length;
-      const achievedDisbursement = partnerApps
-        .filter(app => app.status === "DISBURSED")
+      const achievedDisbursement = partnerAppsAll
+        .filter((app) => {
+          if (app.status !== "DISBURSED") return false;
+          return isDateInRange(getDisbursedAt(app), startDate, endDate);
+        })
         .reduce(
           (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
           0
         );
 
-      // Check if both conditions are met (Target Achieved)
       const fileTargetMet = achievedFileCount >= fileCountTarget;
       const disbursementTargetMet = achievedDisbursement >= disbursementTarget;
       const targetAchieved = fileTargetMet && disbursementTargetMet;
 
-      // Check if partner met / exceeded targets (for information only)
-      // Incentive itself will be set manually, not computed from these numbers.
       const fileTargetExceeded = achievedFileCount > fileCountTarget;
       const disbursementTargetExceeded = achievedDisbursement > disbursementTarget;
       const targetExceeded = disbursementTargetExceeded;
 
-      // Calculate percentages
       const fileAchievementPercentage = fileCountTarget > 0
         ? (achievedFileCount / fileCountTarget) * 100
         : 0;
@@ -2204,7 +2159,6 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
         ? (achievedDisbursement / disbursementTarget) * 100
         : 0;
 
-      // Overall achievement percentage (minimum of both)
       const overallAchievementPercentage = Math.min(
         fileAchievementPercentage,
         disbursementAchievementPercentage
@@ -2214,12 +2168,10 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
         partnerId: partner._id,
         partnerName: `${partner.firstName} ${partner.lastName}`,
         partnerEmployeeId: partner.employeeId,
-        // Legacy fields for backward compatibility
         totalTarget: disbursementTarget,
         totalAchieved: achievedDisbursement,
         achievementPercentage: overallAchievementPercentage.toFixed(2),
         disbursedCount: achievedFileCount,
-        // Hybrid model fields
         fileCountTarget,
         achievedFileCount,
         disbursementTarget,
@@ -2232,7 +2184,6 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
         targetExceeded: targetExceeded || false,
         fileAchievementPercentage: fileAchievementPercentage.toFixed(2),
         disbursementAchievementPercentage: disbursementAchievementPercentage.toFixed(2),
-        // Incentive flags for UI only – amount is set manually by ASM
         eligibleForIncentive: targetExceeded && targetAchieved,
         incentiveLevel: "NONE",
         incentiveAmount: 0,
