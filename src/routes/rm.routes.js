@@ -366,6 +366,7 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
       role: ROLES.PARTNER,
       rmId,
       status: { $ne: "PENDING" },
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
     })
       .select("-passwordHash")
       .lean();
