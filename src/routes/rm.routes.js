@@ -366,7 +366,6 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
       role: ROLES.PARTNER,
       rmId,
       status: { $ne: "PENDING" },
-      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
     })
       .select("-passwordHash")
       .lean();
@@ -1843,12 +1842,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
     if (!rm) return res.status(404).json({ message: "RM not found" });
 
     // Partners under RM
-    const partners = await User.find({ 
-      rmId, 
-      role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
-      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
-    }).lean();
+    const partners = await User.find({ rmId, role: ROLES.PARTNER }).lean();
     const partnerIds = partners.map((p) => p._id);
 
     const totalPartners = partners.length;
