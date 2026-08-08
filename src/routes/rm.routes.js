@@ -1842,7 +1842,12 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
     if (!rm) return res.status(404).json({ message: "RM not found" });
 
     // Partners under RM
-    const partners = await User.find({ rmId, role: ROLES.PARTNER }).lean();
+    const partners = await User.find({ 
+      rmId, 
+      role: ROLES.PARTNER,
+      status: { $ne: "PENDING" },
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
+    }).lean();
     const partnerIds = partners.map((p) => p._id);
 
     const totalPartners = partners.length;
@@ -1850,6 +1855,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       rmId,
       role: ROLES.PARTNER,
       status: "ACTIVE",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
     });
 
     // Customers under RM (including from partners)
