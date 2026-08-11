@@ -1342,6 +1342,8 @@ router.get(
           .filter(Boolean)
           .join(" ");
 
+        const empId = customerUser.employeeId || c.employeeId || app.appNo || null;
+
         return {
           _id: app._id,
           applicationId: app._id,
@@ -1349,8 +1351,9 @@ router.get(
           firstName: c.firstName || customerUser.firstName || null,
           lastName: c.lastName || customerUser.lastName || null,
           userName: displayName || null,
-          userId: userMongoId,
-          employeeId: customerUser.employeeId || null,
+          userId: userMongoId || app._id,
+          isUserAccount: !!userMongoId,
+          employeeId: empId,
           email: c.email || customerUser.email || null,
           phone: c.phone || customerUser.phone || null,
           loanType: app.loanType,
@@ -1500,7 +1503,7 @@ router.get(
   }
 );
 
-// Soft-hide customer + applications (NO hard delete — preserves loan book / docs)
+// Soft-hide customer + applications or individual loan application by ID
 router.delete(
   "/customer/:customerId",
   auth,
@@ -1513,44 +1516,116 @@ router.delete(
         return res.status(400).json({ message: "Invalid customer ID" });
       }
 
+      const now = softHideTimestamp();
+
+      // First try to find User with role CUSTOMER
       const customer = await User.findOne({
         _id: customerId,
         role: ROLES.CUSTOMER,
       });
 
-      if (!customer) {
-        return res.status(404).json({ message: "Customer not found" });
+      if (customer) {
+        const appUpdate = await Application.updateMany(
+          { customerId },
+          {
+            $set: {
+              deletedAt: now,
+              updatedAt: now,
+            },
+          }
+        );
+
+        customer.status = "SUSPENDED";
+        customer.deletedAt = now;
+        await customer.save();
+
+        return res.json({
+          message:
+            "Customer and applications soft-deleted (hidden). Data is retained and can be recovered from the database.",
+          customerId,
+          customerName: `${customer.firstName || ""} ${customer.lastName || ""}`.trim() || "Customer",
+          softDeletedApplications: appUpdate.modifiedCount || 0,
+          hardDeleted: false,
+        });
       }
 
-      const now = softHideTimestamp();
+      // If user not found, check if customerId is an Application ID
+      const app = await Application.findById(customerId);
+      if (app) {
+        app.deletedAt = now;
+        app.updatedAt = now;
+        await app.save();
 
-      // Hide applications from UI; keep Mongo rows + documents for recovery/audit
-      const appUpdate = await Application.updateMany(
-        { customerId },
-        {
-          $set: {
-            deletedAt: now,
-            updatedAt: now,
-          },
+        if (app.customerId) {
+          const remaining = await Application.countDocuments({
+            customerId: app.customerId,
+            $or: [{ deletedAt: null }, { deletedAt: { $gt: new Date() } }],
+          });
+          if (remaining === 0) {
+            await User.updateOne(
+              { _id: app.customerId },
+              { $set: { status: "SUSPENDED", deletedAt: now } }
+            );
+          }
         }
-      );
 
-      customer.status = "SUSPENDED";
-      customer.deletedAt = now;
-      await customer.save();
+        const appCustName = app.customer
+          ? `${app.customer.firstName || ""} ${app.customer.lastName || ""}`.trim()
+          : "Application";
 
-      res.json({
-        message:
-          "Customer and applications soft-deleted (hidden). Data is retained and can be recovered from the database.",
-        customerId,
-        customerName: `${customer.firstName} ${customer.lastName}`,
-        softDeletedApplications: appUpdate.modifiedCount || 0,
-        hardDeleted: false,
-      });
+        return res.json({
+          message: "Loan application soft-deleted (hidden) successfully.",
+          applicationId: app._id,
+          customerName: appCustName || "Customer",
+          softDeletedApplications: 1,
+          hardDeleted: false,
+        });
+      }
+
+      return res.status(404).json({ message: "Customer or application record not found" });
     } catch (error) {
       console.error("Error soft-deleting customer:", error);
       res.status(500).json({
         message: "Failed to delete customer",
+        error: error.message,
+      });
+    }
+  }
+);
+
+// Soft-hide an individual loan application by applicationId
+router.delete(
+  "/application/:applicationId",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { applicationId } = req.params;
+
+      if (!mongoose.Types.ObjectId.isValid(applicationId)) {
+        return res.status(400).json({ message: "Invalid application ID" });
+      }
+
+      const now = softHideTimestamp();
+      const app = await Application.findById(applicationId);
+
+      if (!app) {
+        return res.status(404).json({ message: "Application not found" });
+      }
+
+      app.deletedAt = now;
+      app.updatedAt = now;
+      await app.save();
+
+      return res.json({
+        message: "Loan application soft-deleted successfully.",
+        applicationId: app._id,
+        hardDeleted: false,
+      });
+    } catch (error) {
+      console.error("Error soft-deleting application:", error);
+      res.status(500).json({
+        message: "Failed to delete application",
         error: error.message,
       });
     }

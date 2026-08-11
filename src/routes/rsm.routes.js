@@ -14,6 +14,7 @@ import { sendUserAccountEmail, sendApplicationStatusEmail } from "../utils/email
 import { sendMail } from "../utils/sendMail.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { emitApplicationStatusChanged } from "../utils/socketEmitter.js";
+import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { makeRmCode } from "../utils/codes.js";
 import { Target } from "../models/Target.js";
 import fs from "fs";
@@ -619,7 +620,7 @@ router.get("/applications", auth, requireRole(ROLES.RSM), async (req, res) => {
 
     console.log(`🔍 RSM applications filter:`, JSON.stringify(filter));
 
-    let applications = await Application.find(filter)
+    let applications = await Application.find(activeApplicationsFilter(filter))
       .populate("customerId", "firstName lastName email phone employeeId")
       .populate("partnerId", "firstName lastName employeeId")
       .populate("rmId", "firstName lastName employeeId")
@@ -1109,10 +1110,12 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
     );
 
     // Recent Applications for Pipeline (last 10 applications)
-    const recentApplications = await Application.find({
-      ...appScope,
-      status: { $in: ["DOC_COMPLETE", "UNDER_REVIEW", "APPROVED", "AGREEMENT"] },
-    })
+    const recentApplications = await Application.find(
+      activeApplicationsFilter({
+        ...appScope,
+        status: { $in: ["DOC_COMPLETE", "UNDER_REVIEW", "APPROVED", "AGREEMENT"] },
+      })
+    )
       .populate("customerId", "firstName lastName phone")
       .select("appNo loanType loanAmount status customerId createdAt")
       .sort({ createdAt: -1 })
@@ -1981,16 +1984,18 @@ router.get("/partners/targets", auth, requireRole(ROLES.RSM), async (req, res) =
     }).lean();
 
     // Get relevant applications for achievement calculation
-    const relevantApps = await Application.find({
-      partnerId: { $in: partnerIds },
-      status: { $ne: "DRAFT" },
-      ...(year && month ? {
-        updatedAt: {
-          $gte: new Date(year, month - 1, 1),
-          $lt: new Date(year, month, 1)
-        }
-      } : {})
-    }).lean();
+    const relevantApps = await Application.find(
+      activeApplicationsFilter({
+        partnerId: { $in: partnerIds },
+        status: { $ne: "DRAFT" },
+        ...(year && month ? {
+          updatedAt: {
+            $gte: new Date(year, month - 1, 1),
+            $lt: new Date(year, month, 1)
+          }
+        } : {})
+      })
+    ).lean();
 
     // Combine partner data with targets and achievements
     const partnerTargets = partners.map((partner) => {

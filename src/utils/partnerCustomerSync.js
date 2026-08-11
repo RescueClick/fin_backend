@@ -5,11 +5,12 @@
 import { User } from "../models/User.js";
 import { Application } from "../models/Application.js";
 import { ROLES } from "../config/roles.js";
+import { activeApplicationsFilter } from "./activeApplicationsFilter.js";
 
 export async function findCustomersForPartner(partnerId) {
   const [linked, appCustomerIds] = await Promise.all([
-    User.find({ role: ROLES.CUSTOMER, partnerId }).select("_id").lean(),
-    Application.distinct("customerId", { partnerId }),
+    User.find({ role: ROLES.CUSTOMER, partnerId, deletedAt: null }).select("_id").lean(),
+    Application.distinct("customerId", activeApplicationsFilter({ partnerId })),
   ]);
 
   const idSet = new Set([
@@ -22,6 +23,7 @@ export async function findCustomersForPartner(partnerId) {
   return User.find({
     _id: { $in: [...idSet] },
     role: ROLES.CUSTOMER,
+    deletedAt: null,
   })
     .select("-passwordHash -__v")
     .lean();

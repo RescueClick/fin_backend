@@ -11,6 +11,9 @@ export const normalizeIncomingDocType = (docType) => {
     AADHAAR_FRONT: "AADHAR_FRONT",
     AADHAAR_BACK: "AADHAR_BACK",
     PASSPORT_PHOTO: "PHOTO",
+    PHOTO_OR_SELFIE: "PHOTO",
+    SELFIE: "PHOTO",
+    PHOTO: "PHOTO",
     OTHER_DOC: "OTHER_DOCS",
     FORM16: "FORM_16_26AS",
     FORM_16: "FORM_16_26AS",
@@ -23,6 +26,7 @@ export const normalizeIncomingDocType = (docType) => {
     GST_CERTIFICATE: "GST_DOCUMENT",
     BANK_STATEMENT: "BANK_STATEMENT_1",
     CO_APPLICANT_PASSPORT_PHOTO: "CO_APPLICANT_SELFIE",
+    CO_APPLICANT_SELFIE_OR_PHOTO: "CO_APPLICANT_SELFIE",
   };
   return aliases[key] || key;
 };
@@ -95,28 +99,58 @@ export const getMandatoryDocRules = (loanType, customer = {}) => {
 export const serializeMandatoryDocRules = (rules = []) =>
   rules.map((rule) => {
     if (typeof rule === "string") {
-      return { key: rule, acceptedDocTypes: [rule] };
+      const accepted = [rule];
+      if (rule === "AADHAR_FRONT" || rule === "AADHAAR_FRONT") {
+        accepted.push("AADHAR_FRONT", "AADHAAR_FRONT");
+      }
+      if (rule === "AADHAR_BACK" || rule === "AADHAAR_BACK") {
+        accepted.push("AADHAR_BACK", "AADHAAR_BACK");
+      }
+      return { key: rule, acceptedDocTypes: [...new Set(accepted)] };
     }
 
-    const acceptedDocTypes = Array.isArray(rule?.anyOf) ? rule.anyOf : [];
+    const acceptedDocTypes = Array.isArray(rule?.anyOf) ? [...rule.anyOf] : [];
+    if (rule?.label) {
+      acceptedDocTypes.push(rule.label);
+    }
+    if (rule?.label === "PHOTO_OR_SELFIE") {
+      acceptedDocTypes.push("PHOTO", "SELFIE", "PHOTO_OR_SELFIE", "PASSPORT_PHOTO");
+    }
+    if (rule?.label === "ADDRESS_PROOF") {
+      acceptedDocTypes.push("ADDRESS_PROOF", "LIGHT_BILL", "UTILITY_BILL", "RENT_AGREEMENT");
+    }
+
     return {
       key: String(rule?.label || acceptedDocTypes.join("_OR_") || "").toUpperCase(),
-      acceptedDocTypes,
+      acceptedDocTypes: [...new Set(acceptedDocTypes)],
     };
   });
 
 export const findMissingMandatoryDocs = (loanType, customer, docs = []) => {
   const uploadedTypes = new Set(docs.map((d) => normalizeIncomingDocType(d.docType)));
+  docs.forEach((d) => {
+    if (d?.docType) uploadedTypes.add(String(d.docType).trim().toUpperCase());
+  });
+
   const rules = getMandatoryDocRules(loanType, customer);
   const missing = [];
 
   for (const rule of rules) {
     if (typeof rule === "string") {
-      if (!uploadedTypes.has(rule)) missing.push(rule);
+      const normRule = normalizeIncomingDocType(rule);
+      if (!uploadedTypes.has(rule) && !uploadedTypes.has(normRule)) {
+        missing.push(rule);
+      }
       continue;
     }
-    if (rule?.anyOf && !rule.anyOf.some((t) => uploadedTypes.has(t))) {
-      missing.push(rule.label || rule.anyOf.join("_OR_"));
+    const label = rule?.label;
+    const anyOfNorm = Array.isArray(rule?.anyOf) ? rule.anyOf.map(normalizeIncomingDocType) : [];
+    const hasMatch =
+      (label && uploadedTypes.has(label)) ||
+      (Array.isArray(rule?.anyOf) && rule.anyOf.some((t) => uploadedTypes.has(t) || uploadedTypes.has(normalizeIncomingDocType(t))));
+
+    if (!hasMatch) {
+      missing.push(label || rule.anyOf.join("_OR_"));
     }
   }
 

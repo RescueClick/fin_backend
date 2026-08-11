@@ -43,6 +43,7 @@ import {
 import { sendMail } from "../utils/sendMail.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendApplicationStatusEmail, sendDocumentStatusEmail } from "../utils/emailService.js";
+import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import axios from "axios";
 import { emitDocumentStatusChanged, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
 import { getReferralWebBaseUrl, appendPartnerShareUtm } from "../config/branding.js";
@@ -2213,12 +2214,14 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
     // 2. Applications from partners under this RM (even if rmId wasn't set on application)
     // ✅ RM can see all their applications, but can only control statuses up to DOC_COMPLETE
     // Applications with status beyond DOC_COMPLETE are shown for reference but cannot be modified
-    const applications = await Application.find({
-      $or: [
-        { rmId: rmId }, // Direct RM assignment
-        { partnerId: { $in: partnerIds } } // Applications from partners under this RM
-      ]
-    })
+    const applications = await Application.find(
+      activeApplicationsFilter({
+        $or: [
+          { rmId: rmId }, // Direct RM assignment
+          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+        ]
+      })
+    )
       .populate("customerId", "employeeId firstName lastName email phone") // ✅ get employeeId from User
       .populate("partnerId", "firstName lastName email phone")
       .lean();
