@@ -2702,9 +2702,9 @@ router.delete(
       }
 
       const [appCount, payoutCount, customerCount] = await Promise.all([
-        Application.countDocuments({ partnerId: partner._id }),
+        Application.countDocuments(activeApplicationsFilter({ partnerId: partner._id })),
         Payout.countDocuments({ partnerId: partner._id }),
-        User.countDocuments({ role: ROLES.CUSTOMER, partnerId: partner._id }),
+        User.countDocuments({ role: ROLES.CUSTOMER, partnerId: partner._id, deletedAt: null }),
       ]);
 
       if (
@@ -3671,10 +3671,12 @@ const evaluatePartnerHardDeleteEligibility = async (partnerId) => {
     latestIncentive,
   ] =
     await Promise.all([
-      Application.countDocuments({
-        partnerId,
-        status: { $in: ACTIVE_APPLICATION_STATUSES },
-      }),
+      Application.countDocuments(
+        activeApplicationsFilter({
+          partnerId,
+          status: { $in: ACTIVE_APPLICATION_STATUSES },
+        })
+      ),
       Payout.countDocuments({
         partnerId,
         payOutStatus: "PENDING",

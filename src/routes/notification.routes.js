@@ -7,6 +7,7 @@ import { User } from "../models/User.js";
 import { Payout } from "../models/Payout.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { Incentive } from "../models/Incentive.js";
+import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 
 const router = Router();
 
@@ -385,20 +386,26 @@ router.get("/sidebar-counts", auth, async (req, res) => {
       counts.incentive = await Incentive.countDocuments({ partnerId: { $in: partnerIds }, status: "PENDING" });
 
       // 3. Applications: Count of applications assigned/routed to ASM (DOC_SUBMITTED)
-      counts.application = await Application.countDocuments({ asmId: userIdObjectId, status: "DOC_SUBMITTED" });
+      counts.application = await Application.countDocuments(
+        activeApplicationsFilter({ asmId: userIdObjectId, status: "DOC_SUBMITTED" })
+      );
     }
     else if (role === "rsm") {
       // RSM specific counts
       // 1. Applications: Count of applications in DOC_COMPLETE status assigned to this RSM
-      counts.application = await Application.countDocuments({ rsmId: userIdObjectId, status: "DOC_COMPLETE" });
+      counts.application = await Application.countDocuments(
+        activeApplicationsFilter({ rsmId: userIdObjectId, status: "DOC_COMPLETE" })
+      );
     }
     else if (role === "rm") {
       // RM specific counts
       // 1. Applications: Count of applications in SUBMITTED or DOC_INCOMPLETE status assigned to this RM
-      counts.application = await Application.countDocuments({ 
-        rmId: userIdObjectId, 
-        status: { $in: ["SUBMITTED", "DOC_INCOMPLETE"] } 
-      });
+      counts.application = await Application.countDocuments(
+        activeApplicationsFilter({ 
+          rmId: userIdObjectId, 
+          status: { $in: ["SUBMITTED", "DOC_INCOMPLETE"] } 
+        })
+      );
       // 2. My Partners: Count of partners assigned to this RM with status "PENDING"
       counts.partner = await User.countDocuments({ rmId: userIdObjectId, role: "partner", status: "PENDING" });
     }

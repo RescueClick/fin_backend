@@ -1855,31 +1855,33 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
     });
 
     // Customers under RM (including from partners)
-    const customers = await Application.distinct("customerId", {
+    const customers = await Application.distinct("customerId", activeApplicationsFilter({
       $or: [
         { rmId: rmId }, // Direct RM assignment
         { partnerId: { $in: partnerIds } } // Applications from partners under this RM
       ]
-    });
+    }));
     const totalCustomers = customers.length;
 
     // In-process applications (including from partners)
-    const inProcessApplications = await Application.countDocuments({
-      $or: [
-        { rmId: rmId, status: "UNDER_REVIEW" }, // Direct RM assignment
-        { partnerId: { $in: partnerIds }, status: "UNDER_REVIEW" } // Applications from partners
-      ]
-    });
+    const inProcessApplications = await Application.countDocuments(
+      activeApplicationsFilter({
+        $or: [
+          { rmId: rmId, status: "UNDER_REVIEW" }, // Direct RM assignment
+          { partnerId: { $in: partnerIds }, status: "UNDER_REVIEW" } // Applications from partners
+        ]
+      })
+    );
 
     // Revenue (including from partners)
     const revenueAgg = await Application.aggregate([
       {
-        $match: {
+        $match: activeApplicationsFilter({
           $or: [
             { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
             { partnerId: { $in: partnerIds }, status: "DISBURSED" }
           ]
-        },
+        }),
       },
       {
         $group: {
@@ -3924,14 +3926,14 @@ router.get("/partner-reports", auth, requireRole(ROLES.RM), async (req, res) => 
     const partnerReports = await Promise.all(
       partners.map(async (p) => {
         // Count applications by status
-        const totalApplications = await Application.countDocuments({ partnerId: p._id });
-        const approvedCount = await Application.countDocuments({ partnerId: p._id, status: "APPROVED" });
-        const disbursedCount = await Application.countDocuments({ partnerId: p._id, status: "DISBURSED" });
-        const rejectedCount = await Application.countDocuments({ partnerId: p._id, status: "REJECTED" });
+        const totalApplications = await Application.countDocuments(activeApplicationsFilter({ partnerId: p._id }));
+        const approvedCount = await Application.countDocuments(activeApplicationsFilter({ partnerId: p._id, status: "APPROVED" }));
+        const disbursedCount = await Application.countDocuments(activeApplicationsFilter({ partnerId: p._id, status: "DISBURSED" }));
+        const rejectedCount = await Application.countDocuments(activeApplicationsFilter({ partnerId: p._id, status: "REJECTED" }));
 
         // Revenue: sum of approvedLoanAmount for disbursed applications
         const revenueAgg = await Application.aggregate([
-          { $match: { partnerId: p._id, status: "DISBURSED" } },
+          { $match: activeApplicationsFilter({ partnerId: p._id, status: "DISBURSED" }) },
           { $group: { _id: null, totalRevenue: { $sum: { $toDouble: "$approvedLoanAmount" } } } },
         ]);
         const revenue = revenueAgg.length > 0 ? Number(revenueAgg[0].totalRevenue) : 0;
