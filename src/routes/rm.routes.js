@@ -1923,9 +1923,10 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       {
         $match: {
           $or: [
-            { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
-            { partnerId: { $in: partnerIds }, status: "DISBURSED" }
-          ],
+    { partnerId: { $in: partnerIds }, status: "DISBURSED" },
+    { partnerId: null, rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
+    { partnerId: { $exists: false }, rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" }
+  ],
           updatedAt: {
             $gte: currentMonthStart,
             $lt: currentMonthEnd,
@@ -1959,9 +1960,10 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       {
         $match: {
           $or: [
-            { rmId: new mongoose.Types.ObjectId(rmId) },
-            { partnerId: { $in: partnerIds } }
-          ],
+    { partnerId: { $in: partnerIds } },
+    { partnerId: null, rmId: new mongoose.Types.ObjectId(rmId) },
+    { partnerId: { $exists: false }, rmId: new mongoose.Types.ObjectId(rmId) }
+  ],
           status: { $ne: "DRAFT" },
           updatedAt: { $gte: startOfYear },
         },
@@ -2004,9 +2006,10 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
     const highValueCustomers = await Application.aggregate([
       { $match: { 
         $or: [
-          { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
-          { partnerId: { $in: partnerIds }, status: "DISBURSED" }
-        ]
+    { partnerId: { $in: partnerIds }, status: "DISBURSED" },
+    { partnerId: null, rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
+    { partnerId: { $exists: false }, rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" }
+  ]
       } },
       { $group: { _id: "$customerId", maxLoan: { $max: { $toDouble: "$approvedLoanAmount" } }, latestApp: { $first: "$$ROOT" } } },
       { $sort: { maxLoan: -1 } },
@@ -2028,9 +2031,10 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
     const salesPipeline = await Application.aggregate([
       { $match: { 
         $or: [
-          { rmId: new mongoose.Types.ObjectId(rmId), status: "UNDER_REVIEW" },
-          { partnerId: { $in: partnerIds }, status: "UNDER_REVIEW" }
-        ]
+    { partnerId: { $in: partnerIds }, status: "UNDER_REVIEW" },
+    { partnerId: null, rmId: new mongoose.Types.ObjectId(rmId), status: "UNDER_REVIEW" },
+    { partnerId: { $exists: false }, rmId: new mongoose.Types.ObjectId(rmId), status: "UNDER_REVIEW" }
+  ]
       } },
       { $addFields: { requestedAmountNum: { $ifNull: ["$customer.loanAmount", 0] } } },
       { $sort: { requestedAmountNum: -1, createdAt: -1 } },
@@ -2338,8 +2342,9 @@ router.get(
         _id: applicationId,
         customerId,
         $or: [
-          { rmId: rmId }, // Direct RM assignment
-          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+          { partnerId: { $in: partnerIds } },
+          { partnerId: null, rmId: rmId },
+          { partnerId: { $exists: false }, rmId: rmId }
         ]
       })
         .populate("customerId", "firstName lastName email phone") // 👤 User-level info
@@ -2614,9 +2619,10 @@ router.put(
       const app = await Application.findOne({
         _id: id,
         $or: [
-          { rmId: rmId }, // Direct RM assignment
-          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
-        ]
+    { partnerId: { $in: partnerIds } },
+    { partnerId: null, rmId: rmId },
+    { partnerId: { $exists: false }, rmId: rmId }
+  ]
       });
 
       if (!app) {
@@ -2820,7 +2826,11 @@ router.post(
 
       const app = await Application.findOne({
         _id: id,
-        $or: [{ rmId: rmIdPost }, { partnerId: { $in: partnerIdsPost } }],
+        $or: [
+    { partnerId: { $in: partnerIdsPost } },
+    { partnerId: null, rmId: rmIdPost },
+    { partnerId: { $exists: false }, rmId: rmIdPost }
+  ],
       });
 
       if (!app) {
@@ -2996,9 +3006,10 @@ router.get(
       const app = await Application.findOne({
         _id: id,
         $or: [
-          { rmId: rmId }, // Direct RM assignment
-          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
-        ]
+    { partnerId: { $in: partnerIds } },
+    { partnerId: null, rmId: rmId },
+    { partnerId: { $exists: false }, rmId: rmId }
+  ]
       }).lean();
 
       if (!app) {
@@ -3332,9 +3343,10 @@ router.get(
       const app = await Application.findOne({
         _id: id,
         $or: [
-          { rmId: rmId }, // Direct RM assignment
-          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
-        ]
+    { partnerId: { $in: partnerIds } },
+    { partnerId: null, rmId: rmId },
+    { partnerId: { $exists: false }, rmId: rmId }
+  ]
       }).lean();
       if (!app) {
         return res
