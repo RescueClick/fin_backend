@@ -1162,8 +1162,9 @@ router.post(
       const app = await Application.findOne({
         _id: req.params.id,
         $or: [
-          { rmId: rmId }, // Direct RM assignment
-          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+          { partnerId: { $in: partnerIds } },
+          { partnerId: null, rmId: rmId },
+          { partnerId: { $exists: false }, rmId: rmId }
         ]
       }).populate("customerId");
 
@@ -1854,32 +1855,35 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
     });
 
-    // Customers under RM (including from partners)
-    const customers = await Application.distinct("customerId", activeApplicationsFilter({
+    const rmScopeFilter = {
       $or: [
-        { rmId: rmId }, // Direct RM assignment
-        { partnerId: { $in: partnerIds } } // Applications from partners under this RM
+        { partnerId: { $in: partnerIds } },
+        { partnerId: null, rmId: rmId },
+        { partnerId: { $exists: false }, rmId: rmId }
       ]
-    }));
+    };
+
+    // Customers under RM (including from partners)
+    const customers = await Application.distinct("customerId", activeApplicationsFilter(rmScopeFilter));
     const totalCustomers = customers.length;
 
     // In-process applications (including from partners)
     const inProcessApplications = await Application.countDocuments(
       activeApplicationsFilter({
-        $or: [
-          { rmId: rmId, status: "UNDER_REVIEW" }, // Direct RM assignment
-          { partnerId: { $in: partnerIds }, status: "UNDER_REVIEW" } // Applications from partners
-        ]
+        ...rmScopeFilter,
+        status: "UNDER_REVIEW"
       })
     );
 
     // Revenue (including from partners)
+    const rmObjectId = new mongoose.Types.ObjectId(rmId);
     const revenueAgg = await Application.aggregate([
       {
         $match: activeApplicationsFilter({
           $or: [
-            { rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
-            { partnerId: { $in: partnerIds }, status: "DISBURSED" }
+            { partnerId: { $in: partnerIds }, status: "DISBURSED" },
+            { partnerId: null, rmId: rmObjectId, status: "DISBURSED" },
+            { partnerId: { $exists: false }, rmId: rmObjectId, status: "DISBURSED" }
           ]
         }),
       },
@@ -2207,22 +2211,23 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
     // Get all partners under this RM
     const partners = await User.find({ 
       rmId: rmId, 
-      role: ROLES.PARTNER 
+      role: ROLES.PARTNER,
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
     }).select("_id").lean();
     const partnerIds = partners.map(p => p._id);
 
     // Find all applications under this RM:
-    // 1. Applications where rmId directly matches, OR
-    // 2. Applications from partners under this RM (even if rmId wasn't set on application)
-    // ✅ RM can see all their applications, but can only control statuses up to DOC_COMPLETE
-    // Applications with status beyond DOC_COMPLETE are shown for reference but cannot be modified
+    // Only applications from partners assigned to this RM OR direct applications with no partner assigned to this RM
+    const rmScopeFilter = {
+      $or: [
+        { partnerId: { $in: partnerIds } },
+        { partnerId: null, rmId: rmId },
+        { partnerId: { $exists: false }, rmId: rmId }
+      ]
+    };
+
     const applications = await Application.find(
-      activeApplicationsFilter({
-        $or: [
-          { rmId: rmId }, // Direct RM assignment
-          { partnerId: { $in: partnerIds } } // Applications from partners under this RM
-        ]
-      })
+      activeApplicationsFilter(rmScopeFilter)
     )
       .populate("customerId", "employeeId firstName lastName email phone") // ✅ get employeeId from User
       .populate("partnerId", "firstName lastName email phone")
