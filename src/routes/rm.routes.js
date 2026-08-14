@@ -17,25 +17,6 @@ import path from "path";
 import archiver from "archiver";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { Target } from "../models/Target.js";
-import { Router } from "express";
-import argon2 from "argon2";
-import { auth } from "../middleware/auth.js";
-import { requireRole } from "../middleware/requireRole.js";
-import { ROLES } from "../config/roles.js";
-import { User } from "../models/User.js";
-import { makePartnerCode } from "../utils/codes.js";
-import {
-  Application,
-  APP_STATUSES,
-  findUploadedDocMatchingRequired,
-  canonicalDocTypeForVerification,
-} from "../models/Application.js";
-import { Payout } from "../models/Payout.js";
-import fs from "fs";
-import path from "path";
-import archiver from "archiver";
-import { generateEmployeeId } from "../utils/generateEmployeeId.js";
-import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
 import mongoose from "mongoose";
 import mime from "mime-types";
@@ -2712,7 +2693,7 @@ router.put(
         app.docs[docIndex].verifiedAt = null;
         app.docs[docIndex].verifiedBy = null;
       } else if (status === "UPDATED") {
-        // When RM marks as UPDATED, it means it means partner re-uploaded and needs review
+        // When RM marks as UPDATED, it means partner re-uploaded and needs review
         app.docs[docIndex].updatedAt = now;
       }
       
@@ -2852,6 +2833,594 @@ router.post(
     { partnerId: { $in: partnerIdsPost } },
     { partnerId: null, rmId: rmIdPost },
     { partnerId: { $exists: false }, rmId: rmIdPost }
+  ],
+      });
+
+      if (!app) {
+        console.log("Application not found", { id, rmId: rmIdPost });
+        return res.status(404).json({
+          message: "Application not found or not assigned to this RM",
+        });
+      }
+
+      // ✅ CRITICAL: If application has rsmId set (transferred to RSM), RM CANNOT modify documents
+      // Once DOC_COMPLETE is set and rsmId is assigned, the application belongs to RSM
+      if (app.rsmId) {
+        return res.status(403).json({
+          message: "This application has been transferred to RSM and can no longer be modified by RM. Once documents are complete, only RSM can handle document changes."
+        });
+      }
+
+      // ✅ Also prevent modifying documents if status is DOC_COMPLETE (even if rsmId wasn't set - safety check)
+      if (app.status === "DOC_COMPLETE") {
+        return res.status(403).json({
+          message: "Cannot modify documents for applications with DOC_COMPLETE status. Once documents are complete, the application is transferred to RSM for processing."
+        });
+      }
+
+      const docIndex = app.docs.findIndex(
+        (d) => d.docType.toUpperCase() === decodedDocType.toUpperCase()
+      );
+
+      if (docIndex === -1) {
+        return res.status(404).json({
+          message: "Document not found",
+          docType: decodedDocType,
+          availableDocTypes: app.docs.map((d) => d.docType),
+        });
+      }
+
+      app.docs[docIndex].status = status;
+      if (remarks !== undefined) {
+        app.docs[docIndex].remarks = remarks || "";
+      }
+      
+      if (!app.docs[docIndex].uploadedAt) {
+        app.docs[docIndex].uploadedAt = new Date();
+      }
+
+      let workflowMetaPost = { statusChanged: false, oldStatus: app.status, newStatus: app.status };
+      try {
+        workflowMetaPost = await syncApplicationStatusAfterDocUpdate(app, rmIdPost);
+      } catch (syncErr) {
+        console.error("syncApplicationStatusAfterDocUpdate failed (POST):", syncErr);
+        return res.status(syncErr.statusCode || 500).json({
+          message: syncErr.message || "Could not update application status",
+        });
+      }
+
+      await app.save();
+
+      // Send email notification to partner
+      try {
+        const partner = await User.findById(app.partnerId).lean();
+        if (partner && partner.email) {
+          const statusMessage = status === "REJECTED" 
+            ? "has been REJECTED and needs to be re-uploaded"
+            : status === "VERIFIED"
+            ? "has been VERIFIED"
+            : "status has been updated to PENDING";
+          
+          await sendMail({
+            to: partner.email,
+            subject: `Document Status Update - ${decodedDocType}`,
+            html: `
+              <p>Dear ${partner.firstName || "Partner"},</p>
+              <p>The document <strong>${decodedDocType}</strong> for application <strong>${app.appNo}</strong> ${statusMessage}.</p>
+              ${remarks ? `<p><b>Remarks from RM:</b> ${remarks}</p>` : ""}
+              ${status === "REJECTED" ? `<p>Please re-upload this document through the application form.</p>` : ""}
+              <br/>
+              <p>Thank you,<br/>DhanSource Capital</p>
+            `,
+          });
+        }
+      } catch (mailErr) {
+        console.error("Failed to send email notification:", mailErr.message);
+      }
+
+      // Emit socket notification with action tracking
+      try {
+        // Use global.io which is set in index.js
+        const io = global.io;
+        if (io) {
+          console.log("🔔 RM Route: Emitting document status change", {
+            applicationId: app._id,
+            docType: decodedDocType,
+            status,
+            actionBy: req.user.sub,
+          });
+
+          // Populate application data for detailed notification
+          await app.populate("customerId", "firstName middleName lastName email phone");
+          await app.populate("partnerId", "firstName lastName email employeeId");
+          await app.populate("rmId", "firstName lastName asmId");
+          // Get ASM ID from RM if available
+          if (app.rmId?.asmId) {
+            app.asmId = app.rmId.asmId;
+          }
+          
+          // Extract IDs properly - handle both populated objects and plain IDs
+          const partnerIdForSocket = app.partnerId?._id?.toString() || app.partnerId?.toString() || (app.partnerId ? String(app.partnerId) : null);
+          const customerIdForSocket = app.customerId?._id?.toString() || app.customerId?.toString() || (app.customerId ? String(app.customerId) : null);
+          
+          console.log("🔔 RM Route: Extracted IDs for socket", {
+            partnerId: partnerIdForSocket,
+            customerId: customerIdForSocket,
+            partnerIdType: typeof app.partnerId,
+            customerIdType: typeof app.customerId,
+          });
+          
+          await emitDocumentStatusChanged(
+            io,
+            app._id.toString(),
+            decodedDocType,
+            status,
+            req.user.sub,
+            partnerIdForSocket,
+            customerIdForSocket,
+            req.user.sub, // actionBy - who performed the action
+            app // pass application object for details
+          );
+          
+          console.log("✅ Document status socket emission completed");
+
+          await maybeEmitApplicationStatusAfterDocWorkflow(io, app, workflowMetaPost, req.user.sub);
+        } else {
+          console.error("❌ Socket io instance not available (global.io is null)");
+        }
+      } catch (socketErr) {
+        console.error("❌ Error emitting socket event:", socketErr);
+        console.error("Stack:", socketErr.stack);
+        // Don't fail the request if socket fails
+      }
+
+      res.json({
+        message: "Document status updated successfully",
+        document: app.docs[docIndex],
+        applicationStatus: app.status,
+        allDocumentsVerified: app.areAllDocumentsVerified(),
+      });
+    } catch (err) {
+      console.error("Error updating document status (POST):", err);
+      res.status(500).json({
+        message: "Error updating document status",
+        error: err.message,
+      });
+    }
+  }
+);
+
+// Download all documents as ZIP
+
+router.get(
+  "/applications/:id/docs/:docType/download",
+  auth,
+  requireRole(ROLES.RM),
+  async (req, res) => {
+    try {
+      const { id, docType } = req.params;
+      const rmId = req.user.sub;
+
+      // Get all partners under this RM
+      const partners = await User.find({ rmId, role: ROLES.PARTNER }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+
+      // Find application either directly assigned to RM or via partners
+      const app = await Application.findOne({
+        _id: id,
+        $or: [
+    { partnerId: { $in: partnerIds } },
+    { partnerId: null, rmId: rmId },
+    { partnerId: { $exists: false }, rmId: rmId }
+  ]
+      }).lean();
+
+      if (!app) {
+        return res.status(404).json({ message: "Application not found or not assigned to this RM" });
+      }
+
+      const doc = app.docs.find(
+        (d) => d.docType.toUpperCase() === docType.toUpperCase()
+      );
+      if (!doc) {
+        console.error(`Document not found: docType=${docType}, available docs:`, app.docs.map(d => d.docType));
+        return res.status(404).json({ 
+          message: "Document not found",
+          docType: docType,
+          availableDocTypes: app.docs.map(d => d.docType)
+        });
+      }
+
+      if (!doc.url || doc.url.trim() === "") {
+        console.error(`Document URL is empty: docType=${docType}, docId=${doc._id}`);
+        return res.status(400).json({ 
+          message: "Document URL is empty or invalid",
+          docType: docType
+        });
+      }
+
+      let filename;
+      let contentType;
+      const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
+      
+      // Get the actual file URL (remove backend URL prefix if present)
+      let actualUrl = doc.url.trim();
+      if (actualUrl.startsWith(backendUrl)) {
+        // Strip backend URL prefix to get the actual path
+        actualUrl = actualUrl.replace(backendUrl, "").replace(/^\/+/, "");
+      }
+      
+      console.log(`Downloading document: docType=${docType}, actualUrl=${actualUrl.substring(0, 100)}...`);
+
+      // Check if it's a remote URL (S3, external CDN, etc.)
+      if (actualUrl.startsWith("http://") || actualUrl.startsWith("https://")) {
+        // 🔹 Remote URL (S3, CDN, etc.)
+        try {
+          let responseStream;
+          if (actualUrl.includes("amazonaws.com") && extractS3KeyFromUrl(actualUrl)) {
+            const s3Key = extractS3KeyFromUrl(actualUrl);
+            const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: s3Key });
+            const s3Response = await s3.send(command);
+            responseStream = s3Response.Body;
+            contentType = s3Response.ContentType || "application/octet-stream";
+          } else {
+            const response = await axios.get(actualUrl, { 
+              responseType: "stream",
+              timeout: 30000, // 30 second timeout
+              maxRedirects: 5
+            });
+            responseStream = response.data;
+            contentType = response.headers["content-type"] || "application/octet-stream";
+          }
+          
+          // Try to get extension from URL or Content-Type
+          let ext = "";
+          try {
+            const urlPath = new URL(actualUrl).pathname;
+            ext = path.extname(urlPath) || "";
+          } catch (e) {
+            // If URL parsing fails, try to infer from content-type
+            if (contentType.includes("image/jpeg") || contentType.includes("image/jpg")) {
+              ext = ".jpg";
+            } else if (contentType.includes("image/png")) {
+              ext = ".png";
+            } else if (contentType.includes("application/pdf")) {
+              ext = ".pdf";
+            } else {
+              ext = "";
+            }
+          }
+          
+          filename = `${docType}${ext}`;
+          
+          res.setHeader(
+            "Content-Disposition",
+            `attachment; filename="${filename}"`
+          );
+          res.setHeader("Content-Type", contentType);
+          res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+          
+          responseStream.pipe(res);
+          
+          responseStream.on("error", (err) => {
+            console.error("Stream error:", err);
+            if (!res.headersSent) {
+              res.status(500).json({ message: "Error streaming document" });
+            }
+          });
+        } catch (axiosErr) {
+          console.error("Error fetching remote document:", {
+            url: actualUrl.substring(0, 100),
+            message: axiosErr.message,
+            code: axiosErr.code,
+            status: axiosErr.response?.status,
+            statusText: axiosErr.response?.statusText,
+          });
+          if (!res.headersSent) {
+            const errorMsg = axiosErr.response?.status 
+              ? `Remote server returned ${axiosErr.response.status}: ${axiosErr.response.statusText || axiosErr.message}`
+              : `Error downloading document from remote server: ${axiosErr.message}`;
+            return res.status(500).json({ 
+              message: errorMsg,
+              error: axiosErr.message,
+              code: axiosErr.code
+            });
+          }
+        }
+      } else {
+        // 🔹 Local file
+        const filePath = path.resolve(process.cwd(), actualUrl);
+        
+        console.log(`Checking local file: ${filePath}`);
+        
+        if (!fs.existsSync(filePath)) {
+          console.error(`Local file not found: ${filePath}`);
+          return res.status(404).json({ 
+            message: "File not found on server",
+            path: actualUrl,
+            resolvedPath: filePath
+          });
+        }
+        
+        const stats = fs.statSync(filePath);
+        if (!stats.isFile()) {
+          console.error(`Path is not a file: ${filePath}`);
+          return res.status(404).json({ 
+            message: "Path is not a file",
+            path: actualUrl
+          });
+        }
+        
+        const ext = path.extname(filePath);
+        filename = `${docType}${ext}`;
+        contentType = mime.lookup(ext) || "application/octet-stream";
+
+        res.setHeader(
+          "Content-Disposition",
+          `attachment; filename="${filename}"`
+        );
+        res.setHeader("Content-Type", contentType);
+        res.setHeader("Content-Length", stats.size);
+        res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+        
+        const fileStream = fs.createReadStream(filePath);
+        fileStream.pipe(res);
+        
+        fileStream.on("error", (err) => {
+          console.error("File stream error:", err);
+          if (!res.headersSent) {
+            res.status(500).json({ message: "Error reading file" });
+          }
+        });
+      }
+    } catch (err) {
+      console.error("Download error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ 
+          message: "Error downloading document",
+          error: err.message 
+        });
+      }
+    }
+  }
+);
+
+// router.get(
+//   "/applications/:id/docs/download-all",
+//   auth,
+//   requireRole(ROLES.RM),
+//   async (req, res) => {
+//     try {
+//       const { id } = req.params;
+//       const rmId = req.user.sub;
+
+//       // Find application under this RM
+//       const app = await Application.findOne({
+//         _id: id,
+//         rmId: rmId,
+//       }).lean();
+
+//       if (!app) {
+//         return res
+//           .status(404)
+//           .json({ message: "Application not found under this RM" });
+//       }
+
+//       if (!app.docs || app.docs.length === 0) {
+//         return res
+//           .status(404)
+//           .json({ message: "No documents found for this application" });
+//       }
+
+//       // Create ZIP filename based on application data
+//       const zipFilename = `${app.appNo || `APP-${id.slice(-6)}`}_Documents.zip`;
+
+//       // Set response headers for ZIP download
+//       res.setHeader("Content-Type", "application/zip");
+//       res.setHeader(
+//         "Content-Disposition",
+//         `attachment; filename="${zipFilename}"`
+//       );
+//       res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+
+//       // Create archive
+//       const archive = archiver("zip", {
+//         zlib: { level: 9 }, // Maximum compression
+//       });
+
+//       // Handle archive errors
+//       archive.on("error", (err) => {
+//         console.error("Archive error:", err);
+//         if (!res.headersSent) {
+//           res.status(500).json({ message: "Error creating archive" });
+//         }
+//       });
+
+//       // Pipe archive to response
+//       archive.pipe(res);
+
+//       let filesAdded = 0;
+//       const errors = [];
+
+//       // Process each document
+//       for (let i = 0; i < app.docs.length; i++) {
+//         const doc = app.docs[i];
+
+//         try {
+//           // Use path.resolve to handle Windows paths properly
+//           const filePath = path.resolve(process.cwd(), doc.url);
+
+//           console.log(
+//             `Processing document ${i + 1}/${app.docs.length}: ${doc.docType}`
+//           );
+//           console.log(`File path: ${filePath}`);
+
+//           if (fs.existsSync(filePath)) {
+//             const stats = fs.statSync(filePath);
+
+//             if (stats.isFile()) {
+//               // Create clean filename: docType + original extension
+//               const fileExtension = path.extname(doc.url);
+//               const cleanFilename = `${doc.docType}${fileExtension}`;
+
+//               // Add file to archive
+//               archive.file(filePath, { name: cleanFilename });
+//               filesAdded++;
+
+//               console.log(
+//                 `✓ Added: ${cleanFilename} (${(stats.size / 1024).toFixed(
+//                   1
+//                 )}KB)`
+//               );
+//             } else {
+//               errors.push(`${doc.docType}: Path exists but is not a file`);
+//               console.log(`✗ ${doc.docType}: Not a file`);
+//             }
+//           } else {
+//             errors.push(`${doc.docType}: File not found at ${doc.url}`);
+//             console.log(`✗ ${doc.docType}: File not found`);
+//           }
+//         } catch (error) {
+//           errors.push(`${doc.docType}: ${error.message}`);
+//           console.error(`✗ Error processing ${doc.docType}:`, error.message);
+//         }
+//       }
+
+//       // Check if any files were added
+//       if (filesAdded === 0) {
+//         archive.destroy();
+//         return res.status(404).json({
+//           message: "No valid documents found to download",
+//           errors: errors,
+//           totalDocs: app.docs.length,
+//         });
+//       }
+
+//       // Add summary file if there were any errors
+//       if (errors.length > 0) {
+//         const summaryContent = [
+//           `Download Summary for Application: ${app.appNo}`,
+//           `Customer: ${app.customer?.name || "N/A"}`,
+//           `Partner: ${app.partner?.name || "N/A"}`,
+//           `Generated: ${new Date().toLocaleString()}`,
+//           "",
+//           `Total Documents: ${app.docs.length}`,
+//           `Successfully Downloaded: ${filesAdded}`,
+//           `Failed Downloads: ${errors.length}`,
+//           "",
+//           "Failed Downloads:",
+//           ...errors.map((error, idx) => `${idx + 1}. ${error}`),
+//           "",
+//           "Note: Only successfully found documents are included in this ZIP file.",
+//         ].join("\n");
+
+//         archive.append(summaryContent, { name: "DOWNLOAD_SUMMARY.txt" });
+//       }
+
+//       // Finalize the archive (this triggers the download)
+//       await archive.finalize();
+
+//       console.log(
+//         `✓ ZIP archive created successfully with ${filesAdded} files`
+//       );
+//     } catch (err) {
+//       console.error("Download all documents error:", err);
+//       if (!res.headersSent) {
+//         res.status(500).json({ message: "Error creating document archive" });
+//       }
+//     }
+//   }
+// );
+
+// GET /rm/profile
+
+router.get(
+  "/applications/:id/docs/download-all",
+  auth,
+  requireRole(ROLES.RM),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const rmId = req.user.sub;
+
+      // Get all partners under this RM
+      const partners = await User.find({ 
+        rmId: rmId, 
+        role: ROLES.PARTNER 
+      }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+
+      // Check if application belongs to this RM or a partner under this RM
+      const app = await Application.findOne({
+        _id: id,
+        $or: [
+    { partnerId: { $in: partnerIds } },
+    { partnerId: null, rmId: rmId },
+    { partnerId: { $exists: false }, rmId: rmId }
+  ]
+      }).lean();
+      if (!app) {
+        return res
+          .status(404)
+          .json({ message: "Application not found under this RM" });
+      }
+      if (!app.docs?.length) {
+        return res.status(404).json({ message: "No documents found" });
+      }
+
+      const zipFilename = `${app.appNo || `APP-${id.slice(-6)}`}_Documents.zip`;
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${zipFilename}"`
+      );
+      res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+
+      const archive = archiver("zip", { zlib: { level: 9 } });
+      archive.pipe(res);
+
+      const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
+      let filesAdded = 0;
+
+      for (const doc of app.docs) {
+        try {
+          let ext;
+          let cleanFilename;
+          
+          // Get the actual file URL (remove backend URL prefix if present)
+          let actualUrl = doc.url;
+          if (actualUrl.startsWith(backendUrl)) {
+            actualUrl = actualUrl.replace(backendUrl, "").replace(/^\/+/, "");
+          }
+
+          if (actualUrl.startsWith("http://") || actualUrl.startsWith("https://")) {
+            // 🔹 Remote fetch (S3, CDN, etc.)
+            try {
+              let responseStream;
+              if (actualUrl.includes("amazonaws.com") && extractS3KeyFromUrl(actualUrl)) {
+                const s3Key = extractS3KeyFromUrl(actualUrl);
+                const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: s3Key });
+                const s3Response = await s3.send(command);
+                responseStream = s3Response.Body;
+              } else {
+                const response = await axios.get(actualUrl, { 
+                  responseType: "stream",
+                  timeout: 30000,
+                  maxRedirects: 5
+                });
+                responseStream = response.data;
+              }
+              
+              try {
+                const urlPath = new URL(actualUrl).pathname;
+                ext = path.extname(urlPath) || "";
+              } catch (e) {
+                ext = "";
+              }
+              
+              cleanFilename = `${doc.docType}${ext}`;
+              archive.append(responseStream, { name: cleanFilename });
+              filesAdded++;
             } catch (axiosErr) {
               console.error(`Error fetching remote document ${doc.docType}:`, axiosErr.message);
             }
