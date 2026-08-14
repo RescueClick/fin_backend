@@ -21,6 +21,9 @@ import fs from "fs";
 import path from "path";
 import mime from "mime-types";
 import axios from "axios";
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { s3, BUCKET_NAME } from "../config/s3.js";
+import { extractS3KeyFromUrl } from "../utils/docUploadLimits.js";
 import {
   buildReassignableApplicationFilter,
   buildReassignmentAudit,
@@ -762,13 +765,22 @@ router.get(
       if (actualUrl.startsWith("http://") || actualUrl.startsWith("https://")) {
         // 🔹 Remote URL (S3, CDN, etc.)
         try {
-          const response = await axios.get(actualUrl, {
-            responseType: "stream",
-            timeout: 30000, // 30 second timeout
-            maxRedirects: 5
-          });
-
-          contentType = response.headers["content-type"] || "application/octet-stream";
+          let responseStream;
+          if (actualUrl.includes("amazonaws.com") && extractS3KeyFromUrl(actualUrl)) {
+            const s3Key = extractS3KeyFromUrl(actualUrl);
+            const command = new GetObjectCommand({ Bucket: BUCKET_NAME, Key: s3Key });
+            const s3Response = await s3.send(command);
+            responseStream = s3Response.Body;
+            contentType = s3Response.ContentType || "application/octet-stream";
+          } else {
+            const response = await axios.get(actualUrl, {
+              responseType: "stream",
+              timeout: 30000, // 30 second timeout
+              maxRedirects: 5
+            });
+            responseStream = response.data;
+            contentType = response.headers["content-type"] || "application/octet-stream";
+          }
 
           // Try to get extension from URL or Content-Type
           let ext = "";
@@ -797,9 +809,9 @@ router.get(
           res.setHeader("Content-Type", contentType);
           res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
 
-          response.data.pipe(res);
+          responseStream.pipe(res);
 
-          response.data.on("error", (err) => {
+          responseStream.on("error", (err) => {
             console.error("Stream error:", err);
             if (!res.headersSent) {
               res.status(500).json({ message: "Error streaming document" });

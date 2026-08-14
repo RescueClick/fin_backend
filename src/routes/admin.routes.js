@@ -894,7 +894,7 @@ router.get(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const list = await User.find({ role: ROLES.RM })
+      const list = await User.find({ role: ROLES.RM, $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] })
         .select("-passwordHash -__v") // hide password & __v
         .populate({
           path: "asmId",
@@ -967,7 +967,7 @@ router.get(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const list = await User.find({ role: ROLES.RSM })
+      const list = await User.find({ role: ROLES.RSM, $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] })
         .select("-passwordHash -__v")
         .populate({
           path: "asmId",
@@ -1010,7 +1010,7 @@ router.get(
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
-    const list = await User.find({ role: ROLES.ASM })
+    const list = await User.find({ role: ROLES.ASM, $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] })
       .select("-passwordHash")
       .lean();
     res.json(list);
