@@ -1245,12 +1245,39 @@ router.patch("/profile/update", auth, requireRole(ROLES.RSM), async (req, res) =
     const updateData = {
       firstName,
       lastName,
-      phone,
       dob,
       address,
       region,
       experience,
     };
+
+    if (phone) {
+      const normalizedPhone = String(phone).replace(/\D/g, "").slice(-10);
+      const existingPhoneUser = await User.findOne({
+        phone: normalizedPhone,
+        _id: { $ne: rsmId },
+      }).select("_id");
+      if (existingPhoneUser) {
+        return res.status(409).json({
+          message: `The mobile number ${phone} is already registered to another user.`,
+        });
+      }
+      updateData.phone = normalizedPhone;
+    }
+
+    if (email) {
+      const normalizedEmail = String(email).toLowerCase().trim();
+      const existingEmailUser = await User.findOne({
+        email: normalizedEmail,
+        _id: { $ne: rsmId },
+      }).select("_id");
+      if (existingEmailUser) {
+        return res.status(409).json({
+          message: `The email address ${email} is already registered to another user.`,
+        });
+      }
+      updateData.email = normalizedEmail;
+    }
 
     Object.keys(updateData).forEach(
       (key) => updateData[key] === undefined && delete updateData[key]
@@ -1264,61 +1291,11 @@ router.patch("/profile/update", auth, requireRole(ROLES.RSM), async (req, res) =
 
     if (!updatedRsm) return res.status(404).json({ message: "RSM not found" });
 
-    let emailChangePending = false;
-    let emailChangeMessage = null;
-
-    if (
-      email &&
-      String(email).toLowerCase() !== String(updatedRsm.email).toLowerCase()
-    ) {
-      const normalizedEmail = String(email).toLowerCase();
-
-      const exists = await User.findOne({
-        email: normalizedEmail,
-        _id: { $ne: rsmId },
-      });
-
-      if (exists) return res.status(409).json({ message: "Email already in use" });
-
-      const currentRsm = await User.findById(rsmId).select("email firstName passwordHash");
-      if (!currentPassword) {
-        return res.status(400).json({ message: "Current password is required for email change." });
-      }
-      const passOk = await argon2.verify(currentRsm.passwordHash, String(currentPassword));
-      if (!passOk) {
-        return res.status(400).json({ message: "Current password is incorrect." });
-      }
-      if (
-        currentEmail &&
-        String(currentEmail).toLowerCase().trim() !== String(currentRsm.email).toLowerCase().trim()
-      ) {
-        return res.status(400).json({ message: "Current email does not match your active email." });
-      }
-
-      await createEmailChangeRequest({
-        user: currentRsm,
-        currentEmail: currentRsm.email,
-        newEmail: normalizedEmail,
-        clientUrl: process.env.CLIENT_URL,
-      });
-
-      emailChangePending = true;
-      emailChangeMessage =
-        "Email change link sent. Please confirm via the link in your inbox.";
-    }
-
     const profileObj = updatedRsm?.toObject ? updatedRsm.toObject() : updatedRsm;
-    if (emailChangePending) {
-      profileObj.emailChangePending = true;
-      profileObj.emailChangeMessage = emailChangeMessage;
-    }
 
     res.json({
-      message: emailChangePending
-        ? emailChangeMessage
-        : "Profile updated successfully",
+      message: "Profile updated successfully",
       profile: profileObj,
-      emailChangePending,
     });
   } catch (err) {
     console.error("Error updating RSM profile:", err);

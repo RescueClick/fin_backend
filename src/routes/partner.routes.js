@@ -3355,24 +3355,55 @@ router.patch(
 
       const partnerId = req.user.sub;
 
+      const updateData = {
+        firstName,
+        middleName,
+        lastName,
+        dob,
+        address,
+        experience,
+        region,
+        bankName,
+        accountNumber,
+        ifscCode,
+        accountHolderName,
+      };
+
+      if (phone) {
+        const normalizedPhone = String(phone).replace(/\D/g, "").slice(-10);
+        const existingPhoneUser = await User.findOne({
+          phone: normalizedPhone,
+          _id: { $ne: partnerId },
+        }).select("_id");
+        if (existingPhoneUser) {
+          return res.status(409).json({
+            message: `The mobile number ${phone} is already registered to another user.`,
+          });
+        }
+        updateData.phone = normalizedPhone;
+      }
+
+      if (email) {
+        const normalizedEmail = String(email).toLowerCase().trim();
+        const existingEmailUser = await User.findOne({
+          email: normalizedEmail,
+          _id: { $ne: partnerId },
+        }).select("_id");
+        if (existingEmailUser) {
+          return res.status(409).json({
+            message: `The email address ${email} is already registered to another user.`,
+          });
+        }
+        updateData.email = normalizedEmail;
+      }
+
+      Object.keys(updateData).forEach(
+        (key) => updateData[key] === undefined && delete updateData[key]
+      );
+
       const updatedPartner = await User.findOneAndUpdate(
         { _id: partnerId, role: ROLES.PARTNER },
-        {
-          $set: {
-            firstName,
-            middleName,
-            lastName,
-            phone,
-            dob,
-            address,
-            experience,
-            region,
-            bankName,
-            accountNumber,
-            ifscCode,
-            accountHolderName,
-          },
-        },
+        { $set: updateData },
         { new: true, runValidators: true, projection: "-passwordHash" }
       );
 
@@ -3380,90 +3411,28 @@ router.patch(
         return res.status(404).json({ message: "Partner not found" });
       }
 
-      let emailChangePending = false;
-      let emailChangeMessage = null;
-
-      if (
-        email &&
-        String(email).toLowerCase() !== String(updatedPartner.email).toLowerCase()
-      ) {
-        const normalizedEmail = String(email).toLowerCase();
-        const exists = await User.findOne({
-          email: normalizedEmail,
-          _id: { $ne: partnerId },
-        });
-        if (exists) {
-          return res.status(409).json({ message: "Email already in use" });
-        }
-        const current = await User.findById(partnerId).select("email firstName passwordHash");
-        if (!currentPassword) {
-          return res.status(400).json({ message: "Current password is required for email change." });
-        }
-        const passOk = await argon2.verify(current.passwordHash, String(currentPassword));
-        if (!passOk) {
-          return res.status(400).json({ message: "Current password is incorrect." });
-        }
-        if (
-          currentEmail &&
-          String(currentEmail).toLowerCase().trim() !== String(current.email).toLowerCase().trim()
-        ) {
-          return res.status(400).json({ message: "Current email does not match your active email." });
-        }
-        await createEmailChangeRequest({
-          user: current,
-          currentEmail: current.email,
-          newEmail: normalizedEmail,
-          clientUrl: process.env.CLIENT_URL,
-        });
-        emailChangePending = true;
-        emailChangeMessage =
-          "Email change link sent. Please confirm via the link in your inbox.";
-      }
-
       const profileObj = updatedPartner?.toObject
         ? updatedPartner.toObject()
         : updatedPartner;
-      if (emailChangePending) {
-        profileObj.emailChangePending = true;
-        profileObj.emailChangeMessage = emailChangeMessage;
-      }
 
       res.json({
-        message: emailChangePending
-          ? emailChangeMessage
-          : "Partner profile updated successfully",
+        message: "Partner profile updated successfully",
         partner: profileObj,
         profile: profileObj,
-        emailChangePending,
       });
     } catch (err) {
       console.error(err);
-      // Convert raw MongoDB duplicate-key (E11000) into a clean UI message.
-      // This prevents exposing "E11000 duplicate key error" to the user.
-      if (err?.code === 11000) {
-        const keyValue = err.keyValue || {};
-        const key =
-          Object.keys(keyValue)[0] ||
-          (err.keyPattern ? Object.keys(err.keyPattern)[0] : null);
-
-        const keyLower = String(key || "").toLowerCase();
-
-        let message = "Already exists";
-        if (keyLower.includes("email")) message = "Email already in use";
-        else if (
-          keyLower.includes("phone") ||
-          keyLower.includes("mobile") ||
-          keyLower.includes("registeredmobile")
-        ) {
-          message = "Mobile number already in use";
-        } else if (keyLower) {
-          message = `${key} already in use`;
-        }
-
-        return res.status(409).json({ message });
+      if (err.code === 11000) {
+        const isPhone = err.message?.includes("phone") || err.keyPattern?.phone;
+        const isEmail = err.message?.includes("email") || err.keyPattern?.email;
+        const msg = isPhone
+          ? "This mobile number is already in use by another user."
+          : isEmail
+          ? "This email address is already in use by another user."
+          : "A record with this information already exists.";
+        return res.status(409).json({ message: msg });
       }
-
-      res.status(500).json({ message: err.message || "Something went wrong" });
+      res.status(500).json({ message: err.message || "Failed to update partner profile" });
     }
   }
 );

@@ -2942,6 +2942,34 @@ router.patch(
         experience,
       };
 
+      if (phone) {
+        const normalizedPhone = String(phone).replace(/\D/g, "").slice(-10);
+        const existingPhoneUser = await User.findOne({
+          phone: normalizedPhone,
+          _id: { $ne: adminId },
+        }).select("_id");
+        if (existingPhoneUser) {
+          return res.status(409).json({
+            message: `The mobile number ${phone} is already registered to another user.`,
+          });
+        }
+        updateData.phone = normalizedPhone;
+      }
+
+      if (email) {
+        const normalizedEmail = String(email).toLowerCase().trim();
+        const existingEmailUser = await User.findOne({
+          email: normalizedEmail,
+          _id: { $ne: adminId },
+        }).select("_id");
+        if (existingEmailUser) {
+          return res.status(409).json({
+            message: `The email address ${email} is already registered to another user.`,
+          });
+        }
+        updateData.email = normalizedEmail;
+      }
+
       // Remove undefined values
       Object.keys(updateData).forEach(
         (key) => updateData[key] === undefined && delete updateData[key]
@@ -2956,61 +2984,25 @@ router.patch(
       if (!updatedAdmin)
         return res.status(404).json({ message: "Admin not found" });
 
-      let emailChangePending = false;
-      let emailChangeMessage = null;
-
-      if (
-        email &&
-        String(email).toLowerCase() !== String(updatedAdmin.email).toLowerCase()
-      ) {
-        const normalizedEmail = String(email).toLowerCase();
-        const exists = await User.findOne({
-          email: normalizedEmail,
-          _id: { $ne: adminId },
-        });
-        if (exists) {
-          return res.status(409).json({ message: "Email already in use" });
-        }
-
-        const currentAdmin = await User.findById(adminId).select("email firstName passwordHash");
-        if (!currentPassword) {
-          return res.status(400).json({ message: "Current password is required for email change." });
-        }
-        const passOk = await argon2.verify(currentAdmin.passwordHash, String(currentPassword));
-        if (!passOk) {
-          return res.status(400).json({ message: "Current password is incorrect." });
-        }
-        if (
-          currentEmail &&
-          String(currentEmail).toLowerCase().trim() !== String(currentAdmin.email).toLowerCase().trim()
-        ) {
-          return res.status(400).json({ message: "Current email does not match your active email." });
-        }
-        await createEmailChangeRequest({
-          user: currentAdmin,
-          currentEmail: currentAdmin.email,
-          newEmail: normalizedEmail,
-          clientUrl: process.env.CLIENT_URL,
-        });
-        emailChangePending = true;
-        emailChangeMessage =
-          "Email change link sent. Please confirm via the link in your inbox.";
-      }
-
       const profileObj = updatedAdmin?.toObject ? updatedAdmin.toObject() : updatedAdmin;
-      if (emailChangePending) {
-        profileObj.emailChangePending = true;
-        profileObj.emailChangeMessage = emailChangeMessage;
-      }
 
       res.json({
-        message: emailChangePending ? emailChangeMessage : "Profile updated successfully",
+        message: "Profile updated successfully",
         profile: profileObj,
-        emailChangePending,
       });
     } catch (err) {
       console.error(err);
-      res.status(500).json({ message: err.message });
+      if (err.code === 11000) {
+        const isPhone = err.message?.includes("phone") || err.keyPattern?.phone;
+        const isEmail = err.message?.includes("email") || err.keyPattern?.email;
+        const msg = isPhone
+          ? "This mobile number is already in use by another user."
+          : isEmail
+          ? "This email address is already in use by another user."
+          : "A record with this information already exists.";
+        return res.status(409).json({ message: msg });
+      }
+      res.status(500).json({ message: err.message || "Failed to update admin profile" });
     }
   }
 );

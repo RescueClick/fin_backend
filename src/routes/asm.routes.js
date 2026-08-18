@@ -3300,6 +3300,20 @@ router.patch(
         updateData.phone = normalizedPhone;
       }
 
+      if (email) {
+        const normalizedEmail = String(email).toLowerCase().trim();
+        const existingEmailUser = await User.findOne({
+          email: normalizedEmail,
+          _id: { $ne: asmId },
+        }).select("_id");
+        if (existingEmailUser) {
+          return res.status(409).json({
+            message: `The email address ${email} is already registered to another user.`,
+          });
+        }
+        updateData.email = normalizedEmail;
+      }
+
       // remove undefined fields (so we don't overwrite with null accidentally)
       Object.keys(updateData).forEach(
         (key) => updateData[key] === undefined && delete updateData[key]
@@ -3314,56 +3328,11 @@ router.patch(
       if (!updatedAsm)
         return res.status(404).json({ message: "ASM not found" });
 
-      let emailChangePending = false;
-      let emailChangeMessage = null;
-
-      if (
-        email &&
-        String(email).toLowerCase() !== String(updatedAsm.email).toLowerCase()
-      ) {
-        const normalizedEmail = String(email).toLowerCase();
-        const exists = await User.findOne({
-          email: normalizedEmail,
-          _id: { $ne: asmId },
-        });
-        if (exists) {
-          return res.status(409).json({ message: "Email already in use" });
-        }
-        const current = await User.findById(asmId).select("email firstName passwordHash");
-        if (!currentPassword) {
-          return res.status(400).json({ message: "Current password is required for email change." });
-        }
-        const passOk = await argon2.verify(current.passwordHash, String(currentPassword));
-        if (!passOk) {
-          return res.status(400).json({ message: "Current password is incorrect." });
-        }
-        if (
-          currentEmail &&
-          String(currentEmail).toLowerCase().trim() !== String(current.email).toLowerCase().trim()
-        ) {
-          return res.status(400).json({ message: "Current email does not match your active email." });
-        }
-        await createEmailChangeRequest({
-          user: current,
-          currentEmail: current.email,
-          newEmail: normalizedEmail,
-          clientUrl: process.env.CLIENT_URL,
-        });
-        emailChangePending = true;
-        emailChangeMessage =
-          "Email change link sent. Please confirm via the link in your inbox.";
-      }
-
       const profileObj = updatedAsm?.toObject ? updatedAsm.toObject() : updatedAsm;
-      if (emailChangePending) {
-        profileObj.emailChangePending = true;
-        profileObj.emailChangeMessage = emailChangeMessage;
-      }
 
       res.json({
-        message: emailChangePending ? emailChangeMessage : "Profile updated successfully",
+        message: "Profile updated successfully",
         profile: profileObj,
-        emailChangePending,
       });
     } catch (err) {
       console.error(err);
