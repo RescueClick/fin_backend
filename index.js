@@ -76,9 +76,8 @@ const corsOptions = {
   optionsSuccessStatus: 200,
 };
 
-// Mount CORS before ALL other middlewares and routes
+// Mount CORS before ALL other middlewares and routes (handles all methods including OPTIONS preflight)
 app.use(cors(corsOptions));
-app.options(cors(corsOptions));
 
 app.use(
   "/uploads",
