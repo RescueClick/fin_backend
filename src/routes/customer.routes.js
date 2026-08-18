@@ -574,6 +574,7 @@ router.patch(
         "firstName",
         "middleName",
         "lastName",
+        "email",
         "phone",
         "mothersName",
         "panNumber",
@@ -585,7 +586,19 @@ router.patch(
       const updates = {};
       for (const field of allowedFields) {
         if (req.body[field] !== undefined) {
-          updates[field] = req.body[field];
+          if (field === "email") {
+            const emailLc = String(req.body.email).toLowerCase().trim();
+            const duplicate = await User.findOne({
+              email: emailLc,
+              _id: { $ne: req.user.sub },
+            });
+            if (duplicate) {
+              return res.status(409).json({ message: "Email already in use by another account" });
+            }
+            updates.email = emailLc;
+          } else {
+            updates[field] = req.body[field];
+          }
         }
       }
 
