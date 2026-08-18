@@ -3581,6 +3581,20 @@ router.patch(
         accountHolderName,
       };
 
+      if (phone) {
+        const normalizedPhone = String(phone).replace(/\D/g, "").slice(-10);
+        const existingPhoneUser = await User.findOne({
+          phone: normalizedPhone,
+          _id: { $ne: rmId },
+        }).select("_id");
+        if (existingPhoneUser) {
+          return res.status(409).json({
+            message: `The mobile number ${phone} is already registered to another user.`,
+          });
+        }
+        updateData.phone = normalizedPhone;
+      }
+
       // Remove undefined values
       Object.keys(updateData).forEach(
         (key) => updateData[key] === undefined && delete updateData[key]
@@ -3647,7 +3661,17 @@ router.patch(
       });
     } catch (err) {
       console.error("Error updating RM profile:", err);
-      res.status(500).json({ message: err.message });
+      if (err.code === 11000) {
+        const isPhone = err.message?.includes("phone") || err.keyPattern?.phone;
+        const isEmail = err.message?.includes("email") || err.keyPattern?.email;
+        const msg = isPhone
+          ? "This mobile number is already in use by another user."
+          : isEmail
+          ? "This email address is already in use by another user."
+          : "A record with this information already exists.";
+        return res.status(409).json({ message: msg });
+      }
+      res.status(500).json({ message: err.message || "Failed to update profile" });
     }
   }
 );
