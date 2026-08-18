@@ -78,7 +78,7 @@ const corsOptions = {
 
 // Mount CORS before ALL other middlewares and routes
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+app.options(cors(corsOptions));
 
 app.use(
   "/uploads",
