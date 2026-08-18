@@ -21,6 +21,16 @@ const router = Router();
 //   res.json(list);
 // });
 
+async function resolveDefaultCompanyPartner() {
+  if (process.env.DEFAULT_COMPANY_PARTNER_CODE) {
+    const p = await User.findOne({ partnerCode: process.env.DEFAULT_COMPANY_PARTNER_CODE, role: ROLES.PARTNER });
+    if (p) return p;
+  }
+  const sanjay = await User.findOne({ role: ROLES.PARTNER, firstName: /sanjay/i });
+  if (sanjay) return sanjay;
+  return await User.findOne({ role: ROLES.PARTNER, status: "ACTIVE" });
+}
+
 router.post(
   "/create-applications",
   auth,
@@ -109,6 +119,17 @@ router.post(
         tempPassword =
           customer.password || `Cus@${Math.random().toString(36).slice(2, 10)}`;
         
+        let targetPartnerId = req.user.role === ROLES.PARTNER ? userId : undefined;
+        let targetRmId = req.user.role === ROLES.PARTNER ? partner?.rmId : undefined;
+
+        if (!targetPartnerId && req.user.role === ROLES.CUSTOMER) {
+          const defPartner = await resolveDefaultCompanyPartner();
+          if (defPartner) {
+            targetPartnerId = defPartner._id;
+            targetRmId = defPartner.rmId;
+          }
+        }
+
         // ✅ CRITICAL: Retry logic to handle duplicate employeeId race conditions
         let retries = 0;
         const maxRetries = 5;
@@ -127,8 +148,8 @@ router.post(
               passwordHash: await argon2.hash(customer.password || tempPassword),
               role: ROLES.CUSTOMER,
               status: "ACTIVE",
-              partnerId: req.user.role === ROLES.PARTNER ? userId : undefined,
-              rmId: req.user.role === ROLES.PARTNER ? partner?.rmId : undefined,
+              partnerId: targetPartnerId,
+              rmId: targetRmId,
             });
             created = true;
             console.log(`✅ Customer created with unique employeeId: ${employeeId}`);
@@ -227,6 +248,19 @@ router.post(
         ? [references]
         : [];
 
+      // Determine Partner & RM
+      let appPartnerId = req.user.role === ROLES.PARTNER ? userId : customerUser.partnerId;
+      let appRmId = req.user.role === ROLES.PARTNER ? partner?.rmId : customerUser.rmId;
+
+      if (!appPartnerId && req.user.role === ROLES.CUSTOMER) {
+        const defPartner = await resolveDefaultCompanyPartner();
+        if (defPartner) {
+          appPartnerId = defPartner._id;
+          appRmId = defPartner.rmId;
+          await User.updateOne({ _id: customerUser._id }, { $set: { partnerId: appPartnerId, rmId: appRmId } });
+        }
+      }
+
       // Create Application
       // ✅ CRITICAL: Retry logic to handle duplicate appNo race conditions
       let app = null;
@@ -239,8 +273,8 @@ router.post(
           const appNo = await generateEmployeeId("APPLICATION");
           app = await Application.create({
             appNo,
-            partnerId: req.user.role === ROLES.PARTNER ? userId : null,
-            rmId: req.user.role === ROLES.PARTNER ? partner.rmId : null,
+            partnerId: appPartnerId || null,
+            rmId: appRmId || null,
             customerId: customerUser._id,
             loanType,
             customer: {
@@ -259,9 +293,9 @@ router.post(
               loanAmount: customer.loanAmount
                 ? Number(customer.loanAmount)
                 : undefined,
-              partnerId: req.user.role === ROLES.PARTNER ? userId : null, // ✅ assign partnerId here
-              rmId: req.user.role === ROLES.PARTNER ? partner.rmId : null, // ✅ assign RM
-              asmId: req.user.role === ROLES.PARTNER ? partner.asmId : null, // ✅ assign ASM
+              partnerId: appPartnerId || null,
+              rmId: appRmId || null,
+              asmId: req.user.role === ROLES.PARTNER ? partner.asmId : null,
             },
             docs,
             references: refs,

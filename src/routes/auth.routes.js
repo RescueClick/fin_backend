@@ -478,6 +478,17 @@ router.post(
       throw new ApiError(409, "Email or phone already in use", { code: "DUPLICATE_USER" });
     }
 
+    let defaultPartner = null;
+    if (process.env.DEFAULT_COMPANY_PARTNER_CODE) {
+      defaultPartner = await User.findOne({ partnerCode: process.env.DEFAULT_COMPANY_PARTNER_CODE, role: ROLES.PARTNER });
+    }
+    if (!defaultPartner) {
+      defaultPartner = await User.findOne({ role: ROLES.PARTNER, firstName: /sanjay/i });
+    }
+    if (!defaultPartner) {
+      defaultPartner = await User.findOne({ role: ROLES.PARTNER, status: "ACTIVE" });
+    }
+
     const customer = await User.create({
       employeeId: await generateEmployeeId("CUSTOMER"),
       firstName,
@@ -488,6 +499,8 @@ router.post(
       role: ROLES.CUSTOMER,
       status: "ACTIVE",
       referralRewardStatus: "NONE",
+      partnerId: defaultPartner?._id || undefined,
+      rmId: defaultPartner?.rmId || undefined,
     });
 
     return sendSuccess(res, {
