@@ -1040,12 +1040,12 @@ router.get(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      // PENDING = awaiting admin verification / RM assignment — listed only via
-      // GET /admin/get-unassigned-partners (RM Partner screen), not the main directory.
-      const list = await User.find({
-        role: ROLES.PARTNER,
-        status: { $ne: "PENDING" },
-      })
+      const { status } = req.query || {};
+      const query = { role: ROLES.PARTNER };
+      if (status && status !== "ALL") {
+        query.status = status.toUpperCase();
+      }
+      const list = await User.find(query)
         .select("-passwordHash -__v")
         .populate({
           path: "rmId",
@@ -1779,6 +1779,11 @@ router.get(
       const totalRM = await User.countDocuments({ role: ROLES.RM });
       const totalRSM = await User.countDocuments({ role: ROLES.RSM });
       const totalPartners = await User.countDocuments({ role: ROLES.PARTNER });
+      const activePartners = await User.countDocuments({
+        role: ROLES.PARTNER,
+        status: "ACTIVE",
+      });
+      const inactivePartners = totalPartners - activePartners;
 
       // Customers = unique people with a still-visible loan application
       // (includes rejected apps until scheduled deletedAt cleanup).
@@ -1805,6 +1810,8 @@ router.get(
         totalRM,
         totalRSM,
         totalPartners,
+        activePartners,
+        inactivePartners,
         totalCustomers,
         totalCustomerAccounts,
       });

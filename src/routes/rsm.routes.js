@@ -933,11 +933,10 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       ...ltFilter,
     });
 
-    // All partners under these RMs (exclude admin-queue pending signups)
+    // All partners under these RMs
     const partners = await User.find({
       rmId: { $in: rmIds },
       role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
     }).lean();
     const partnerIds = partners.map((p) => p._id);
 
@@ -949,6 +948,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       role: ROLES.PARTNER,
       status: "ACTIVE",
     });
+    const inactivePartners = totalPartners - activePartners;
 
     const customers = await Application.distinct("customerId", appScope);
     const totalCustomers = customers.length;
@@ -1163,6 +1163,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
         totalRMs,
         totalPartners,
         activePartners,
+        inactivePartners,
         totalCustomers,
         totalRevenue,
         avgRating,
@@ -1919,11 +1920,16 @@ router.get("/get-partners", auth, requireRole(ROLES.RSM), async (req, res) => {
     const rmIds = rms.map((rm) => rm._id);
     const rmMap = Object.fromEntries(rms.map((rm) => [String(rm._id), rm]));
 
-    const partners = await User.find({
+    const { status } = req.query || {};
+    const query = {
       role: ROLES.PARTNER,
       rmId: { $in: rmIds },
-      status: { $ne: "PENDING" },
-    })
+    };
+    if (status && status !== "ALL") {
+      query.status = status.toUpperCase();
+    }
+
+    const partners = await User.find(query)
       .select("-passwordHash -__v")
       .lean();
 

@@ -307,13 +307,16 @@ router.get("/get-partners", auth, requireRole(ROLES.ASM), async (req, res) => {
     // Use full hierarchy (RSM chain + RM.asmId). Do NOT filter populate by
     // rm.asmId alone — many RMs only link via personalRsmId/businessHomeRsmId,
     // which made partners "disappear" after RM→RM moves.
-    const rmIds = await getRmIdsUnderAsm(asmId);
-
-    const list = await User.find({
+    const { status } = req.query || {};
+    const query = {
       role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
       rmId: { $in: rmIds },
-    })
+    };
+    if (status && status !== "ALL") {
+      query.status = status.toUpperCase();
+    }
+
+    const list = await User.find(query)
       .select("-passwordHash -__v")
       .populate({
         path: "rmId",
@@ -643,7 +646,6 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
     const partners = await User.find({
       rmId: { $in: rmIds },
       role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
     }).lean();
     const partnerIds = partners.map((p) => p._id);
 
@@ -656,6 +658,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
       role: ROLES.PARTNER,
       status: "ACTIVE",
     });
+    const inactivePartners = totalPartners - activePartners;
 
     const appAsmMatch = activeApplicationsFilter({
       $or: [
@@ -876,6 +879,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
         totalRMs,
         totalPartners,
         activePartners,
+        inactivePartners,
         totalCustomers,
         totalRevenue,
         avgRating,
