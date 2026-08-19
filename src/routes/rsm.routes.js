@@ -126,8 +126,8 @@ function expectedRsmIdForApplication(app) {
 }
 
 /**
- * Fix DOC_COMPLETE rows: set rsmId/asmId from RM's personalRsmId / businessHomeRsmId when missing or wrong.
- * Ensures each RSM sees files for their RMs according to loan type.
+ * Fix application routing: set rsmId/asmId from RM's personalRsmId / businessHomeRsmId when missing or wrong.
+ * Ensures each RSM sees all files for their RMs according to loan type regardless of stage.
  */
 async function repairDocCompleteRoutingForRsm(rsmUserId) {
   const rsmObjectId = toObjectId(rsmUserId);
@@ -140,11 +140,10 @@ async function repairDocCompleteRoutingForRsm(rsmUserId) {
   if (!eligibleRmIds.length) return;
 
   const candidates = await Application.find({
-    status: "DOC_COMPLETE",
     rmId: { $in: eligibleRmIds },
     ...loanFilter,
   })
-    .select("_id appNo rsmId rmId loanType")
+    .select("_id appNo rsmId rmId loanType status")
     .populate("rmId", "personalRsmId businessHomeRsmId")
     .lean();
 
@@ -166,7 +165,7 @@ async function repairDocCompleteRoutingForRsm(rsmUserId) {
 }
 
 /**
- * Load application for detail/doc download: trust rsmId if already this RSM; else allow DOC_COMPLETE
+ * Load application for detail/doc download: trust rsmId if already this RSM; else allow
  * when RM mapping says this RSM owns the loan type, and fix routing in DB.
  */
 async function loadApplicationForRsm(applicationId, rsmUserId) {
@@ -193,7 +192,7 @@ async function loadApplicationForRsm(applicationId, rsmUserId) {
   const expected = expectedRsmIdForApplication(app);
   const mappingSaysUs = expected?.toString() === meStr;
 
-  if (mappingSaysUs && app.status === "DOC_COMPLETE") {
+  if (mappingSaysUs) {
     app.rsmId = rsmObjectId;
     app.asmId = rsmProfile.asmId || null;
     await app.save();
@@ -610,11 +609,15 @@ router.get("/applications", auth, requireRole(ROLES.RSM), async (req, res) => {
       );
     }
 
-    // Fix DOC_COMPLETE rows: missing or wrong rsmId vs RM personal/business RSM mapping
+    // Fix all rows: missing or wrong rsmId vs RM personal/business RSM mapping
     await repairDocCompleteRoutingForRsm(rsmId);
 
+    const eligibleRmIds = await eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm);
     const filter = {
-      rsmId: rsmObjectId,
+      $or: [
+        { rsmId: rsmObjectId },
+        ...(eligibleRmIds.length ? [{ rmId: { $in: eligibleRmIds }, ...loanTypeFilter }] : []),
+      ],
       ...loanTypeFilter,
     };
     if (status) {
@@ -907,20 +910,28 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
     const rsmTypeNorm = normalizeRsmTypeValue(rsm.rsmType);
     await repairDocCompleteRoutingForRsm(rsmId);
     const ltFilter = loanTypeFilterForRsmType(rsmTypeNorm);
-    const appScope = { rsmId, ...ltFilter };
+    const rsmObjectId = toObjectId(rsmId);
 
     // RMs for this RSM: only the chain matching this RSM's type when set
     let rmScope = {
       role: ROLES.RM,
-      $or: [{ personalRsmId: rsmId }, { businessHomeRsmId: rsmId }],
+      $or: [{ personalRsmId: rsmObjectId }, { businessHomeRsmId: rsmObjectId }],
     };
     if (rsmTypeNorm === RSM_TYPES.PERSONAL) {
-      rmScope = { role: ROLES.RM, personalRsmId: rsmId };
+      rmScope = { role: ROLES.RM, personalRsmId: rsmObjectId };
     } else if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
-      rmScope = { role: ROLES.RM, businessHomeRsmId: rsmId };
+      rmScope = { role: ROLES.RM, businessHomeRsmId: rsmObjectId };
     }
     const rms = await User.find(rmScope).lean();
     const rmIds = rms.map((rm) => rm._id);
+
+    const appScope = {
+      $or: [
+        { rsmId: rsmObjectId },
+        ...(rmIds.length ? [{ rmId: { $in: rmIds }, ...ltFilter }] : []),
+      ],
+      ...ltFilter,
+    };
 
     // All partners under these RMs (exclude admin-queue pending signups)
     const partners = await User.find({

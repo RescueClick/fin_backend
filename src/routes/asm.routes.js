@@ -27,6 +27,8 @@ import { bulkMovePartnersToRm } from "../utils/bulkMovePartnersToRm.js";
 import {
   reassignRmWorkload,
   reassignPartnerWorkload,
+  reassignRsmWorkload,
+  transferRmToRsm,
 } from "../utils/safeTransfer.js";
 import {
   getRmIdsUnderAsm,
@@ -64,6 +66,7 @@ router.post(
         region,
         password,
         rsmType,
+        rmIds,
       } = req.body || {};
       const asmId = req.user.sub;
 
@@ -119,6 +122,19 @@ router.post(
         rsmType,
       });
 
+      // Transfer selected RMs if provided
+      let transferredRmsCount = 0;
+      if (Array.isArray(rmIds) && rmIds.length > 0) {
+        for (const rmId of rmIds) {
+          try {
+            await transferRmToRsm({ rmId, toRsmId: rsm._id });
+            transferredRmsCount++;
+          } catch (trErr) {
+            console.warn(`Could not transfer RM ${rmId} to new RSM:`, trErr.message);
+          }
+        }
+      }
+
       // Send credentials email
       try {
         const asmUser = await User.findById(asmId);
@@ -146,6 +162,7 @@ router.post(
         employeeId: rsm.employeeId,
         rsmType: rsm.rsmType,
         asmId: rsm.asmId,
+        transferredRmsCount,
         tempPassword: password ? undefined : rawPassword,
       });
     } catch (err) {
@@ -618,31 +635,28 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
     const asm = await User.findOne({ _id: asmId, role: ROLES.ASM }).lean();
     if (!asm) return res.status(404).json({ message: "ASM not found" });
 
-    // ✅ NEW HIERARCHY: ASM → RSM → RM → Partner
+    // ✅ HIERARCHY: ASM → RSM → RM → Partner
     // Get all RSMs under this ASM
     const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
     const rsmIds = rsms.map((rsm) => rsm._id);
+    const rsmOids = rsmIds.map((id) => new mongoose.Types.ObjectId(id));
+    const asmOid = new mongoose.Types.ObjectId(asmId);
 
-    // Get all RMs under these RSMs (via personalRsmId OR businessHomeRsmId)
-    const rms = await User.find({
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } }
-      ]
-    }).lean();
-    const rmIds = rms.map((rm) => rm._id);
+    // Get all RMs under this ASM (direct or via RSMs)
+    const rmIds = await getRmIdsUnderAsm(asmId);
+    const rmOids = rmIds.map((id) => new mongoose.Types.ObjectId(id));
 
     // All partners under these RMs
     const partners = await User.find({
       rmId: { $in: rmIds },
       role: ROLES.PARTNER,
+      status: { $ne: "PENDING" },
     }).lean();
     const partnerIds = partners.map((p) => p._id);
 
     // Totals
     const totalRSMs = rsms.length;
-    const totalRMs = rms.length;
+    const totalRMs = rmIds.length;
     const totalPartners = partners.length;
     const activePartners = await User.countDocuments({
       rmId: { $in: rmIds },
@@ -650,28 +664,29 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
       status: "ACTIVE",
     });
 
-    const customers = await Application.distinct("customerId", {
+    const appAsmMatch = {
       $or: [
-        { rsmId: { $in: rsmIds } },
-        { rmId: { $in: rmIds } }
-      ]
-    });
+        { asmId: asmOid },
+        ...(rsmOids.length ? [{ rsmId: { $in: rsmOids } }] : []),
+        ...(rmOids.length ? [{ rmId: { $in: rmOids } }] : []),
+      ],
+      deletedAt: null,
+    };
+
+    const customers = await Application.distinct("customerId", appAsmMatch);
     const totalCustomers = customers.length;
 
-    // In-process applications (under review by RSM)
+    // In-process applications (under review / approved / agreement)
     const inProcessApplications = await Application.countDocuments({
-      rsmId: { $in: rsmIds },
+      ...appAsmMatch,
       status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] },
     });
 
-    // Revenue from disbursed loans (via RSM or RM)
+    // Revenue from disbursed loans
     const revenueAgg = await Application.aggregate([
       {
         $match: {
-          $or: [
-            { rsmId: { $in: rsmIds.map((id) => new mongoose.Types.ObjectId(id)) } },
-            { rmId: { $in: rmIds.map((id) => new mongoose.Types.ObjectId(id)) } }
-          ],
+          ...appAsmMatch,
           status: "DISBURSED",
         },
       },
@@ -697,7 +712,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
 
     // Get ASM's current month target (hierarchical - sum of RSM targets)
     const asmTarget = await Target.findOne({
-      assignedTo: new mongoose.Types.ObjectId(asmId),
+      assignedTo: asmOid,
       role: ROLES.ASM,
       month: currentMonth,
       year: currentYear,
@@ -710,10 +725,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
     const currentMonthDisbursed = await Application.aggregate([
       {
         $match: {
-          $or: [
-            { rsmId: { $in: rsmIds.map((id) => new mongoose.Types.ObjectId(id)) } },
-            { rmId: { $in: rmIds.map((id) => new mongoose.Types.ObjectId(id)) } }
-          ],
+          ...appAsmMatch,
           status: "DISBURSED",
           updatedAt: {
             $gte: currentMonthStart,
@@ -737,7 +749,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
     const startOfYear = new Date(currentYear, 0, 1);
 
     const monthlyTarget = await Target.find({
-      assignedTo: new mongoose.Types.ObjectId(asmId),
+      assignedTo: asmOid,
       role: ROLES.ASM,
       year: currentYear,
     }).lean();
@@ -746,10 +758,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
     const monthlyAchieved = await Application.aggregate([
       {
         $match: {
-          $or: [
-            { rsmId: { $in: rsmIds.map((id) => new mongoose.Types.ObjectId(id)) } },
-            { rmId: { $in: rmIds.map((id) => new mongoose.Types.ObjectId(id)) } }
-          ],
+          ...appAsmMatch,
           status: { $ne: "DRAFT" },
           updatedAt: { $gte: startOfYear },
         },
@@ -3815,8 +3824,7 @@ router.post("/rsm-deactivate", auth, requireRole(ROLES.ASM), async (req, res) =>
     const asmId = req.user.sub;
 
     let rsm;
-    let reassignedRms = 0;
-    let suspendedRsm;
+    let transferResult;
     let reassignmentAudit;
     await session.withTransaction(async () => {
       rsm = await User.findOne({ _id: rsmId, role: ROLES.RSM, asmId }).session(session);
@@ -3837,24 +3845,14 @@ router.post("/rsm-deactivate", auth, requireRole(ROLES.ASM), async (req, res) =>
           throw new Error("Valid active replacement RSM is required (same type, same ASM)");
         }
 
-        const rmFilter =
-          rsm.rsmType === "PERSONAL"
-            ? { role: ROLES.RM, personalRsmId: rsm._id }
-            : rsm.rsmType === "BUSINESS_HOME"
-              ? { role: ROLES.RM, businessHomeRsmId: rsm._id }
-              : { role: ROLES.RM, $or: [{ personalRsmId: rsm._id }, { businessHomeRsmId: rsm._id }] };
-
-        const rmUpdate =
-          rsm.rsmType === "PERSONAL"
-            ? await User.updateMany(rmFilter, { $set: { personalRsmId: newRsm._id } }, { session })
-            : rsm.rsmType === "BUSINESS_HOME"
-              ? await User.updateMany(rmFilter, { $set: { businessHomeRsmId: newRsm._id } }, { session })
-              : await User.updateMany(rmFilter, { $set: { personalRsmId: newRsm._id, businessHomeRsmId: newRsm._id } }, { session });
-
-        reassignedRms = rmUpdate.modifiedCount || 0;
+        transferResult = await reassignRsmWorkload({
+          oldRsmId: rsmId,
+          newRsmId,
+          session,
+        });
       }
 
-      suspendedRsm = await User.findOneAndUpdate(
+      await User.findOneAndUpdate(
         { _id: rsmId, role: ROLES.RSM, asmId },
         { status: "SUSPENDED" },
         { new: true, session }
@@ -3890,6 +3888,7 @@ router.post("/rsm-deactivate", auth, requireRole(ROLES.ASM), async (req, res) =>
 
     res.json({
       message: "RSM deactivated successfully and notified via email",
+      transferResult,
       reassignmentAudit,
     });
   } catch (error) {
@@ -3910,6 +3909,168 @@ router.post("/rsm-deactivate", auth, requireRole(ROLES.ASM), async (req, res) =>
     await session.endSession();
   }
 });
+
+// ASM transfer entire RSM workload to another RSM under this ASM
+router.post(
+  "/transfer-rsm-workload",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    const session = await mongoose.startSession();
+    try {
+      const asmId = req.user.sub;
+      const { fromRsmId, toRsmId } = req.body || {};
+      if (!fromRsmId || !toRsmId) {
+        return res.status(400).json({ message: "Both fromRsmId and toRsmId are required" });
+      }
+
+      if (String(fromRsmId) === String(toRsmId)) {
+        return res.status(400).json({ message: "Source RSM and Target RSM must be different" });
+      }
+
+      let fromRsm;
+      let toRsm;
+      let transferResult;
+      let reassignmentAudit;
+
+      await session.withTransaction(async () => {
+        fromRsm = await User.findOne({ _id: fromRsmId, role: ROLES.RSM, asmId }).session(session);
+        if (!fromRsm) {
+          throw new Error("Source RSM not found under your management");
+        }
+
+        toRsm = await User.findOne({ _id: toRsmId, role: ROLES.RSM, asmId, status: "ACTIVE" }).session(session);
+        if (!toRsm) {
+          throw new Error("Active Target RSM not found under your management");
+        }
+
+        transferResult = await reassignRsmWorkload({
+          oldRsmId: fromRsmId,
+          newRsmId: toRsmId,
+          session,
+        });
+
+        reassignmentAudit = buildReassignmentAudit({
+          changedBy: req.user.sub,
+          oldUserId: fromRsmId,
+          newUserId: toRsmId,
+          action: "asm_rsm_workload_transfer",
+        });
+        await persistReassignmentAudit(reassignmentAudit, req, session);
+      });
+
+      // Send notifications / emails
+      if (fromRsm?.email) {
+        sendMail({
+          to: fromRsm.email,
+          subject: "Your Workload Has Been Transferred",
+          html: `<p>Dear ${fromRsm.firstName}, your assigned RMs and workload have been transferred to ${toRsm.firstName} ${toRsm.lastName}.</p>`,
+        }).catch((e) => console.error(e));
+      }
+
+      if (toRsm?.email) {
+        sendMail({
+          to: toRsm.email,
+          subject: "New Workload Assigned",
+          html: `<p>Dear ${toRsm.firstName}, you have received RMs and active loan files from ${fromRsm.firstName} ${fromRsm.lastName}.</p>`,
+        }).catch((e) => console.error(e));
+      }
+
+      return res.json({
+        message: `Successfully transferred workload from ${fromRsm.firstName} ${fromRsm.lastName} to ${toRsm.firstName} ${toRsm.lastName}`,
+        transferResult,
+        reassignmentAudit,
+      });
+    } catch (err) {
+      console.error("Error in ASM transfer-rsm-workload:", err);
+      return res.status(500).json({ message: err.message || "Failed to transfer RSM workload" });
+    } finally {
+      await session.endSession();
+    }
+  }
+);
+
+// ASM transfer RM to an RSM under this ASM
+router.post(
+  "/transfer-rm-to-rsm",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    const session = await mongoose.startSession();
+    try {
+      const asmId = req.user.sub;
+      const { rmId, rmIds, toRsmId } = req.body || {};
+      if (!toRsmId) {
+        return res.status(400).json({ message: "Target RSM ID (toRsmId) is required" });
+      }
+
+      const targetRsm = await User.findOne({ _id: toRsmId, role: ROLES.RSM, asmId, status: "ACTIVE" });
+      if (!targetRsm) {
+        return res.status(404).json({ message: "Active Target RSM not found under your management" });
+      }
+
+      const idsToTransfer = Array.isArray(rmIds) && rmIds.length > 0 ? rmIds : (rmId ? [rmId] : []);
+      if (!idsToTransfer.length) {
+        return res.status(400).json({ message: "At least one rmId is required" });
+      }
+
+      let transfers = [];
+      await session.withTransaction(async () => {
+        for (const id of idsToTransfer) {
+          const resTransfer = await transferRmToRsm({ rmId: id, toRsmId, session });
+          transfers.push(resTransfer);
+        }
+      });
+
+      return res.json({
+        message: `Successfully transferred ${transfers.length} RM(s) to ${targetRsm.firstName} ${targetRsm.lastName}`,
+        transfers,
+      });
+    } catch (err) {
+      console.error("Error transferring RM to RSM (ASM):", err);
+      return res.status(500).json({ message: err.message || "Failed to transfer RM to RSM" });
+    } finally {
+      await session.endSession();
+    }
+  }
+);
+
+// Get all RMs under this ASM for transfer UI
+router.get(
+  "/get-rms-for-transfer",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    try {
+      const asmId = req.user.sub;
+      const rmIds = await getRmIdsUnderAsm(asmId);
+
+      const rms = await User.find({ _id: { $in: rmIds }, role: ROLES.RM })
+        .populate("asmId", "firstName lastName employeeId")
+        .populate("personalRsmId", "firstName lastName employeeId status")
+        .populate("businessHomeRsmId", "firstName lastName employeeId status")
+        .select("-passwordHash -__v")
+        .lean();
+
+      const result = await Promise.all(
+        rms.map(async (rm) => {
+          const partnerCount = await User.countDocuments({ role: ROLES.PARTNER, rmId: rm._id });
+          const appCount = await Application.countDocuments({ rmId: rm._id, status: { $ne: "DRAFT" } });
+          return {
+            ...rm,
+            partnerCount,
+            appCount,
+          };
+        })
+      );
+
+      res.json(result);
+    } catch (err) {
+      console.error("Error fetching RMs for transfer (ASM):", err);
+      res.status(500).json({ message: "Failed to fetch RMs for transfer" });
+    }
+  }
+);
 
 // POST /api/rsm/activate (ASM can activate RSM)
 router.post("/rsm-activate", auth, requireRole(ROLES.ASM), async (req, res) => {

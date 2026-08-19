@@ -1183,6 +1183,26 @@ router.post(
         }
       }
 
+      // Resolve RSM and ASM based on RM & loanType
+      let assignedRsmId = null;
+      if (assignedRmId) {
+        const rmDoc = await User.findById(assignedRmId).select("personalRsmId businessHomeRsmId asmId").lean();
+        if (rmDoc) {
+          if (loanType === "PERSONAL") {
+            assignedRsmId = rmDoc.personalRsmId || null;
+          } else {
+            assignedRsmId = rmDoc.businessHomeRsmId || null;
+          }
+          if (assignedRsmId && !assignedAsmId) {
+            const rsmDoc = await User.findById(assignedRsmId).select("asmId").lean();
+            if (rsmDoc?.asmId) assignedAsmId = rsmDoc.asmId;
+          }
+          if (!assignedAsmId && rmDoc.asmId) {
+            assignedAsmId = rmDoc.asmId;
+          }
+        }
+      }
+
       // ✅ CRITICAL: Retry logic to handle duplicate appNo race conditions
       let app = null;
       let appRetries = 0;
@@ -1196,6 +1216,7 @@ router.post(
             appNo,
             partnerId: assignedPartnerId,
             rmId: assignedRmId,
+            rsmId: assignedRsmId,
             asmId: assignedAsmId,
             customerId: customerUser._id,
             loanType,
@@ -1666,6 +1687,26 @@ router.post(
         }
       }
 
+      // Resolve RSM and ASM based on RM & loanType
+      let assignedRsmId = null;
+      if (assignedRmId) {
+        const rmDoc = await User.findById(assignedRmId).select("personalRsmId businessHomeRsmId asmId").lean();
+        if (rmDoc) {
+          if (loanType === "PERSONAL") {
+            assignedRsmId = rmDoc.personalRsmId || null;
+          } else {
+            assignedRsmId = rmDoc.businessHomeRsmId || null;
+          }
+          if (assignedRsmId && !assignedAsmId) {
+            const rsmDoc = await User.findById(assignedRsmId).select("asmId").lean();
+            if (rsmDoc?.asmId) assignedAsmId = rsmDoc.asmId;
+          }
+          if (!assignedAsmId && rmDoc.asmId) {
+            assignedAsmId = rmDoc.asmId;
+          }
+        }
+      }
+
       // ✅ CRITICAL: Retry logic to handle duplicate appNo race conditions
       let app = null;
       let appRetries = 0;
@@ -1679,6 +1720,7 @@ router.post(
             appNo,
             partnerId: assignedPartnerId,
             rmId: assignedRmId,
+            rsmId: assignedRsmId,
             asmId: assignedAsmId,
             customerId: customerUser._id,
             loanType,
@@ -1889,6 +1931,26 @@ router.post(
         }
       }
 
+      // Resolve RSM and ASM based on RM & loanType
+      let assignedRsmId = null;
+      if (assignedRmId) {
+        const rmDoc = await User.findById(assignedRmId).select("personalRsmId businessHomeRsmId asmId").lean();
+        if (rmDoc) {
+          if (loanType === "PERSONAL") {
+            assignedRsmId = rmDoc.personalRsmId || null;
+          } else {
+            assignedRsmId = rmDoc.businessHomeRsmId || null;
+          }
+          if (assignedRsmId && !assignedAsmId) {
+            const rsmDoc = await User.findById(assignedRsmId).select("asmId").lean();
+            if (rsmDoc?.asmId) assignedAsmId = rsmDoc.asmId;
+          }
+          if (!assignedAsmId && rmDoc.asmId) {
+            assignedAsmId = rmDoc.asmId;
+          }
+        }
+      }
+
       // Create application skeleton
       let app = null;
       let appCreated = false;
@@ -1902,6 +1964,7 @@ router.post(
             appNo,
             partnerId,
             rmId: assignedRmId,
+            rsmId: assignedRsmId,
             asmId: assignedAsmId,
             customerId: customerUser._id,
             loanType,

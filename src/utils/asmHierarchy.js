@@ -5,18 +5,34 @@
 import { User } from "../models/User.js";
 import { ROLES } from "../config/roles.js";
 
-/** All RM ids that belong under an ASM (RSM chain + direct asmId). */
+import mongoose from "mongoose";
+
+/** All RM ids that belong under an ASM (strict direct asmId priority + fallback to RSM chain). */
 export async function getRmIdsUnderAsm(asmId, session = null) {
-  let rsmQuery = User.find({ role: ROLES.RSM, asmId }).select("_id");
+  if (!asmId) return [];
+  const asmOid = new mongoose.Types.ObjectId(asmId);
+
+  let rsmQuery = User.find({
+    role: ROLES.RSM,
+    asmId: asmOid,
+    status: { $ne: "DELETED" },
+  }).select("_id");
   if (session) rsmQuery = rsmQuery.session(session);
   const rsms = await rsmQuery.lean();
   const rsmIds = rsms.map((r) => r._id);
+
   let rmQuery = User.find({
     role: ROLES.RM,
+    status: { $ne: "DELETED" },
     $or: [
-      { personalRsmId: { $in: rsmIds } },
-      { businessHomeRsmId: { $in: rsmIds } },
-      { asmId },
+      { asmId: asmOid },
+      {
+        asmId: { $in: [null, undefined] },
+        $or: [
+          { personalRsmId: { $in: rsmIds } },
+          { businessHomeRsmId: { $in: rsmIds } },
+        ],
+      },
     ],
   }).select("_id");
   if (session) rmQuery = rmQuery.session(session);
