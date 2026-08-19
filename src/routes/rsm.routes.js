@@ -925,13 +925,13 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
     const rms = await User.find(rmScope).lean();
     const rmIds = rms.map((rm) => rm._id);
 
-    const appScope = {
+    const appScope = activeApplicationsFilter({
       $or: [
         { rsmId: rsmObjectId },
         ...(rmIds.length ? [{ rmId: { $in: rmIds }, ...ltFilter }] : []),
       ],
       ...ltFilter,
-    };
+    });
 
     // All partners under these RMs (exclude admin-queue pending signups)
     const partners = await User.find({

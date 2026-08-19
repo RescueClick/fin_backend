@@ -554,32 +554,25 @@ router.get(
   async (req, res) => {
     try {
       const asmId = req.user.sub;
-
-      // Build hierarchy: ASM → RSMs → RMs → Partners
       const _rsms = await User.find({ asmId, role: ROLES.RSM }).select("_id").lean();
       const _rsmIds = _rsms.map((r) => r._id);
-      const _rms = await User.find({
-        role: ROLES.RM,
-        $or: [
-          { personalRsmId: { $in: _rsmIds } },
-          { businessHomeRsmId: { $in: _rsmIds } },
-        ],
-      }).select("_id").lean();
-      const _rmIds = _rms.map((r) => r._id);
+      const _rmIds = await getRmIdsUnderAsm(asmId);
       const _partners = await User.find({
         rmId: { $in: _rmIds },
         role: ROLES.PARTNER,
       }).select("_id").lean();
       const _partnerIds = _partners.map((p) => p._id);
 
-      const applications = await Application.find({
+      const filter = activeApplicationsFilter({
         $or: [
           { asmId },
           { rsmId: { $in: _rsmIds } },
           { rmId: { $in: _rmIds } },
           { partnerId: { $in: _partnerIds } },
         ],
-      })
+      });
+
+      const applications = await Application.find(filter)
         .populate("customerId", "employeeId firstName lastName email phone")
         .populate("partnerId", "firstName lastName employeeId")
         .select("appNo loanType approvedLoanAmount status createdAt customer")
@@ -664,14 +657,13 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
       status: "ACTIVE",
     });
 
-    const appAsmMatch = {
+    const appAsmMatch = activeApplicationsFilter({
       $or: [
         { asmId: asmOid },
         ...(rsmOids.length ? [{ rsmId: { $in: rsmOids } }] : []),
         ...(rmOids.length ? [{ rmId: { $in: rmOids } }] : []),
       ],
-      deletedAt: null,
-    };
+    });
 
     const customers = await Application.distinct("customerId", appAsmMatch);
     const totalCustomers = customers.length;
