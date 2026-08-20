@@ -1846,17 +1846,19 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       .lean();
     if (!rm) return res.status(404).json({ message: "RM not found" });
 
-    // Partners under RM
-    const partners = await User.find({ rmId, role: ROLES.PARTNER }).lean();
+    // Partners under RM (approved, non-deleted)
+    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
+    const partners = await User.find({
+      rmId,
+      role: ROLES.PARTNER,
+      status: { $ne: "PENDING" },
+      ...userBase,
+    }).lean();
     const partnerIds = partners.map((p) => p._id);
 
     const totalPartners = partners.length;
-    const activePartners = await User.countDocuments({
-      rmId,
-      role: ROLES.PARTNER,
-      status: "ACTIVE",
-      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
-    });
+    const activePartners = partners.filter((p) => p.status === "ACTIVE").length;
+    const inactivePartners = partners.filter((p) => p.status === "INACTIVE").length;
 
     const rmScopeFilter = {
       $or: [
@@ -1870,11 +1872,39 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
     const customers = await Application.distinct("customerId", activeApplicationsFilter(rmScopeFilter));
     const totalCustomers = customers.length;
 
+    const totalApplications = await Application.countDocuments(
+      activeApplicationsFilter(rmScopeFilter)
+    );
     // In-process applications (including from partners)
     const inProcessApplications = await Application.countDocuments(
       activeApplicationsFilter({
         ...rmScopeFilter,
-        status: "UNDER_REVIEW"
+        status: {
+          $in: [
+            "SUBMITTED",
+            "DOC_INCOMPLETE",
+            "DOC_COMPLETE",
+            "LOGIN",
+            "DOC_SUBMITTED",
+            "KYC_PENDING",
+            "KYC_COMPLETE",
+            "UNDER_REVIEW",
+            "APPROVED",
+            "AGREEMENT",
+          ],
+        },
+      })
+    );
+    const disbursedApplications = await Application.countDocuments(
+      activeApplicationsFilter({
+        ...rmScopeFilter,
+        status: "DISBURSED",
+      })
+    );
+    const rejectedApplications = await Application.countDocuments(
+      activeApplicationsFilter({
+        ...rmScopeFilter,
+        status: "REJECTED",
       })
     );
 
@@ -2166,10 +2196,14 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       totals: {
         totalPartners,
         activePartners,
+        inactivePartners,
         totalCustomers,
         totalRevenue,
         avgRating,
+        totalApplications,
         inProcessApplications,
+        disbursedApplications,
+        rejectedApplications,
         partnersNeedingMoreInfo,
         formsFilledTotal: [...appCountsDash.values()].reduce((a, b) => a + b, 0),
       },

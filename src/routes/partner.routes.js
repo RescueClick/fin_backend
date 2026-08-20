@@ -2572,7 +2572,7 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
 
     const totalFiles = filteredApps.length;
     const approvedFiles = filteredApps.filter(
-      (a) => a.status === "APPROVED"
+      (a) => ["APPROVED", "AGREEMENT"].includes(a.status)
     ).length;
     const rejectedFiles = filteredApps.filter(
       (a) => a.status === "REJECTED"
@@ -2581,7 +2581,16 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       (a) => a.status === "DOC_INCOMPLETE"
     ).length;
     const inProcessFiles = filteredApps.filter((a) =>
-      ["UNDER_REVIEW", "SUBMITTED", "DRAFT"].includes(a.status)
+      [
+        "SUBMITTED",
+        "DOC_COMPLETE",
+        "LOGIN",
+        "DOC_SUBMITTED",
+        "KYC_PENDING",
+        "KYC_COMPLETE",
+        "UNDER_REVIEW",
+        "DRAFT",
+      ].includes(a.status)
     ).length;
 
     // Total disbursed (also within the period)

@@ -935,15 +935,16 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
     const ltFilter = loanTypeFilterForRsmType(rsmTypeNorm);
     const rsmObjectId = toObjectId(rsmId);
 
-    // RMs for this RSM: only the chain matching this RSM's type when set
+    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
     let rmScope = {
       role: ROLES.RM,
       $or: [{ personalRsmId: rsmObjectId }, { businessHomeRsmId: rsmObjectId }],
+      ...userBase,
     };
     if (rsmTypeNorm === RSM_TYPES.PERSONAL) {
-      rmScope = { role: ROLES.RM, personalRsmId: rsmObjectId };
+      rmScope = { role: ROLES.RM, personalRsmId: rsmObjectId, ...userBase };
     } else if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
-      rmScope = { role: ROLES.RM, businessHomeRsmId: rsmObjectId };
+      rmScope = { role: ROLES.RM, businessHomeRsmId: rsmObjectId, ...userBase };
     }
     const rms = await User.find(rmScope).lean();
     const rmIds = rms.map((rm) => rm._id);
@@ -961,30 +962,29 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       ],
     });
 
-    // All partners under these RMs
+    // All partners under these RMs (approved, non-deleted)
     const partners = await User.find({
       rmId: { $in: rmIds },
       role: ROLES.PARTNER,
+      status: { $ne: "PENDING" },
+      ...userBase,
     }).lean();
     const partnerIds = partners.map((p) => p._id);
 
     // Totals
     const totalRMs = rms.length;
     const totalPartners = partners.length;
-    const activePartners = await User.countDocuments({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-      status: "ACTIVE",
-    });
-    const inactivePartners = totalPartners - activePartners;
+    const activePartners = partners.filter((p) => p.status === "ACTIVE").length;
+    const inactivePartners = partners.filter((p) => p.status === "INACTIVE").length;
 
     const customers = await Application.distinct("customerId", appScope);
     const totalCustomers = customers.length;
 
+    const totalApplications = await Application.countDocuments(appScope);
     // Applications by status
     const inProcessApplications = await Application.countDocuments({
       ...appScope,
-      status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] },
+      status: { $in: ["LOGIN", "UNDER_REVIEW", "APPROVED", "AGREEMENT"] },
     });
 
     const pendingApplications = await Application.countDocuments({
@@ -1195,6 +1195,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
         totalCustomers,
         totalRevenue,
         avgRating,
+        totalApplications,
         inProcessApplications,
         pendingApplications,
         disbursedApplications,

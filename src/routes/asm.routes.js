@@ -632,8 +632,9 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
     if (!asm) return res.status(404).json({ message: "ASM not found" });
 
     // ✅ HIERARCHY: ASM → RSM → RM → Partner
-    // Get all RSMs under this ASM
-    const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
+    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
+    // Get all RSMs under this ASM (non-deleted)
+    const rsms = await User.find({ asmId, role: ROLES.RSM, ...userBase }).lean();
     const rsmIds = rsms.map((rsm) => rsm._id);
     const rsmOids = rsmIds.map((id) => new mongoose.Types.ObjectId(id));
     const asmOid = new mongoose.Types.ObjectId(asmId);
@@ -642,10 +643,12 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
     const rmIds = await getRmIdsUnderAsm(asmId);
     const rmOids = rmIds.map((id) => new mongoose.Types.ObjectId(id));
 
-    // All partners under these RMs
+    // All partners under these RMs (approved, non-deleted)
     const partners = await User.find({
       rmId: { $in: rmIds },
       role: ROLES.PARTNER,
+      status: { $ne: "PENDING" },
+      ...userBase,
     }).lean();
     const partnerIds = partners.map((p) => p._id);
 
@@ -653,28 +656,46 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
     const totalRSMs = rsms.length;
     const totalRMs = rmIds.length;
     const totalPartners = partners.length;
-    const activePartners = await User.countDocuments({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-      status: "ACTIVE",
-    });
-    const inactivePartners = totalPartners - activePartners;
+    const activePartners = partners.filter((p) => p.status === "ACTIVE").length;
+    const inactivePartners = partners.filter((p) => p.status === "INACTIVE").length;
 
     const appAsmMatch = activeApplicationsFilter({
       $or: [
         { asmId: asmOid },
         ...(rsmOids.length ? [{ rsmId: { $in: rsmOids } }] : []),
         ...(rmOids.length ? [{ rmId: { $in: rmOids } }] : []),
+        ...(partnerIds.length ? [{ partnerId: { $in: partnerIds } }] : []),
       ],
     });
 
     const customers = await Application.distinct("customerId", appAsmMatch);
     const totalCustomers = customers.length;
 
-    // In-process applications (under review / approved / agreement)
+    const totalApplications = await Application.countDocuments(appAsmMatch);
     const inProcessApplications = await Application.countDocuments({
       ...appAsmMatch,
-      status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] },
+      status: {
+        $in: [
+          "SUBMITTED",
+          "DOC_INCOMPLETE",
+          "DOC_COMPLETE",
+          "LOGIN",
+          "DOC_SUBMITTED",
+          "KYC_PENDING",
+          "KYC_COMPLETE",
+          "UNDER_REVIEW",
+          "APPROVED",
+          "AGREEMENT",
+        ],
+      },
+    });
+    const disbursedApplications = await Application.countDocuments({
+      ...appAsmMatch,
+      status: "DISBURSED",
+    });
+    const rejectedApplications = await Application.countDocuments({
+      ...appAsmMatch,
+      status: "REJECTED",
     });
 
     // Revenue from disbursed loans
@@ -688,11 +709,11 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
       {
         $group: {
           _id: null,
-          total: { $sum: { $ifNull: ["$approvedLoanAmount", 0] } },
+          totalRevenue: { $sum: { $ifNull: ["$approvedLoanAmount", 0] } },
         },
       },
     ]);
-    const totalRevenue = revenueAgg[0]?.total || 0;
+    const totalRevenue = revenueAgg[0]?.totalRevenue || 0;
 
     // Avg rating of partners
     const ratings = partners.map((p) => p.rating || 0);
@@ -883,7 +904,10 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
         totalCustomers,
         totalRevenue,
         avgRating,
+        totalApplications,
         inProcessApplications,
+        disbursedApplications,
+        rejectedApplications,
       },
       // Current month target and achievement
       currentMonthTarget: {

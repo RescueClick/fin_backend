@@ -123,12 +123,13 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
   const toObjectIds = (arr) => arr.map((x) => new mongoose.Types.ObjectId(x));
 
   // ASM scope: partners under RMs under RSMs under ASM
+  const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
   if (targetRole === ROLES.ASM) {
     // 1) RSMs under ASM
     const rsms = await User.find({
       asmId: id,
       role: ROLES.RSM,
-      status: "ACTIVE",
+      ...userBase,
     })
       .select("_id")
       .lean();
@@ -137,7 +138,7 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
     // 2) RMs under those RSMs (personal + business/home)
     const rms = await User.find({
       role: ROLES.RM,
-      status: "ACTIVE",
+      ...userBase,
       ...(rsmIds.length
         ? {
             $or: [
@@ -154,13 +155,22 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
     const partners = await User.find({
       rmId: { $in: rmIds },
       role: ROLES.PARTNER,
-      status: "ACTIVE",
+      status: { $ne: "PENDING" },
+      ...userBase,
     }).select("_id").lean();
     const partnerIds = partners.map((x) => x._id);
 
+    const asmOid = new mongoose.Types.ObjectId(id);
+    const or = [
+      { asmId: asmOid },
+      ...(rsmIds.length ? [{ rsmId: { $in: toObjectIds(rsmIds) } }] : []),
+      ...(rmIds.length ? [{ rmId: { $in: toObjectIds(rmIds) } }] : []),
+      ...(partnerIds.length ? [{ partnerId: { $in: toObjectIds(partnerIds) } }] : []),
+    ];
+
     return {
       partnerIds,
-      appMatchBase: partnerIds.length ? { partnerId: { $in: toObjectIds(partnerIds) } } : {},
+      appMatchBase: or.length ? { $or: or } : {},
     };
   }
 
@@ -169,14 +179,15 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
     const rms = await User.find({
       role: ROLES.RM,
       $or: [{ personalRsmId: id }, { businessHomeRsmId: id }],
-      status: "ACTIVE",
+      ...userBase,
     }).select("_id").lean();
     const rmIds = rms.map((x) => x._id);
 
     const partners = await User.find({
       rmId: { $in: rmIds },
       role: ROLES.PARTNER,
-      status: "ACTIVE",
+      status: { $ne: "PENDING" },
+      ...userBase,
     }).select("_id").lean();
     const partnerIds = partners.map((x) => x._id);
 
@@ -192,20 +203,26 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
     };
   }
 
-  // RM scope: partners under RM
+  // RM scope: partners under RM + direct RM applications
   if (targetRole === ROLES.RM) {
     const partners = await User.find({
       rmId: id,
       role: ROLES.PARTNER,
-      status: "ACTIVE",
+      status: { $ne: "PENDING" },
+      ...userBase,
     }).select("_id").lean();
     const partnerIds = partners.map((x) => x._id);
 
+    const rmObjectId = new mongoose.Types.ObjectId(id);
+    const or = [
+      ...(partnerIds.length ? [{ partnerId: { $in: toObjectIds(partnerIds) } }] : []),
+      { partnerId: null, rmId: rmObjectId },
+      { partnerId: { $exists: false }, rmId: rmObjectId },
+    ];
+
     return {
       partnerIds,
-      appMatchBase: partnerIds.length
-        ? { partnerId: { $in: toObjectIds(partnerIds) } }
-        : {},
+      appMatchBase: { $or: or },
     };
   }
 

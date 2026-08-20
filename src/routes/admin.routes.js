@@ -1041,7 +1041,10 @@ router.get(
   async (req, res) => {
     try {
       const { status } = req.query || {};
-      const query = { role: ROLES.PARTNER };
+      const query = {
+        role: ROLES.PARTNER,
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      };
       if (status && status !== "ALL") {
         query.status = status.toUpperCase();
       }
@@ -1723,12 +1726,24 @@ router.get(
         activeApplicationsFilter({ status: "REJECTED" })
       );
       const approvedFiles = await Application.countDocuments(
-        activeApplicationsFilter({ status: "APPROVED" })
+        activeApplicationsFilter({ status: { $in: ["APPROVED", "AGREEMENT"] } })
+      );
+      const disbursedFiles = await Application.countDocuments(
+        activeApplicationsFilter({ status: "DISBURSED" })
       );
       const inProcessFiles = await Application.countDocuments(
         activeApplicationsFilter({
           status: {
-            $in: ["SUBMITTED", "KYC_PENDING", "KYC_COMPLETE", "UNDER_REVIEW"],
+            $in: [
+              "SUBMITTED",
+              "DOC_INCOMPLETE",
+              "DOC_COMPLETE",
+              "LOGIN",
+              "DOC_SUBMITTED",
+              "KYC_PENDING",
+              "KYC_COMPLETE",
+              "UNDER_REVIEW",
+            ],
           },
         })
       );
@@ -1774,16 +1789,31 @@ router.get(
       const totalDisbursementTarget =
         asmTargets.length > 0 ? Number(asmTargets[0].totalTarget) : 0;
 
-      // Users count
-      const totalASM = await User.countDocuments({ role: ROLES.ASM });
-      const totalRM = await User.countDocuments({ role: ROLES.RM });
-      const totalRSM = await User.countDocuments({ role: ROLES.RSM });
-      const totalPartners = await User.countDocuments({ role: ROLES.PARTNER });
+      // Users count (excluding soft-deleted)
+      const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
+      const totalASM = await User.countDocuments({ role: ROLES.ASM, ...userBase });
+      const totalRM = await User.countDocuments({ role: ROLES.RM, ...userBase });
+      const totalRSM = await User.countDocuments({ role: ROLES.RSM, ...userBase });
+      const totalPartners = await User.countDocuments({
+        role: ROLES.PARTNER,
+        status: { $ne: "PENDING" },
+        ...userBase,
+      });
       const activePartners = await User.countDocuments({
         role: ROLES.PARTNER,
         status: "ACTIVE",
+        ...userBase,
       });
-      const inactivePartners = totalPartners - activePartners;
+      const inactivePartners = await User.countDocuments({
+        role: ROLES.PARTNER,
+        status: "INACTIVE",
+        ...userBase,
+      });
+      const pendingPartners = await User.countDocuments({
+        role: ROLES.PARTNER,
+        status: "PENDING",
+        ...userBase,
+      });
 
       // Customers = unique people with a still-visible loan application
       // (includes rejected apps until scheduled deletedAt cleanup).
@@ -1796,12 +1826,14 @@ router.get(
       // Keep raw user-account count available for ops if needed
       const totalCustomerAccounts = await User.countDocuments({
         role: ROLES.CUSTOMER,
+        ...userBase,
       });
 
       res.json({
         totalFiles,
         rejectedFiles,
         approvedFiles,
+        disbursedFiles,
         inProcessFiles,
         totalRevenue, // 👈 Super Admin revenue = all partners' disbursed sum
         totalPayout,
@@ -1812,6 +1844,7 @@ router.get(
         totalPartners,
         activePartners,
         inactivePartners,
+        pendingPartners,
         totalCustomers,
         totalCustomerAccounts,
       });
