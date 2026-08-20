@@ -111,6 +111,16 @@ async function eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm) {
   return [...seen].map((id) => new mongoose.Types.ObjectId(id));
 }
 
+const RSM_ALLOWED_STATUSES = [
+  "DOC_COMPLETE",
+  "LOGIN",
+  "UNDER_REVIEW",
+  "APPROVED",
+  "AGREEMENT",
+  "DISBURSED",
+  "REJECTED",
+];
+
 function expectedRsmIdForApplication(app) {
   const rm = app.rmId;
   if (!rm) return null;
@@ -127,7 +137,7 @@ function expectedRsmIdForApplication(app) {
 
 /**
  * Fix application routing: set rsmId/asmId from RM's personalRsmId / businessHomeRsmId when missing or wrong.
- * Ensures each RSM sees all files for their RMs according to loan type regardless of stage.
+ * Only applies to applications where documents have been completed by RM (DOC_COMPLETE and subsequent stages).
  */
 async function repairDocCompleteRoutingForRsm(rsmUserId) {
   const rsmObjectId = toObjectId(rsmUserId);
@@ -141,6 +151,7 @@ async function repairDocCompleteRoutingForRsm(rsmUserId) {
 
   const candidates = await Application.find({
     rmId: { $in: eligibleRmIds },
+    status: { $in: RSM_ALLOWED_STATUSES },
     ...loanFilter,
   })
     .select("_id appNo rsmId rmId loanType status")
@@ -167,6 +178,7 @@ async function repairDocCompleteRoutingForRsm(rsmUserId) {
 /**
  * Load application for detail/doc download: trust rsmId if already this RSM; else allow
  * when RM mapping says this RSM owns the loan type, and fix routing in DB.
+ * Only allows access if the application has completed document stage (DOC_COMPLETE or beyond).
  */
 async function loadApplicationForRsm(applicationId, rsmUserId) {
   const rsmObjectId = toObjectId(rsmUserId);
@@ -179,6 +191,11 @@ async function loadApplicationForRsm(applicationId, rsmUserId) {
     "personalRsmId businessHomeRsmId"
   );
   if (!app || !app.rmId) return null;
+
+  // RSM can ONLY access applications that are at DOC_COMPLETE or beyond
+  if (!RSM_ALLOWED_STATUSES.includes(app.status)) {
+    return null;
+  }
 
   if (!loanTypeMatchesRsmRole(app.loanType, rsmTypeNorm)) return null;
 
@@ -609,20 +626,26 @@ router.get("/applications", auth, requireRole(ROLES.RSM), async (req, res) => {
       );
     }
 
-    // Fix all rows: missing or wrong rsmId vs RM personal/business RSM mapping
+    // Fix all rows: missing or wrong rsmId vs RM personal/business RSM mapping (for completed documents)
     await repairDocCompleteRoutingForRsm(rsmId);
 
     const eligibleRmIds = await eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm);
+    const statusFilter = status && status !== "All"
+      ? (RSM_ALLOWED_STATUSES.includes(status) ? { status } : { status: "__NONE__" })
+      : { status: { $in: RSM_ALLOWED_STATUSES } };
+
     const filter = {
-      $or: [
-        { rsmId: rsmObjectId },
-        ...(eligibleRmIds.length ? [{ rmId: { $in: eligibleRmIds }, ...loanTypeFilter }] : []),
+      $and: [
+        {
+          $or: [
+            { rsmId: rsmObjectId },
+            ...(eligibleRmIds.length ? [{ rmId: { $in: eligibleRmIds }, ...loanTypeFilter }] : []),
+          ],
+        },
+        loanTypeFilter,
+        statusFilter,
       ],
-      ...loanTypeFilter,
     };
-    if (status) {
-      filter.status = status;
-    }
 
     console.log(`🔍 RSM applications filter:`, JSON.stringify(filter));
 
@@ -926,11 +949,16 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
     const rmIds = rms.map((rm) => rm._id);
 
     const appScope = activeApplicationsFilter({
-      $or: [
-        { rsmId: rsmObjectId },
-        ...(rmIds.length ? [{ rmId: { $in: rmIds }, ...ltFilter }] : []),
+      $and: [
+        {
+          $or: [
+            { rsmId: rsmObjectId },
+            ...(rmIds.length ? [{ rmId: { $in: rmIds }, ...ltFilter }] : []),
+          ],
+        },
+        ltFilter,
+        { status: { $in: RSM_ALLOWED_STATUSES } },
       ],
-      ...ltFilter,
     });
 
     // All partners under these RMs
