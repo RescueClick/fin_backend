@@ -173,12 +173,13 @@ router.post(
 );
 
 // GET /api/asm/get-rsms
-// ASM gets all RSMs under them
+// ASM gets all RSMs under them (excluding deleted)
 router.get("/get-rsms", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
     const asmId = req.user.sub;
+    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
 
-    const rsms = await User.find({ asmId, role: ROLES.RSM })
+    const rsms = await User.find({ asmId, role: ROLES.RSM, ...userBase })
       .select("-passwordHash -__v")
       .lean();
 
@@ -224,14 +225,16 @@ router.post(
 router.get("/get-rm", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
     const asmId = req.user.sub;
+    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
 
     // Get RSMs under this ASM first
-    const rsms = await User.find({ role: ROLES.RSM, asmId }).select("_id").lean();
+    const rsms = await User.find({ role: ROLES.RSM, asmId, ...userBase }).select("_id").lean();
     const rsmIds = rsms.map(r => r._id);
 
     // Get RMs that are under these RSMs (via personalRsmId OR businessHomeRsmId)
     const list = await User.find({
       role: ROLES.RM,
+      ...userBase,
       $or: [
         { personalRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } }
