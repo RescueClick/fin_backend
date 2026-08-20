@@ -307,13 +307,16 @@ router.get("/get-rm", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.get("/get-partners", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
     const asmId = req.user.sub;
-    // Use full hierarchy (RSM chain + RM.asmId). Do NOT filter populate by
-    // rm.asmId alone — many RMs only link via personalRsmId/businessHomeRsmId,
-    // which made partners "disappear" after RM→RM moves.
+    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
+
+    // Resolve full ASM → RSM → RM hierarchy to find all RMs under this ASM
+    const rmIds = await getRmIdsUnderAsm(asmId);
+
     const { status } = req.query || {};
     const query = {
       role: ROLES.PARTNER,
       rmId: { $in: rmIds },
+      ...userBase,
     };
     if (status && status !== "ALL") {
       query.status = status.toUpperCase();
