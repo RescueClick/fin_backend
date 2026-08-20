@@ -3235,6 +3235,62 @@ router.delete(
   }
 );
 
+// Soft-retain RSM account (never hard-delete)
+router.delete(
+  "/rsm/:rsmId",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    try {
+      const { rsmId } = req.params;
+      const asmId = req.user.sub;
+
+      if (!mongoose.Types.ObjectId.isValid(rsmId)) {
+        return res.status(400).json({ message: "Invalid RSM id" });
+      }
+
+      const rsm = await User.findOne({ _id: rsmId, role: ROLES.RSM, asmId });
+      if (!rsm) {
+        return res.status(404).json({ message: "RSM not found or not under your ASM hierarchy" });
+      }
+
+      if (rsm.status === "ACTIVE") {
+        return res
+          .status(400)
+          .json({ message: "Deactivate RSM before removing the account" });
+      }
+
+      const rmStillLinked = await User.countDocuments({
+        role: ROLES.RM,
+        $or: [{ personalRsmId: rsmId }, { businessHomeRsmId: rsmId }],
+      });
+      if (rmStillLinked > 0) {
+        return res.status(400).json({
+          message:
+            "Cannot remove RSM while RMs are still assigned. Reassign them first so loan data is not orphaned.",
+          rms: rmStillLinked,
+        });
+      }
+
+      rsm.status = "SUSPENDED";
+      rsm.deletedAt = new Date();
+      await rsm.save();
+      await Target.deleteMany({ assignedTo: rsm._id });
+
+      res.json({
+        message:
+          "RSM soft-removed. Account retained for audit; no applications or customers were deleted.",
+        id: rsm._id,
+        email: rsm.email,
+        hardDeleted: false,
+      });
+    } catch (error) {
+      console.error("Error deleting RSM:", error);
+      res.status(500).json({ message: "Failed to delete RSM" });
+    }
+  }
+);
+
 // GET /asm/profile
 router.get("/profile", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
