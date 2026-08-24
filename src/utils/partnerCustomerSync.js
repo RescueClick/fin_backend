@@ -6,11 +6,17 @@ import { User } from "../models/User.js";
 import { Application } from "../models/Application.js";
 import { ROLES } from "../config/roles.js";
 import { activeApplicationsFilter } from "./activeApplicationsFilter.js";
+import { activeUsersFilter } from "./activeUsersFilter.js";
 
 export async function findCustomersForPartner(partnerId) {
-  const [linked, appCustomerIds] = await Promise.all([
-    User.find({ role: ROLES.CUSTOMER, partnerId, deletedAt: null }).select("_id").lean(),
+  const [linked, appCustomerIds, partnerApps] = await Promise.all([
+    User.find({
+      role: ROLES.CUSTOMER,
+      $or: [{ partnerId }, { referredBy: partnerId }],
+      ...activeUsersFilter(),
+    }).select("_id").lean(),
     Application.distinct("customerId", activeApplicationsFilter({ partnerId })),
+    Application.find({ partnerId, ...activeApplicationsFilter() }).select("customerId customer appNo createdAt").lean(),
   ]);
 
   const idSet = new Set([
@@ -18,15 +24,59 @@ export async function findCustomersForPartner(partnerId) {
     ...appCustomerIds.filter(Boolean).map(String),
   ]);
 
-  if (idSet.size === 0) return [];
+  let users = [];
+  if (idSet.size > 0) {
+    users = await User.find({
+      _id: { $in: [...idSet] },
+      role: ROLES.CUSTOMER,
+    })
+      .select("-passwordHash -__v")
+      .lean();
 
-  return User.find({
-    _id: { $in: [...idSet] },
-    role: ROLES.CUSTOMER,
-    deletedAt: null,
-  })
-    .select("-passwordHash -__v")
-    .lean();
+    // Auto-heal any soft-deleted customers who have active applications under this partner
+    const idsToReactivate = users
+      .filter((u) => u.deletedAt != null || u.status === "SUSPENDED")
+      .map((u) => u._id);
+
+    if (idsToReactivate.length > 0) {
+      await User.updateMany(
+        { _id: { $in: idsToReactivate } },
+        { $set: { deletedAt: null, status: "ACTIVE", partnerId } }
+      );
+      users.forEach((u) => {
+        if (idsToReactivate.some((id) => id.toString() === u._id.toString())) {
+          u.deletedAt = null;
+          u.status = "ACTIVE";
+          u.partnerId = partnerId;
+        }
+      });
+    }
+  }
+
+  // Ensure every active application under this partner has a customer represented
+  const existingCustIds = new Set(users.map((u) => String(u._id)));
+  for (const app of partnerApps) {
+    const cId = app.customerId ? String(app.customerId) : String(app._id);
+    if (!existingCustIds.has(cId) && app.customer) {
+      existingCustIds.add(cId);
+      users.push({
+        _id: app.customerId || app._id,
+        firstName: app.customer.firstName || "Customer",
+        middleName: app.customer.middleName || "",
+        lastName: app.customer.lastName || "",
+        email: app.customer.email || "",
+        phone: app.customer.phone || "",
+        role: ROLES.CUSTOMER,
+        status: "ACTIVE",
+        partnerId,
+        rmId: app.customer.rmId || null,
+        asmId: app.customer.asmId || null,
+        createdAt: app.createdAt,
+      });
+    }
+  }
+
+  return users;
 }
 
 /**

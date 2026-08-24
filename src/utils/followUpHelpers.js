@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import { Application } from "../models/Application.js";
 import { FollowUp } from "../models/followUp.js";
 import { findMissingMandatoryDocs } from "./loanMandatoryDocRules.js";
+import { activeApplicationsFilter } from "./activeApplicationsFilter.js";
 
 const CALL_STATUSES = ["Connected", "Ringing", "Switch Off", "Not Reachable"];
 
@@ -108,7 +109,7 @@ export async function latestFollowUpsByTargets({
 
 /**
  * Count applications grouped by partnerId.
- * Matches RM Manage Loans: no deletedAt filter (same as GET /rm/customers).
+ * Consistent active applications filter (excludes soft-deleted/archived).
  */
 export async function applicationCountsByPartner(partnerIds, period = null) {
   if (!partnerIds?.length) return new Map();
@@ -122,7 +123,7 @@ export async function applicationCountsByPartner(partnerIds, period = null) {
     match.createdAt = { $gte: period.start, $lte: period.end };
   }
   const rows = await Application.aggregate([
-    { $match: match },
+    { $match: activeApplicationsFilter(match) },
     { $group: { _id: "$partnerId", count: { $sum: 1 } } },
   ]);
   const map = new Map();
@@ -131,7 +132,7 @@ export async function applicationCountsByPartner(partnerIds, period = null) {
 }
 
 /**
- * Total loan applications visible to an RM (same scope as Manage Loans /customers).
+ * Total loan applications visible to an RM (active applications filter).
  */
 export async function totalLoansForRm(rmId, partnerIds = []) {
   const ids = (partnerIds || []).map((id) =>
@@ -139,11 +140,11 @@ export async function totalLoansForRm(rmId, partnerIds = []) {
   );
   const or = [{ rmId }];
   if (ids.length) or.push({ partnerId: { $in: ids } });
-  return Application.countDocuments({ $or: or });
+  return Application.countDocuments(activeApplicationsFilter({ $or: or }));
 }
 
 /**
- * Count applications grouped by rmId (Manage Loans style — no deletedAt filter).
+ * Count applications grouped by rmId (active applications filter).
  */
 export async function applicationCountsByRm(rmIds, period = null) {
   if (!rmIds?.length) return new Map();
@@ -157,7 +158,7 @@ export async function applicationCountsByRm(rmIds, period = null) {
     match.createdAt = { $gte: period.start, $lte: period.end };
   }
   const rows = await Application.aggregate([
-    { $match: match },
+    { $match: activeApplicationsFilter(match) },
     { $group: { _id: "$rmId", count: { $sum: 1 } } },
   ]);
   const map = new Map();

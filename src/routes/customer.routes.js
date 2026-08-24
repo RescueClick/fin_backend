@@ -261,6 +261,27 @@ router.post(
         }
       }
 
+      // Resolve RSM and ASM based on RM & loanType
+      let assignedRsmId = null;
+      let assignedAsmId = req.user.role === ROLES.PARTNER ? (partner?.asmId || null) : null;
+      if (appRmId) {
+        const rmDoc = await User.findById(appRmId).select("personalRsmId businessHomeRsmId asmId").lean();
+        if (rmDoc) {
+          if (loanType === "PERSONAL") {
+            assignedRsmId = rmDoc.personalRsmId || null;
+          } else {
+            assignedRsmId = rmDoc.businessHomeRsmId || null;
+          }
+          if (assignedRsmId && !assignedAsmId) {
+            const rsmDoc = await User.findById(assignedRsmId).select("asmId").lean();
+            if (rsmDoc?.asmId) assignedAsmId = rsmDoc.asmId;
+          }
+          if (!assignedAsmId && rmDoc.asmId) {
+            assignedAsmId = rmDoc.asmId;
+          }
+        }
+      }
+
       // Create Application
       // ✅ CRITICAL: Retry logic to handle duplicate appNo race conditions
       let app = null;
@@ -275,6 +296,8 @@ router.post(
             appNo,
             partnerId: appPartnerId || null,
             rmId: appRmId || null,
+            rsmId: assignedRsmId || null,
+            asmId: assignedAsmId || null,
             customerId: customerUser._id,
             loanType,
             customer: {
@@ -295,7 +318,8 @@ router.post(
                 : undefined,
               partnerId: appPartnerId || null,
               rmId: appRmId || null,
-              asmId: req.user.role === ROLES.PARTNER ? partner.asmId : null,
+              rsmId: assignedRsmId || null,
+              asmId: assignedAsmId || null,
             },
             docs,
             references: refs,

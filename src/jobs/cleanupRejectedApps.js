@@ -13,6 +13,7 @@ import { DeleteObjectCommand, CopyObjectCommand, PutObjectCommand } from "@aws-s
 export const cleanupRejectedApps = async () => {
   try {
     const appsToDelete = await Application.find({
+      status: "REJECTED",
       deletedAt: { $lte: new Date() },
       isArchived: { $ne: true },
     });

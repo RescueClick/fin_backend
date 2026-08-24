@@ -2205,7 +2205,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
         disbursedApplications,
         rejectedApplications,
         partnersNeedingMoreInfo,
-        formsFilledTotal: [...appCountsDash.values()].reduce((a, b) => a + b, 0),
+        formsFilledTotal: totalApplications,
       },
       // Current month target and achievement
       currentMonthTarget: {

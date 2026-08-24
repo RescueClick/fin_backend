@@ -3639,9 +3639,12 @@ router.get(
           .lean();
         const partnerIds = partners.map((x) => x._id);
 
-        const customers = await Application.distinct("customerId", {
-          partnerId: { $in: partnerIds },
-        });
+        const customers = await Application.distinct(
+          "customerId",
+          activeApplicationsFilter({
+            partnerId: { $in: partnerIds },
+          })
+        );
 
         totalDisbursed = await sumDisbursedBy({
           partnerId: { $in: partnerIds },
@@ -3681,18 +3684,24 @@ router.get(
         // ⚠️ CRITICAL: For SUSPENDED RM, only count ACTIVE partners who have done disbursement
         if (user.status === "SUSPENDED") {
           // Find which ACTIVE partners have actually disbursed
-          const partnersWithDisbursement = await Application.distinct("partnerId", {
-            partnerId: { $in: partnerIds },
-            status: "DISBURSED"
-          });
+          const partnersWithDisbursement = await Application.distinct(
+            "partnerId",
+            activeApplicationsFilter({
+              partnerId: { $in: partnerIds },
+              status: "DISBURSED"
+            })
+          );
 
           // Only count partners who have disbursed
           partnerIds = partnersWithDisbursement;
         }
 
-        const customers = await Application.distinct("customerId", {
-          partnerId: { $in: partnerIds },
-        });
+        const customers = await Application.distinct(
+          "customerId",
+          activeApplicationsFilter({
+            partnerId: { $in: partnerIds },
+          })
+        );
 
         // For both ACTIVE and SUSPENDED RM, count disbursements from ACTIVE partners
         // For SUSPENDED RM, partnerIds already filtered to only those who have disbursed
@@ -3717,9 +3726,12 @@ router.get(
       }
 
       if (user.role === ROLES.PARTNER) {
-        const customers = await Application.distinct("customerId", {
-          partnerId: user._id,
-        });
+        const customers = await Application.distinct(
+          "customerId",
+          activeApplicationsFilter({
+            partnerId: user._id,
+          })
+        );
 
         totalDisbursed = await sumDisbursedBy({ partnerId: user._id });
         assignedTargetValue = await getAssignedTarget(user._id, ROLES.PARTNER, {
@@ -3766,13 +3778,16 @@ router.get(
           .lean();
         const partnerIds = partners.map((x) => x._id);
 
-        const customers = await Application.distinct("customerId", {
-          $or: [
-            { rsmId: id },
-            { rmId: { $in: rmIds } },
-            { partnerId: { $in: partnerIds } }
-          ]
-        });
+        const customers = await Application.distinct(
+          "customerId",
+          activeApplicationsFilter({
+            $or: [
+              { rsmId: id },
+              { rmId: { $in: rmIds } },
+              { partnerId: { $in: partnerIds } }
+            ]
+          })
+        );
 
         totalDisbursed = await sumDisbursedBy({ rsmId: id });
         assignedTargetValue = await getAssignedTarget(user._id, ROLES.RSM, { rsmId: id });

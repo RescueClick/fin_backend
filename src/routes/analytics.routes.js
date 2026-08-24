@@ -13,6 +13,7 @@ import { Application } from "../models/Application.js";
 import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
 import { Payout } from "../models/Payout.js";
+import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 
 const router = express.Router();
 
@@ -576,17 +577,20 @@ router.get(
         const partnerIds = partners.map((x) => x._id);
 
         // Get customers
-        const customers = await Application.distinct("customerId", {
-          partnerId: { $in: partnerIds },
-        });
+        const customers = await Application.distinct(
+          "customerId",
+          activeApplicationsFilter({
+            partnerId: { $in: partnerIds },
+          })
+        );
 
         // Calculate total disbursed - include all applications from Partners under ASM
         const disbursedAggASM = await Application.aggregate([
           {
-            $match: {
+            $match: activeApplicationsFilter({
               status: "DISBURSED",
               ...(partnerIds.length > 0 ? { partnerId: { $in: partnerIds.map(pId => new mongoose.Types.ObjectId(pId)) } } : {}),
-            },
+            }),
           },
           {
             $group: {
@@ -651,26 +655,29 @@ router.get(
         const partnerIds = partners.map((x) => x._id);
 
         // Get customers
-        const customers = await Application.distinct("customerId", {
-          $or: [
-            { rsmId: id },
-            { rmId: { $in: rmIds } },
-            { partnerId: { $in: partnerIds } },
-          ],
-        });
+        const customers = await Application.distinct(
+          "customerId",
+          activeApplicationsFilter({
+            $or: [
+              { rsmId: id },
+              { rmId: { $in: rmIds } },
+              { partnerId: { $in: partnerIds } },
+            ],
+          })
+        );
 
         // Calculate total disbursed - include all applications from RSM, RMs, and Partners
         // Use aggregation to sum all disbursed amounts from the entire hierarchy
         const disbursedAgg = await Application.aggregate([
           {
-            $match: {
+            $match: activeApplicationsFilter({
               status: "DISBURSED",
               $or: [
                 { rsmId: new mongoose.Types.ObjectId(id) },
                 ...(rmIds.length > 0 ? [{ rmId: { $in: rmIds.map(rmId => new mongoose.Types.ObjectId(rmId)) } }] : []),
                 ...(partnerIds.length > 0 ? [{ partnerId: { $in: partnerIds.map(pId => new mongoose.Types.ObjectId(pId)) } }] : []),
               ],
-            },
+            }),
           },
           {
             $group: {
@@ -734,17 +741,20 @@ router.get(
         const partnerIds = partners.map((x) => x._id);
 
         // Get customers
-        const customers = await Application.distinct("customerId", {
-          partnerId: { $in: partnerIds },
-        });
+        const customers = await Application.distinct(
+          "customerId",
+          activeApplicationsFilter({
+            partnerId: { $in: partnerIds },
+          })
+        );
 
         // Calculate total disbursed - include all applications from Partners under this RM
         const disbursedAggRM = await Application.aggregate([
           {
-            $match: {
+            $match: activeApplicationsFilter({
               status: "DISBURSED",
               ...(partnerIds.length > 0 ? { partnerId: { $in: partnerIds.map(pId => new mongoose.Types.ObjectId(pId)) } } : {}),
-            },
+            }),
           },
           {
             $group: {
@@ -785,17 +795,20 @@ router.get(
       // Partner Analytics
       else if (targetUser.role === ROLES.PARTNER) {
         // Get customers
-        const customers = await Application.distinct("customerId", {
-          partnerId: id,
-        });
+        const customers = await Application.distinct(
+          "customerId",
+          activeApplicationsFilter({
+            partnerId: id,
+          })
+        );
 
         // Calculate total disbursed - include all applications from this Partner
         const disbursedAgg = await Application.aggregate([
           {
-            $match: {
+            $match: activeApplicationsFilter({
               status: "DISBURSED",
               partnerId: new mongoose.Types.ObjectId(id),
-            },
+            }),
           },
           {
             $group: {

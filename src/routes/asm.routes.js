@@ -989,29 +989,35 @@ router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.ASM), async (req, re
     const partnerIds = partners.map((p) => p._id);
 
     // Applications assigned to this RSM or its RMs/Partners
-    const totalApplications = await Application.countDocuments({
-      $or: [
-        { rsmId: rsmId },
-        { rmId: { $in: rmIds } },
-        { partnerId: { $in: partnerIds } }
-      ]
-    });
+    const totalApplications = await Application.countDocuments(
+      activeApplicationsFilter({
+        $or: [
+          { rsmId: rsmId },
+          { rmId: { $in: rmIds } },
+          { partnerId: { $in: partnerIds } }
+        ]
+      })
+    );
 
-    const disbursedApplications = await Application.countDocuments({
-      $or: [
-        { rsmId: rsmId, status: "DISBURSED" },
-        { rmId: { $in: rmIds }, status: "DISBURSED" },
-        { partnerId: { $in: partnerIds }, status: "DISBURSED" }
-      ]
-    });
+    const disbursedApplications = await Application.countDocuments(
+      activeApplicationsFilter({
+        $or: [
+          { rsmId: rsmId, status: "DISBURSED" },
+          { rmId: { $in: rmIds }, status: "DISBURSED" },
+          { partnerId: { $in: partnerIds }, status: "DISBURSED" }
+        ]
+      })
+    );
 
-    const inProcessApplications = await Application.countDocuments({
-      $or: [
-        { rsmId: rsmId, status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] } },
-        { rmId: { $in: rmIds }, status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] } },
-        { partnerId: { $in: partnerIds }, status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] } }
-      ]
-    });
+    const inProcessApplications = await Application.countDocuments(
+      activeApplicationsFilter({
+        $or: [
+          { rsmId: rsmId, status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] } },
+          { rmId: { $in: rmIds }, status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] } },
+          { partnerId: { $in: partnerIds }, status: { $in: ["UNDER_REVIEW", "APPROVED", "AGREEMENT"] } }
+        ]
+      })
+    );
 
     // Revenue from disbursed loans (from RSM, RMs, and Partners)
     const revenueAgg = await Application.aggregate([
@@ -1101,13 +1107,16 @@ router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.ASM), async (req, re
     ]);
 
     // Get customer count
-    const customers = await Application.distinct("customerId", {
-      $or: [
-        { rsmId: new mongoose.Types.ObjectId(rsmId) },
-        { rmId: { $in: rmIds.map(id => new mongoose.Types.ObjectId(id)) } },
-        { partnerId: { $in: partnerIds.map(id => new mongoose.Types.ObjectId(id)) } }
-      ]
-    });
+    const customers = await Application.distinct(
+      "customerId",
+      activeApplicationsFilter({
+        $or: [
+          { rsmId: new mongoose.Types.ObjectId(rsmId) },
+          { rmId: { $in: rmIds.map(id => new mongoose.Types.ObjectId(id)) } },
+          { partnerId: { $in: partnerIds.map(id => new mongoose.Types.ObjectId(id)) } }
+        ]
+      })
+    );
 
     res.json({
       profile: {
@@ -3605,13 +3614,16 @@ router.get("/:id/analytics", auth, requireRole(ROLES.ASM), async (req, res) => {
     const partnerIds = partners.map((x) => x._id);
 
     // Get customers
-    const customers = await Application.distinct("customerId", {
-      $or: [
-        { rsmId: id },
-        { rmId: { $in: rmIds } },
-        { partnerId: { $in: partnerIds } }
-      ]
-    });
+    const customers = await Application.distinct(
+      "customerId",
+      activeApplicationsFilter({
+        $or: [
+          { rsmId: id },
+          { rmId: { $in: rmIds } },
+          { partnerId: { $in: partnerIds } }
+        ]
+      })
+    );
 
     // Calculate totals for this RSM
     totalDisbursed = await sumDisbursedBy({ rsmId: id });
