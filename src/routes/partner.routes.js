@@ -1183,23 +1183,11 @@ router.post(
         }
       }
 
-      // Resolve RSM and ASM based on RM & loanType
-      let assignedRsmId = null;
+      // Resolve ASM based on RM
       if (assignedRmId) {
-        const rmDoc = await User.findById(assignedRmId).select("personalRsmId businessHomeRsmId asmId").lean();
-        if (rmDoc) {
-          if (loanType === "PERSONAL") {
-            assignedRsmId = rmDoc.personalRsmId || null;
-          } else {
-            assignedRsmId = rmDoc.businessHomeRsmId || null;
-          }
-          if (assignedRsmId && !assignedAsmId) {
-            const rsmDoc = await User.findById(assignedRsmId).select("asmId").lean();
-            if (rsmDoc?.asmId) assignedAsmId = rsmDoc.asmId;
-          }
-          if (!assignedAsmId && rmDoc.asmId) {
-            assignedAsmId = rmDoc.asmId;
-          }
+        const rmDoc = await User.findById(assignedRmId).select("asmId").lean();
+        if (rmDoc?.asmId && !assignedAsmId) {
+          assignedAsmId = rmDoc.asmId;
         }
       }
 
@@ -1216,13 +1204,13 @@ router.post(
             appNo,
             partnerId: assignedPartnerId,
             rmId: assignedRmId,
-            rsmId: assignedRsmId || null,
+            rsmId: null,
             asmId: assignedAsmId || null,
             customerId: customerUser._id,
             loanType,
             customer: {
               ...customerData,
-              rsmId: assignedRsmId || null,
+              rsmId: null,
               asmId: assignedAsmId || null,
             },
             docs: newDocs,
@@ -1691,23 +1679,11 @@ router.post(
         }
       }
 
-      // Resolve RSM and ASM based on RM & loanType
-      let assignedRsmId = null;
+      // Resolve ASM based on RM
       if (assignedRmId) {
-        const rmDoc = await User.findById(assignedRmId).select("personalRsmId businessHomeRsmId asmId").lean();
-        if (rmDoc) {
-          if (loanType === "PERSONAL") {
-            assignedRsmId = rmDoc.personalRsmId || null;
-          } else {
-            assignedRsmId = rmDoc.businessHomeRsmId || null;
-          }
-          if (assignedRsmId && !assignedAsmId) {
-            const rsmDoc = await User.findById(assignedRsmId).select("asmId").lean();
-            if (rsmDoc?.asmId) assignedAsmId = rsmDoc.asmId;
-          }
-          if (!assignedAsmId && rmDoc.asmId) {
-            assignedAsmId = rmDoc.asmId;
-          }
+        const rmDoc = await User.findById(assignedRmId).select("asmId").lean();
+        if (rmDoc?.asmId && !assignedAsmId) {
+          assignedAsmId = rmDoc.asmId;
         }
       }
 
@@ -1724,13 +1700,13 @@ router.post(
             appNo,
             partnerId: assignedPartnerId,
             rmId: assignedRmId,
-            rsmId: assignedRsmId || null,
+            rsmId: null,
             asmId: assignedAsmId || null,
             customerId: customerUser._id,
             loanType,
             customer: {
               ...customerData,
-              rsmId: assignedRsmId || null,
+              rsmId: null,
               asmId: assignedAsmId || null,
             },
             docs: newDocs,

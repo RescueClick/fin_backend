@@ -310,13 +310,13 @@ ApplicationSchema.methods.transition = function (to, byUserId, note) {
     DRAFT: ["SUBMITTED"],
     SUBMITTED: ["DOC_INCOMPLETE", "DOC_COMPLETE"],
     DOC_INCOMPLETE: ["DOC_COMPLETE", "REJECTED"],
-    // After RM marks DOC_COMPLETE, RSM must first move to LOGIN, then UNDER_REVIEW
+    // After RM marks DOC_COMPLETE, RSM/ASM can move forward or unblock/send back to DOC_INCOMPLETE for RM re-verification
     DOC_COMPLETE: ["LOGIN", "DOC_INCOMPLETE"],
-    LOGIN: ["UNDER_REVIEW"],
-    UNDER_REVIEW: ["APPROVED", "REJECTED"],
-    APPROVED: ["AGREEMENT", "DISBURSED"],
-    AGREEMENT: ["DISBURSED"],
-    REJECTED: [],
+    LOGIN: ["UNDER_REVIEW", "DOC_INCOMPLETE"],
+    UNDER_REVIEW: ["APPROVED", "REJECTED", "DOC_INCOMPLETE"],
+    APPROVED: ["AGREEMENT", "DISBURSED", "DOC_INCOMPLETE"],
+    AGREEMENT: ["DISBURSED", "DOC_INCOMPLETE"],
+    REJECTED: ["DOC_INCOMPLETE"],
     DISBURSED: []
   };
 

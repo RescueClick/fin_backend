@@ -4323,4 +4323,255 @@ router.post(
   }
 );
 
+/**
+ * ASM application transition / unblock for RM
+ * Allows ASM to transition any application under their hierarchy, including unblocking to DOC_INCOMPLETE so RM can re-verify and modify.
+ */
+router.post(
+  "/applications/:id/transition",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    try {
+      const { to, note, approvedLoanAmount } = req.body;
+      const asmId = req.user.sub;
+
+      if (!to) {
+        return res.status(400).json({ message: "Target status 'to' required" });
+      }
+
+      const ASM_ALLOWED_STATUSES = [
+        "DOC_INCOMPLETE",
+        "DOC_COMPLETE",
+        "LOGIN",
+        "UNDER_REVIEW",
+        "APPROVED",
+        "AGREEMENT",
+        "REJECTED",
+        "DISBURSED"
+      ];
+
+      if (!ASM_ALLOWED_STATUSES.includes(to)) {
+        return res.status(403).json({
+          message: `ASM can transition to statuses: ${ASM_ALLOWED_STATUSES.join(", ")}.`
+        });
+      }
+
+      const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(asmId);
+      const app = await Application.findOne({
+        _id: req.params.id,
+        $or: [
+          { asmId },
+          ...(rsmIds.length ? [{ rsmId: { $in: rsmIds } }] : []),
+          ...(rmIds.length ? [{ rmId: { $in: rmIds } }] : []),
+          ...(partnerIds.length ? [{ partnerId: { $in: partnerIds } }] : []),
+        ],
+      })
+        .populate("customerId")
+        .populate("rmId", "firstName lastName employeeId")
+        .populate("partnerId", "firstName lastName employeeId");
+
+      if (!app) {
+        return res.status(404).json({ message: "Application not found under this ASM hierarchy" });
+      }
+
+      if (to === "APPROVED" && (approvedLoanAmount == null || isNaN(Number(approvedLoanAmount)))) {
+        return res.status(400).json({
+          message: "approvedLoanAmount is required and must be a number for APPROVED status",
+        });
+      }
+      if (approvedLoanAmount != null && !isNaN(Number(approvedLoanAmount))) {
+        app.approvedLoanAmount = Number(approvedLoanAmount);
+      }
+
+      const oldStatus = app.status;
+      app.transition(to, asmId, note || `Status updated to ${to} by ASM`);
+
+      if (to === "REJECTED" && note && String(note).trim()) {
+        app.remarks = String(note).trim();
+      }
+
+      await app.save();
+
+      try {
+        const io = global.io;
+        if (io) {
+          emitApplicationStatusChanged(io, app, oldStatus, to, asmId);
+        }
+      } catch (sockErr) {
+        console.error("ASM status socket emit error:", sockErr);
+      }
+
+      return res.json({
+        message: `Application transitioned to ${to} successfully`,
+        status: app.status,
+        appNo: app.appNo,
+      });
+    } catch (err) {
+      console.error("ASM Application transition error:", err);
+      return res.status(500).json({ message: err.message || "Failed to update application status" });
+    }
+  }
+);
+
+// POST /api/asm/rm-deactivate (Safe RM deactivation with atomic handover of partners, customers, and applications)
+router.post(
+  "/rm-deactivate",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    const session = await mongoose.startSession();
+    try {
+      const rmId = req.body?.rmId || req.body?.oldRmId;
+      const newRmId = req.body?.newRmId;
+
+      if (!rmId || !newRmId) {
+        return res.status(400).json({ message: "Both rmId and newRmId are required" });
+      }
+
+      const asmId = req.user.sub;
+      const scopeIds = await getAsmScopeIds(asmId);
+
+      let transferStats;
+
+      await session.withTransaction(async () => {
+        const oldRm = await User.findOne({
+          _id: rmId,
+          role: ROLES.RM,
+          _id: { $in: scopeIds.rmIds },
+        }).session(session);
+
+        if (!oldRm) {
+          throw new Error("RM not found under this ASM hierarchy");
+        }
+
+        const newRm = await User.findOne({
+          role: ROLES.RM,
+          status: "ACTIVE",
+          _id: newRmId,
+          _id: { $in: scopeIds.rmIds },
+        }).session(session);
+
+        if (!newRm) {
+          throw new Error("Selected replacement RM not found or is inactive under your hierarchy");
+        }
+
+        transferStats = await reassignRmWorkload({
+          oldRmId: rmId,
+          newRmId,
+          session,
+        });
+
+        await User.findByIdAndUpdate(
+          rmId,
+          { status: "SUSPENDED", deletedAt: new Date() },
+          { new: true, session }
+        );
+
+        const reassignmentAudit = buildReassignmentAudit({
+          changedBy: asmId,
+          oldUserId: rmId,
+          newUserId: newRmId,
+          action: "asm_rm_deactivate",
+        });
+        await persistReassignmentAudit(reassignmentAudit, session);
+      });
+
+      return res.json({
+        message: "RM deactivated successfully and all partners, customers, and open applications have been transferred",
+        deactivatedRmId: rmId,
+        newRmId,
+        transferStats,
+      });
+    } catch (err) {
+      console.error("ASM RM Deactivate error:", err);
+      return res.status(err.status || 400).json({ message: err.message || "Failed to deactivate RM" });
+    } finally {
+      session.endSession();
+    }
+  }
+);
+
+// POST /api/asm/rsm-deactivate (Safe RSM deactivation with atomic handover of subordinate RMs and applications)
+router.post(
+  "/rsm-deactivate",
+  auth,
+  requireRole(ROLES.ASM),
+  async (req, res) => {
+    const session = await mongoose.startSession();
+    try {
+      const rsmId = req.body?.rsmId || req.body?.oldRsmId;
+      const newRsmId = req.body?.newRsmId;
+
+      if (!rsmId || !newRsmId) {
+        return res.status(400).json({ message: "Both rsmId and newRsmId are required" });
+      }
+
+      const asmId = req.user.sub;
+
+      let transferStats;
+
+      await session.withTransaction(async () => {
+        const oldRsm = await User.findOne({
+          _id: rsmId,
+          role: ROLES.RSM,
+          asmId,
+        }).session(session);
+
+        if (!oldRsm) {
+          throw new Error("RSM not found under this ASM");
+        }
+
+        const newRsm = await User.findOne({
+          _id: newRsmId,
+          role: ROLES.RSM,
+          status: "ACTIVE",
+          asmId,
+        }).session(session);
+
+        if (!newRsm) {
+          throw new Error("Selected replacement RSM not found or is inactive under your ASM");
+        }
+
+        if (oldRsm.rsmType && newRsm.rsmType && oldRsm.rsmType !== newRsm.rsmType) {
+          throw new Error(`Cannot reassign ${oldRsm.rsmType} RSM to a ${newRsm.rsmType} RSM. Replacement must have the same loan specialty.`);
+        }
+
+        transferStats = await reassignRsmWorkload({
+          oldRsmId: rsmId,
+          newRsmId,
+          session,
+        });
+
+        await User.findByIdAndUpdate(
+          rsmId,
+          { status: "SUSPENDED", deletedAt: new Date() },
+          { new: true, session }
+        );
+
+        const reassignmentAudit = buildReassignmentAudit({
+          changedBy: asmId,
+          oldUserId: rsmId,
+          newUserId: newRsmId,
+          action: "asm_rsm_deactivate",
+        });
+        await persistReassignmentAudit(reassignmentAudit, session);
+      });
+
+      return res.json({
+        message: "RSM deactivated successfully and all reporting RMs and applications have been safely transferred",
+        deactivatedRsmId: rsmId,
+        newRsmId,
+        transferStats,
+      });
+    } catch (err) {
+      console.error("ASM RSM Deactivate error:", err);
+      return res.status(err.status || 400).json({ message: err.message || "Failed to deactivate RSM" });
+    } finally {
+      session.endSession();
+    }
+  }
+);
+
 export default router;
+

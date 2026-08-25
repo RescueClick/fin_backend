@@ -1176,18 +1176,18 @@ router.post(
           .status(404)
           .json({ message: "Application not found under this RM" });
 
-      // ✅ CRITICAL: If application has rsmId set (transferred to RSM), RM CANNOT change status at all
-      // Once DOC_COMPLETE is set and rsmId is assigned, the application belongs to RSM
-      if (app.rsmId) {
+      // ✅ If application is past DOC_COMPLETE stage (handled by RSM), RM CANNOT change status
+      const isPastDocComplete = !["DRAFT", "SUBMITTED", "DOC_INCOMPLETE", "DOC_COMPLETE"].includes(app.status);
+      if (isPastDocComplete) {
         return res.status(403).json({
-          message: "This application has been transferred to RSM and can no longer be modified by RM. Once documents are complete, only RSM can handle status changes."
+          message: "This application has been transferred to RSM and can no longer be modified by RM. Once documents are complete, further stage transitions are handled by RSM/ASM."
         });
       }
 
-      // ✅ Also prevent changing FROM DOC_COMPLETE if somehow rsmId wasn't set (shouldn't happen, but safety check)
-      if (app.status === "DOC_COMPLETE" && to !== "DOC_COMPLETE") {
+      // If application is at DOC_COMPLETE, RM can only revert to DOC_INCOMPLETE if document changes are needed
+      if (app.status === "DOC_COMPLETE" && to !== "DOC_INCOMPLETE" && to !== "DOC_COMPLETE") {
         return res.status(403).json({
-          message: "Cannot change status from DOC_COMPLETE. Once documents are complete, the application is transferred to RSM for processing."
+          message: "Cannot change status from DOC_COMPLETE. Once documents are complete, the application is transferred to RSM for processing. You may only revert to DOC_INCOMPLETE if needed."
         });
       }
 
@@ -2525,19 +2525,14 @@ router.post(
         });
       }
 
-      if (application.rsmId) {
+      const isPastDocComplete = !["DRAFT", "SUBMITTED", "DOC_INCOMPLETE"].includes(application.status);
+      if (isPastDocComplete) {
         await deleteS3ObjectsForUploadedFiles([req.file]);
         return res.status(403).json({
           message:
-            "This application has been transferred to RSM and can no longer be modified by RM.",
-        });
-      }
-
-      if (application.status === "DOC_COMPLETE") {
-        await deleteS3ObjectsForUploadedFiles([req.file]);
-        return res.status(403).json({
-          message:
-            "Cannot upload documents while status is DOC_COMPLETE. Set DOC_INCOMPLETE first if documents need updating.",
+            application.status === "DOC_COMPLETE"
+              ? "Cannot upload documents while status is DOC_COMPLETE. Set DOC_INCOMPLETE first if documents need updating."
+              : "This application has been transferred to RSM and can no longer be modified by RM.",
         });
       }
 
@@ -2668,18 +2663,13 @@ router.put(
         });
       }
 
-      // ✅ CRITICAL: If application has rsmId set (transferred to RSM), RM CANNOT modify documents
-      // Once DOC_COMPLETE is set and rsmId is assigned, the application belongs to RSM
-      if (app.rsmId) {
+      const isPastDocComplete = !["DRAFT", "SUBMITTED", "DOC_INCOMPLETE"].includes(app.status);
+      if (isPastDocComplete) {
         return res.status(403).json({
-          message: "This application has been transferred to RSM and can no longer be modified by RM. Once documents are complete, only RSM can handle document changes."
-        });
-      }
-
-      // ✅ Also prevent modifying documents if status is DOC_COMPLETE (even if rsmId wasn't set - safety check)
-      if (app.status === "DOC_COMPLETE") {
-        return res.status(403).json({
-          message: "Cannot modify documents for applications with DOC_COMPLETE status. Once documents are complete, the application is transferred to RSM for processing."
+          message:
+            app.status === "DOC_COMPLETE"
+              ? "Cannot modify documents for applications with DOC_COMPLETE status. If documents need updating, set status to DOC_INCOMPLETE first."
+              : "This application has been transferred to RSM and can no longer be modified by RM.",
         });
       }
 
@@ -2877,18 +2867,13 @@ router.post(
         });
       }
 
-      // ✅ CRITICAL: If application has rsmId set (transferred to RSM), RM CANNOT modify documents
-      // Once DOC_COMPLETE is set and rsmId is assigned, the application belongs to RSM
-      if (app.rsmId) {
+      const isPastDocComplete = !["DRAFT", "SUBMITTED", "DOC_INCOMPLETE"].includes(app.status);
+      if (isPastDocComplete) {
         return res.status(403).json({
-          message: "This application has been transferred to RSM and can no longer be modified by RM. Once documents are complete, only RSM can handle document changes."
-        });
-      }
-
-      // ✅ Also prevent modifying documents if status is DOC_COMPLETE (even if rsmId wasn't set - safety check)
-      if (app.status === "DOC_COMPLETE") {
-        return res.status(403).json({
-          message: "Cannot modify documents for applications with DOC_COMPLETE status. Once documents are complete, the application is transferred to RSM for processing."
+          message:
+            app.status === "DOC_COMPLETE"
+              ? "Cannot modify documents for applications with DOC_COMPLETE status. If documents need updating, set status to DOC_INCOMPLETE first."
+              : "This application has been transferred to RSM and can no longer be modified by RM.",
         });
       }
 

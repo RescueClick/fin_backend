@@ -3972,44 +3972,57 @@ router.patch(
       let deletionOutcome = null;
 
       if (status === "COMPLETED") {
-        const partner = await User.findById(requestDoc.user);
-        if (!partner) {
-          return res.status(404).json({ message: "Partner not found for this request" });
-        }
-        if (partner.role !== ROLES.PARTNER) {
-          return res.status(400).json({ message: "Delete flow currently supports Partner only" });
+        const user = await User.findById(requestDoc.user);
+        if (!user) {
+          return res.status(404).json({ message: "User not found for this request" });
         }
 
         // Always do soft-delete first (deactivate account access).
-        partner.status = "SUSPENDED";
+        user.status = "SUSPENDED";
 
-        const hardDeleteCheck = await evaluatePartnerHardDeleteEligibility(partner._id);
-        if (hardDeleteCheck.eligible) {
-          const deletedTag = `deleted_${partner._id}_${Date.now()}`;
-          partner.firstName = "Deleted";
-          partner.lastName = "User";
-          partner.middleName = "";
-          partner.email = `${deletedTag}@deleted.local`;
-          partner.phone = buildSoftDeletedPhone();
-          partner.address = "";
-          partner.region = "";
-          partner.pincode = "";
-          partner.landmark = "";
-          partner.docs = [];
-          partner.deletedAt = new Date();
+        if (user.role === ROLES.PARTNER) {
+          const hardDeleteCheck = await evaluatePartnerHardDeleteEligibility(user._id);
+          if (hardDeleteCheck.eligible) {
+            const deletedTag = `deleted_${user._id}_${Date.now()}`;
+            user.firstName = "Deleted";
+            user.lastName = "Partner";
+            user.middleName = "";
+            user.email = `${deletedTag}@deleted.local`;
+            user.phone = buildSoftDeletedPhone();
+            user.address = "";
+            user.region = "";
+            user.pincode = "";
+            user.landmark = "";
+            user.docs = [];
+            user.deletedAt = new Date();
 
-          deletionOutcome = {
-            mode: "HARD_DELETE_SCHEDULED",
-            ...hardDeleteCheck,
-          };
+            deletionOutcome = {
+              mode: "HARD_DELETE_SCHEDULED",
+              ...hardDeleteCheck,
+            };
+          } else {
+            deletionOutcome = {
+              mode: "SOFT_DELETE_ONLY",
+              ...hardDeleteCheck,
+            };
+          }
         } else {
+          // For Customers / other roles: anonymize credentials while retaining financial audit records
+          const deletedTag = `deleted_cust_${user._id}_${Date.now()}`;
+          user.firstName = "Deleted";
+          user.lastName = "Customer";
+          user.middleName = "";
+          user.email = `${deletedTag}@deleted.local`;
+          user.phone = buildSoftDeletedPhone();
+          user.deletedAt = new Date();
           deletionOutcome = {
             mode: "SOFT_DELETE_ONLY",
-            ...hardDeleteCheck,
+            eligible: true,
+            role: user.role,
           };
         }
 
-        await partner.save();
+        await user.save();
       }
 
       requestDoc.status = status;

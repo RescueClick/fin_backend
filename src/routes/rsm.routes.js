@@ -409,19 +409,20 @@ router.post(
       if (!to)
         return res.status(400).json({ message: "Target status 'to' required" });
 
-      // ✅ RSM can ONLY handle processing statuses (including LOGIN)
+      // ✅ RSM can handle processing statuses as well as unblocking/reverting to DOC_INCOMPLETE for RM
       const RSM_ALLOWED_STATUSES = [
         "LOGIN",
         "UNDER_REVIEW",
         "APPROVED",
         "AGREEMENT",
         "REJECTED",
-        "DISBURSED"
+        "DISBURSED",
+        "DOC_INCOMPLETE"
       ];
 
       if (!RSM_ALLOWED_STATUSES.includes(to)) {
         return res.status(403).json({
-          message: `RSM can only transition to processing statuses: ${RSM_ALLOWED_STATUSES.join(", ")}. Document statuses are handled by RM.`
+          message: `RSM can only transition to statuses: ${RSM_ALLOWED_STATUSES.join(", ")}.`
         });
       }
 
@@ -447,12 +448,13 @@ router.post(
       // Validate status transition is allowed from current status
       const currentStatus = app.status;
       const allowedTransitions = {
-        // After RM marks DOC_COMPLETE, RSM must first LOGIN, then move to UNDER_REVIEW
-        DOC_COMPLETE: ["LOGIN"],
-        LOGIN: ["UNDER_REVIEW"],
-        UNDER_REVIEW: ["APPROVED", "REJECTED"],
-        APPROVED: ["AGREEMENT", "DISBURSED"],
-        AGREEMENT: ["DISBURSED"],
+        // After RM marks DOC_COMPLETE, RSM can move to LOGIN or send back to DOC_INCOMPLETE
+        DOC_COMPLETE: ["LOGIN", "DOC_INCOMPLETE"],
+        LOGIN: ["UNDER_REVIEW", "DOC_INCOMPLETE"],
+        UNDER_REVIEW: ["APPROVED", "REJECTED", "DOC_INCOMPLETE"],
+        APPROVED: ["AGREEMENT", "DISBURSED", "DOC_INCOMPLETE"],
+        AGREEMENT: ["DISBURSED", "DOC_INCOMPLETE"],
+        REJECTED: ["DOC_INCOMPLETE"],
       };
 
       if (!allowedTransitions[currentStatus]?.includes(to)) {

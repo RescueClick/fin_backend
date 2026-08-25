@@ -13,6 +13,8 @@ import {
   normalizeDocTypeForLimits,
 } from "../utils/docUploadLimits.js";
 import { findCustomerApplyBlocker } from "../utils/loanReapplyPolicy.js";
+import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
+import { sendDeleteAccountRequestEmail } from "../utils/emailService.js";
 
 const router = Router();
 /** Partner views own applications (with status & docs) */
@@ -262,23 +264,11 @@ router.post(
       }
 
       // Resolve RSM and ASM based on RM & loanType
-      let assignedRsmId = null;
       let assignedAsmId = req.user.role === ROLES.PARTNER ? (partner?.asmId || null) : null;
       if (appRmId) {
-        const rmDoc = await User.findById(appRmId).select("personalRsmId businessHomeRsmId asmId").lean();
-        if (rmDoc) {
-          if (loanType === "PERSONAL") {
-            assignedRsmId = rmDoc.personalRsmId || null;
-          } else {
-            assignedRsmId = rmDoc.businessHomeRsmId || null;
-          }
-          if (assignedRsmId && !assignedAsmId) {
-            const rsmDoc = await User.findById(assignedRsmId).select("asmId").lean();
-            if (rsmDoc?.asmId) assignedAsmId = rsmDoc.asmId;
-          }
-          if (!assignedAsmId && rmDoc.asmId) {
-            assignedAsmId = rmDoc.asmId;
-          }
+        const rmDoc = await User.findById(appRmId).select("asmId").lean();
+        if (rmDoc?.asmId && !assignedAsmId) {
+          assignedAsmId = rmDoc.asmId;
         }
       }
 
@@ -296,7 +286,7 @@ router.post(
             appNo,
             partnerId: appPartnerId || null,
             rmId: appRmId || null,
-            rsmId: assignedRsmId || null,
+            rsmId: null,
             asmId: assignedAsmId || null,
             customerId: customerUser._id,
             loanType,
@@ -318,7 +308,7 @@ router.post(
                 : undefined,
               partnerId: appPartnerId || null,
               rmId: appRmId || null,
-              rsmId: assignedRsmId || null,
+              rsmId: null,
               asmId: assignedAsmId || null,
             },
             docs,
@@ -679,6 +669,144 @@ router.patch(
     } catch (err) {
       console.error(err);
       res.status(500).json({ message: "Something went wrong" });
+    }
+  }
+);
+
+// POST /api/customer/delete-account-request (Customer Account Deletion Request with Active Loan Protection)
+router.post(
+  "/delete-account-request",
+  auth,
+  requireRole(ROLES.CUSTOMER, "USER"),
+  async (req, res) => {
+    try {
+      const customerId = req.user.sub;
+      const { reason } = req.body || {};
+
+      const customer = await User.findById(customerId).lean();
+      if (!customer) {
+        return res.status(404).json({ message: "Customer not found" });
+      }
+
+      // Check if customer has any active in-flight loans
+      const activeLoanStatuses = [
+        "SUBMITTED",
+        "DOC_INCOMPLETE",
+        "DOC_COMPLETE",
+        "LOGIN",
+        "UNDER_REVIEW",
+        "APPROVED",
+        "AGREEMENT",
+        "DISBURSED",
+      ];
+
+      const activeApps = await Application.find({
+        customerId,
+        status: { $in: activeLoanStatuses },
+        $or: [{ deletedAt: null }, { deletedAt: { $gt: new Date() } }],
+      }).lean();
+
+      if (activeApps.length > 0) {
+        const activeAppNos = activeApps.map((a) => a.appNo || a._id).join(", ");
+        return res.status(400).json({
+          message: `Cannot request account deletion while you have active loan applications in progress (${activeAppNos}). Please contact support for assistance.`,
+          activeApplicationsCount: activeApps.length,
+        });
+      }
+
+      // Check for duplicate pending requests
+      const existing = await DeleteAccountRequest.findOne({
+        user: customerId,
+        status: "PENDING",
+      });
+
+      if (existing) {
+        return res.status(400).json({
+          message: "You already have a pending delete account request.",
+        });
+      }
+
+      const requestDoc = await DeleteAccountRequest.create({
+        user: customerId,
+        role: customer.role || ROLES.CUSTOMER,
+        reason: reason || "",
+        status: "PENDING",
+        source: req.headers["x-client-source"] === "mobile" ? "MOBILE" : "WEB",
+      });
+
+      // Fire-and-forget email to admin/support
+      setImmediate(async () => {
+        try {
+          await sendDeleteAccountRequestEmail(
+            customer,
+            reason || "",
+            requestDoc.source
+          );
+        } catch (err) {
+          console.error("Failed to send customer delete account request email:", err.message);
+        }
+      });
+
+      return res.status(201).json({
+        message:
+          "Delete account request submitted successfully. Our team will review and process it shortly.",
+        requestId: requestDoc._id,
+      });
+    } catch (err) {
+      console.error("Error creating customer delete account request:", err);
+      return res.status(500).json({
+        message: "Server error while creating delete account request",
+      });
+    }
+  }
+);
+
+// GET /api/customer/delete-account-request/status
+router.get(
+  "/delete-account-request/status",
+  auth,
+  requireRole(ROLES.CUSTOMER, "USER"),
+  async (req, res) => {
+    try {
+      const customerId = req.user.sub;
+
+      const pending = await DeleteAccountRequest.findOne({
+        user: customerId,
+        status: "PENDING",
+      }).sort({ createdAt: -1 });
+
+      if (pending) {
+        return res.json({
+          hasPendingRequest: true,
+          status: "PENDING",
+          requestId: pending._id,
+          createdAt: pending.createdAt,
+        });
+      }
+
+      const latest = await DeleteAccountRequest.findOne({ user: customerId })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      if (!latest) {
+        return res.json({
+          hasPendingRequest: false,
+          status: null,
+        });
+      }
+
+      return res.json({
+        hasPendingRequest: false,
+        status: latest.status,
+        requestId: latest._id,
+        createdAt: latest.createdAt,
+        processedAt: latest.processedAt,
+      });
+    } catch (err) {
+      console.error("Error fetching customer delete account status:", err);
+      return res.status(500).json({
+        message: "Server error while fetching delete account status",
+      });
     }
   }
 );
