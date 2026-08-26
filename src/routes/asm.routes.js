@@ -9,8 +9,10 @@ import { Payout } from "../models/Payout.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
+import { Config } from "../models/Config.js";
 import mongoose from "mongoose";
 import { Application } from "../models/Application.js";
+import { getActiveIncentiveSlabs, calculatePartnerMilestone } from "../utils/incentiveSlabCalculator.js";
 import { sendMail } from "../utils/sendMail.js";
 import { sendUserAccountEmail } from "../utils/emailService.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
@@ -1759,6 +1761,80 @@ router.post("/payouts/create", auth, requireRole(ROLES.ASM), async (req, res) =>
 
 // ==================== PAYOUT MANAGEMENT - PENDING/DONE (ASM) ====================
 
+// Helper to format payout application record for ASM tables
+function formatAsmPayoutApplicationRow(app, payout, isDoneEndpoint = false) {
+  const custFirst = (app.customerId?.firstName || app.customer?.firstName || "").trim();
+  const custLast = (app.customerId?.lastName || app.customer?.lastName || "").trim();
+  const customerName = `${custFirst} ${custLast}`.trim() || app.customer?.name || "Customer";
+  const contact = app.customerId?.phone || app.customer?.phone || null;
+  const email = app.customerId?.email || app.customer?.email || null;
+  const customerEmployeeId = app.customerId?.employeeId || null;
+
+  const partnerFirst = (app.partnerId?.firstName || "").trim();
+  const partnerLast = (app.partnerId?.lastName || "").trim();
+  const partnerName = `${partnerFirst} ${partnerLast}`.trim() || "Partner";
+  const partnerEmployeeId = app.partnerId?.employeeId || null;
+  const partnerPhone = app.partnerId?.phone || null;
+  const partnerEmail = app.partnerId?.email || null;
+  const partnerBankName = app.partnerId?.bankName || "";
+  const partnerAccountNumber = app.partnerId?.accountNumber || "";
+  const partnerIfscCode = app.partnerId?.ifscCode || "";
+  const partnerAccountHolderName =
+    app.partnerId?.accountHolderName || partnerName;
+
+  const disbursedAt = getDisbursedAt(app);
+  const payoutAmount = payout?.amount != null ? Number(payout.amount) : 0;
+  const approvedAmount = app.approvedLoanAmount != null ? Number(app.approvedLoanAmount) : null;
+  const payoutPercentage =
+    payoutAmount > 0 && approvedAmount && approvedAmount > 0
+      ? Number(((payoutAmount / approvedAmount) * 100).toFixed(2))
+      : null;
+
+  return {
+    applicationId: app._id,
+    appNo: app.appNo || (app._id ? `TLF${app._id.toString().slice(-4).toUpperCase()}` : ""),
+    customerId: app.customerId?._id || app.customer?._id || app._id,
+    customerEmployeeId,
+    customerName,
+    contact,
+    email,
+    loanType: app.loanType,
+    requestedAmount: app.customer?.loanAmount || app.requestedAmount || null,
+    approvedAmount,
+    status: app.status,
+    payOutStatus: payout?.payOutStatus || (isDoneEndpoint ? "DONE" : "PENDING"),
+    payoutAmount,
+    payoutPercentage,
+    payoutNote: payout?.note || "",
+    payoutId: payout?._id || null,
+    partnerId: app.partnerId?._id || null,
+    partnerName,
+    partnerPhone,
+    partnerEmail,
+    partnerEmployeeId,
+    partnerBankName,
+    partnerAccountNumber,
+    partnerIfscCode,
+    partnerAccountHolderName,
+    partner: {
+      partnerId: app.partnerId?._id,
+      employeeId: partnerEmployeeId,
+      name: partnerName,
+      firstName: partnerFirst,
+      lastName: partnerLast,
+      email: partnerEmail,
+      phone: partnerPhone,
+      bankName: partnerBankName,
+      accountNumber: partnerAccountNumber,
+      ifscCode: partnerIfscCode,
+      accountHolderName: partnerAccountHolderName,
+    },
+    createdAt: app.createdAt,
+    disbursedAt,
+    updatedAt: disbursedAt || app.updatedAt,
+  };
+}
+
 // GET /api/asm/customers/pending-payouts
 // ASM gets pending payout customers (disbursed loans without DONE payout)
 router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
@@ -1781,12 +1857,15 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
       ],
     })
       .populate("customerId", "employeeId firstName lastName email phone")
-      .populate("partnerId", "firstName lastName email phone")
+      .populate(
+        "partnerId",
+        "employeeId firstName lastName email phone bankName accountNumber ifscCode accountHolderName"
+      )
       .lean();
 
     const appIds = applications.map((app) => app._id);
     const payouts = await Payout.find({ application: { $in: appIds } })
-      .select("application amount payOutStatus")
+      .select("application amount payOutStatus note")
       .lean();
 
     const doneAppIds = new Set(
@@ -1801,36 +1880,9 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
 
     const customers = disbursedApps.map((app) => {
       const payout = payouts.find(
-        (p) => p.application.toString() === app._id.toString()
+        (p) => p.application?.toString() === app._id.toString()
       );
-      const disbursedAt = getDisbursedAt(app);
-
-      return {
-        customerId: app.customerId?._id,
-        customerEmployeeId: app.customerId?.employeeId || null,
-        customerName: `${app.customerId?.firstName ?? ""} ${app.customerId?.lastName ?? ""
-          }`.trim(),
-        contact: app.customerId?.phone || null,
-        email: app.customerId?.email || null,
-        loanType: app.loanType,
-        requestedAmount: app.customer?.loanAmount || null,
-        approvedAmount: app.approvedLoanAmount || null,
-        status: app.status,
-        payOutStatus: payout?.payOutStatus || "PENDING",
-        payoutAmount: payout?.amount || 0,
-        partner: {
-          partnerId: app.partnerId?._id,
-          name: `${app.partnerId?.firstName ?? ""} ${app.partnerId?.lastName ?? ""
-            }`.trim(),
-          email: app.partnerId?.email,
-          phone: app.partnerId?.phone,
-        },
-        applicationId: app._id,
-        createdAt: app.createdAt,
-        disbursedAt,
-        // So month filter can match disbursement month, not only create month
-        updatedAt: disbursedAt || app.updatedAt,
-      };
+      return formatAsmPayoutApplicationRow(app, payout, false);
     });
 
     return res.json(customers);
@@ -1863,7 +1915,10 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.ASM), async (req, 
       ],
     })
       .populate("customerId", "employeeId firstName lastName email phone")
-      .populate("partnerId", "firstName lastName email phone")
+      .populate(
+        "partnerId",
+        "employeeId firstName lastName email phone bankName accountNumber ifscCode accountHolderName"
+      )
       .lean();
 
     const appIds = applications.map((app) => app._id);
@@ -1872,44 +1927,19 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.ASM), async (req, 
       application: { $in: appIds },
       payOutStatus: "DONE",
     })
-      .select("application amount payOutStatus")
+      .select("application amount payOutStatus note")
       .lean();
 
     const doneMap = {};
     donePayouts.forEach((p) => {
-      doneMap[p.application.toString()] = p;
+      doneMap[p.application?.toString()] = p;
     });
 
     const customers = applications
       .filter((app) => doneMap[app._id.toString()])
       .map((app) => {
         const payout = doneMap[app._id.toString()];
-        const disbursedAt = getDisbursedAt(app);
-        return {
-          customerId: app.customerId?._id,
-          customerEmployeeId: app.customerId?.employeeId || null,
-          customerName: `${app.customerId?.firstName ?? ""} ${app.customerId?.lastName ?? ""
-            }`.trim(),
-          contact: app.customerId?.phone || null,
-          email: app.customerId?.email || null,
-          loanType: app.loanType,
-          requestedAmount: app.customer?.loanAmount || null,
-          approvedAmount: app.approvedLoanAmount || null,
-          status: app.status,
-          payOutStatus: payout?.payOutStatus || "DONE",
-          payoutAmount: payout?.amount || 0,
-          partner: {
-            partnerId: app.partnerId?._id,
-            name: `${app.partnerId?.firstName ?? ""} ${app.partnerId?.lastName ?? ""
-              }`.trim(),
-            email: app.partnerId?.email,
-            phone: app.partnerId?.phone,
-          },
-          applicationId: app._id,
-          createdAt: app.createdAt,
-          disbursedAt,
-          updatedAt: disbursedAt || app.updatedAt,
-        };
+        return formatAsmPayoutApplicationRow(app, payout, true);
       });
 
     return res.json(customers);
@@ -2018,8 +2048,14 @@ router.get("/customer/:customerId/partners-payout", auth, requireRole(ROLES.ASM)
 // ASM creates/updates payout for disbursed application
 router.post("/set-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
-    const { applicationId, partnerId, payoutPercentage, note, payOutStatus } =
-      req.body;
+    const {
+      applicationId,
+      partnerId: inputPartnerId,
+      payoutPercentage,
+      payoutAmount: directPayoutAmount,
+      note,
+      payOutStatus,
+    } = req.body;
 
     // Validate ObjectId
     if (!mongoose.Types.ObjectId.isValid(applicationId)) {
@@ -2063,6 +2099,8 @@ router.post("/set-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
       return res.status(404).json({ message: "Application not found or not assigned to this ASM" });
     }
 
+    const partnerId = inputPartnerId || application.partnerId?.toString();
+
     // Ensure partner matches
     if (application.partnerId && application.partnerId.toString() !== partnerId) {
       return res
@@ -2070,10 +2108,12 @@ router.post("/set-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
         .json({ message: "Application does not belong to this partner" });
     }
 
-    // Calculate payout amount
+    // Calculate payout amount (supports direct amount or percentage)
     let payoutAmount = 0;
-    if (payoutPercentage) {
-      payoutAmount = (application.approvedLoanAmount * payoutPercentage) / 100;
+    if (directPayoutAmount != null && !isNaN(Number(directPayoutAmount))) {
+      payoutAmount = Number(directPayoutAmount);
+    } else if (payoutPercentage != null && !isNaN(Number(payoutPercentage))) {
+      payoutAmount = (Number(application.approvedLoanAmount || 0) * Number(payoutPercentage)) / 100;
     }
 
     // Check if payout already exists
@@ -2125,153 +2165,179 @@ router.post("/set-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
 // ==================== INCENTIVE MANAGEMENT (ASM) ====================
 
 // GET /api/asm/incentives
-// ASM gets incentive data based on target achievements
+// ASM gets milestone incentive data for partners in their hierarchy
 router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
     const asmId = req.user.sub;
-    const { year, month } = req.query;
+    const { year, month, status } = req.query;
 
-    const { partnerIds } = await getAsmScopeIds(asmId);
-    const partners = await User.find({
-      _id: { $in: partnerIds },
-      role: ROLES.PARTNER,
+    // Get all RSMs under this ASM
+    const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
+    const rsmIds = rsms.map((rsm) => rsm._id);
+
+    // Get all RMs under these RSMs
+    const rms = await User.find({
+      role: ROLES.RM,
+      $or: [
+        { personalRsmId: { $in: rsmIds } },
+        { businessHomeRsmId: { $in: rsmIds } }
+      ]
     }).lean();
+    const rmIds = rms.map((rm) => rm._id);
+
+    // Get all partner IDs from applications assigned to this ASM hierarchy
+    const appPartnerIds = await Application.distinct("partnerId", {
+      $or: [
+        { rsmId: { $in: rsmIds } },
+        { rmId: { $in: rmIds } },
+      ],
+      partnerId: { $exists: true, $ne: null },
+    });
+
+    // Get all partners under these RMs or directly under ASM or with applications
+    const partners = await User.find({
+      $or: [
+        { rmId: { $in: rmIds } },
+        { asmId: asmId },
+        { _id: { $in: appPartnerIds } },
+      ],
+      role: { $in: [ROLES.PARTNER, "PARTNER", "partner"] },
+    })
+      .select(
+        "firstName lastName employeeId email phone bankName accountNumber ifscCode accountHolderName asmId"
+      )
+      .lean();
+
+    if (!partners.length) {
+      return res.json([]);
+    }
+
+    const partnerIds = partners.map((p) => p._id);
 
     // Build date filter
     const currentDate = new Date();
-    const targetMonth = month ? Number(month) : currentDate.getMonth() + 1;
-    const targetYear = year ? Number(year) : currentDate.getFullYear();
+    const isAllTime = year === "all" && month === "all";
+    const targetYear = (year && year !== "all") ? Number(year) : (isAllTime ? null : currentDate.getFullYear());
+    const targetMonth = (month && month !== "all") ? Number(month) : (isAllTime ? null : currentDate.getMonth() + 1);
 
-    const startDate = new Date(targetYear, targetMonth - 1, 1);
-    const endDate = new Date(targetYear, targetMonth, 1);
+    let startDate = null;
+    let endDate = null;
 
-    // Get target achievements for partners (for the specific month/year)
-    const targets = await Target.find({
-      assignedTo: { $in: partnerIds },
-      role: ROLES.PARTNER,
-      month: targetMonth,
-      year: targetYear,
+    if (targetYear && targetMonth) {
+      startDate = new Date(targetYear, targetMonth - 1, 1, 0, 0, 0, 0);
+      endDate = new Date(targetYear, targetMonth, 1, 0, 0, 0, 0);
+    } else if (targetYear) {
+      startDate = new Date(targetYear, 0, 1, 0, 0, 0, 0);
+      endDate = new Date(targetYear + 1, 0, 1, 0, 0, 0, 0);
+    }
+
+    // Get active slabs
+    const activeSlabs = await getActiveIncentiveSlabs();
+
+    // Fetch all disbursed applications for these partners
+    const disbursedApps = await Application.find({
+      partnerId: { $in: partnerIds },
+      status: "DISBURSED",
+      isDeleted: { $ne: true },
     }).lean();
 
-    // Load apps by partner — period uses createdAt / disbursedAt (stable under RM moves)
-    const relevantApps = await Application.find({
-      $and: [
-        activeApplicationsFilter({
-          partnerId: { $in: partnerIds },
-          status: { $ne: "DRAFT" },
-        }),
-      ],
-    }).lean();
+    const volumeByPartner = new Map();
+    const countByPartner = new Map();
 
-    // Calculate achievements using Hybrid Target Model (for display only)
-    const incentiveData = partners.map((partner) => {
-      const partnerTargets = targets.filter(
-        (t) => t.assignedTo.toString() === partner._id.toString()
-      );
-      const partnerAppsAll = relevantApps.filter(
-        (app) => app.partnerId.toString() === partner._id.toString()
-      );
-
-      // Files in month = created in month (not updatedAt — RM move was bumping counts)
-      const partnerApps = partnerAppsAll.filter((app) =>
-        isDateInRange(new Date(app.createdAt), startDate, endDate)
-      );
-
-      const target = partnerTargets[0] || {};
-      const fileCountTarget = target.fileCountTarget || 4;
-      const disbursementTarget = target.disbursementTarget || target.targetValue || 2000000;
-
-      const achievedFileCount = partnerApps.length;
-      const achievedDisbursement = partnerAppsAll
-        .filter((app) => {
-          if (app.status !== "DISBURSED") return false;
-          return isDateInRange(getDisbursedAt(app), startDate, endDate);
-        })
-        .reduce(
-          (sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0),
-          0
-        );
-
-      const fileTargetMet = achievedFileCount >= fileCountTarget;
-      const disbursementTargetMet = achievedDisbursement >= disbursementTarget;
-      const targetAchieved = fileTargetMet && disbursementTargetMet;
-
-      const fileTargetExceeded = achievedFileCount > fileCountTarget;
-      const disbursementTargetExceeded = achievedDisbursement > disbursementTarget;
-      const targetExceeded = disbursementTargetExceeded;
-
-      const fileAchievementPercentage = fileCountTarget > 0
-        ? (achievedFileCount / fileCountTarget) * 100
-        : 0;
-      const disbursementAchievementPercentage = disbursementTarget > 0
-        ? (achievedDisbursement / disbursementTarget) * 100
-        : 0;
-
-      const overallAchievementPercentage = Math.min(
-        fileAchievementPercentage,
-        disbursementAchievementPercentage
-      );
-
-      return {
-        partnerId: partner._id,
-        partnerName: `${partner.firstName} ${partner.lastName}`,
-        partnerEmployeeId: partner.employeeId,
-        totalTarget: disbursementTarget,
-        totalAchieved: achievedDisbursement,
-        achievementPercentage: overallAchievementPercentage.toFixed(2),
-        disbursedCount: achievedFileCount,
-        fileCountTarget,
-        achievedFileCount,
-        disbursementTarget,
-        achievedDisbursement,
-        fileTargetMet,
-        disbursementTargetMet,
-        targetAchieved,
-        fileTargetExceeded: fileTargetExceeded || false,
-        disbursementTargetExceeded: disbursementTargetExceeded || false,
-        targetExceeded: targetExceeded || false,
-        fileAchievementPercentage: fileAchievementPercentage.toFixed(2),
-        disbursementAchievementPercentage: disbursementAchievementPercentage.toFixed(2),
-        eligibleForIncentive: targetExceeded && targetAchieved,
-        incentiveLevel: "NONE",
-        incentiveAmount: 0,
-      };
+    disbursedApps.forEach((app) => {
+      const dDate = getDisbursedAt(app);
+      if (!startDate || !endDate || isDateInRange(dDate, startDate, endDate)) {
+        const pId = app.partnerId.toString();
+        const amt = parseFloat(app.approvedLoanAmount) || 0;
+        volumeByPartner.set(pId, (volumeByPartner.get(pId) || 0) + amt);
+        countByPartner.set(pId, (countByPartner.get(pId) || 0) + 1);
+      }
     });
 
-    // Attach Incentive records (PENDING / PAID) for this period
-    const incentiveDocs = await Incentive.find({
+    // Attach existing Incentive records
+    const incentiveQuery = {
       partnerId: { $in: partnerIds },
-      month: targetMonth,
-      year: targetYear,
-    })
-      .select("partnerId amount status month year basis percentValue fixedValue notes")
-      .lean();
+    };
+    if (targetMonth) incentiveQuery.month = targetMonth;
+    if (targetYear) incentiveQuery.year = targetYear;
+
+    const incentiveDocs = await Incentive.find(incentiveQuery).lean();
 
     const docMap = new Map();
     incentiveDocs.forEach((inv) => {
       docMap.set(inv.partnerId.toString(), inv);
     });
 
-    const response = incentiveData.map((row) => {
-      const doc = docMap.get(row.partnerId.toString());
+    let response = partners.map((partner) => {
+      const pIdStr = partner._id.toString();
+      const monthlyDisbursed = volumeByPartner.get(pIdStr) || 0;
+      const disbursedCount = countByPartner.get(pIdStr) || 0;
+
+      const milestone = calculatePartnerMilestone(monthlyDisbursed, activeSlabs);
+      const doc = docMap.get(pIdStr);
+
+      const isPaid = doc?.status === "PAID";
+      const isEligible = milestone.isEligible;
+
+      const finalAmount = doc?.amount != null ? doc.amount : milestone.incentiveAmount;
+
+      const currentStatus = isPaid
+        ? "PAID"
+        : isEligible
+        ? "PENDING"
+        : "IN_PROGRESS";
+
       return {
-        ...row,
+        partnerId: partner._id,
+        partnerName: `${partner.firstName} ${partner.lastName || ""}`.trim(),
+        partnerEmployeeId: partner.employeeId,
+        partnerPhone: partner.phone,
+        partnerEmail: partner.email,
+        partnerBankName: partner.bankName || "—",
+        partnerAccountNumber: partner.accountNumber || "—",
+        partnerIfscCode: partner.ifscCode || "—",
+        partnerAccountHolderName:
+          partner.accountHolderName || `${partner.firstName} ${partner.lastName || ""}`.trim(),
+
+        month: targetMonth,
+        year: targetYear,
+        disbursedAmount: monthlyDisbursed,
+        totalAchieved: monthlyDisbursed,
+        achievedDisbursement: monthlyDisbursed,
+        disbursedCount,
+        achievedFileCount: disbursedCount,
+
+        achievedSlab: milestone.achievedSlab,
+        nextSlab: milestone.nextSlab,
+        tier: milestone.tier,
+        incentiveLevel: milestone.tier,
+        remainingToNextMilestone: milestone.remainingToNextMilestone,
+        progressPercent: milestone.progressPercent,
+        eligibleForIncentive: isEligible,
+
+        incentiveAmount: Math.round(finalAmount),
+        amount: Math.round(finalAmount),
         incentiveRecordId: doc?._id || null,
-        incentiveStatus: doc?.status || null,
-        proposedAmount: doc?.amount || 0,
-        basis: doc?.basis || null,
-        percentValue: doc?.percentValue || null,
-        fixedValue: doc?.fixedValue || null,
+        id: doc?._id || null,
+        incentiveStatus: currentStatus,
+        status: currentStatus,
+        incentivePaid: isPaid,
+        paidAt: doc?.paidAt || null,
         notes: doc?.notes || null,
-        incentivePaid: doc?.status === "PAID",
-        paidAmount: doc?.status === "PAID" ? doc.amount : 0,
+        utrNumber: doc?.notes || null,
       };
     });
 
+    if (status === "PAID") {
+      response = response.filter((r) => r.status === "PAID");
+    } else if (status === "PENDING" || status === "ELIGIBLE") {
+      response = response.filter((r) => r.status === "PENDING");
+    }
+
     res.json(response);
   } catch (error) {
-    console.error("Error fetching incentives:", error);
-    res.status(500).json({ message: "Server error" });
+    console.error("Error fetching ASM incentives:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
   }
 });
 
@@ -4231,7 +4297,10 @@ router.get(
       if (status && status !== "ALL") filter.status = status;
 
       const list = await WithdrawalRequest.find(filter)
-        .populate("partnerId", "firstName lastName email phone employeeId partnerCode")
+        .populate(
+          "partnerId",
+          "firstName lastName email phone employeeId partnerCode bankName accountNumber ifscCode accountHolderName"
+        )
         .sort({ createdAt: -1 })
         .lean();
 
@@ -4572,6 +4641,99 @@ router.post(
     }
   }
 );
+
+// PUT /api/asm/partner/:id - ASM update partner details (CRUD)
+router.put("/partner/:id", auth, requireRole(ROLES.ASM), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      firstName,
+      lastName,
+      phone,
+      email,
+      aadharNumber,
+      panNumber,
+      address,
+      officeAddress,
+      residenceAddress,
+      region,
+      city,
+      state,
+      pincode,
+    } = req.body;
+
+    const updateFields = {};
+    if (firstName !== undefined) updateFields.firstName = firstName;
+    if (lastName !== undefined) updateFields.lastName = lastName;
+    if (phone !== undefined) updateFields.phone = phone;
+    if (email !== undefined) updateFields.email = email;
+    if (aadharNumber !== undefined) updateFields.aadharNumber = aadharNumber;
+    if (panNumber !== undefined) updateFields.panNumber = panNumber;
+    if (address !== undefined) updateFields.address = address;
+    if (officeAddress !== undefined) updateFields.officeAddress = officeAddress;
+    if (residenceAddress !== undefined) updateFields.residenceAddress = residenceAddress;
+    if (region !== undefined) updateFields.region = region;
+    if (city !== undefined) updateFields.city = city;
+    if (state !== undefined) updateFields.state = state;
+    if (pincode !== undefined) updateFields.pincode = pincode;
+
+    const partner = await User.findByIdAndUpdate(id, updateFields, { new: true }).select("-password");
+    if (!partner) {
+      return res.status(404).json({ message: "Partner not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Partner details updated successfully",
+      partner,
+    });
+  } catch (error) {
+    console.error("ASM update partner error:", error);
+    return res.status(500).json({ message: error.message || "Failed to update partner details" });
+  }
+});
+
+// GET /api/asm/incentive-slabs
+// Fetch active milestone disbursement slabs for ASM
+router.get("/incentive-slabs", auth, requireRole(ROLES.ASM), async (req, res) => {
+  try {
+    const slabs = await getActiveIncentiveSlabs();
+    res.json({ slabs });
+  } catch (err) {
+    console.error("Error fetching ASM incentive slabs:", err);
+    res.status(500).json({ message: "Failed to fetch incentive slabs", error: err.message });
+  }
+});
+
+// PUT /api/asm/incentive-slabs
+// Update active milestone disbursement slabs by ASM
+router.put("/incentive-slabs", auth, requireRole(ROLES.ASM), async (req, res) => {
+  try {
+    const { slabs } = req.body;
+    if (!Array.isArray(slabs) || slabs.length === 0) {
+      return res.status(400).json({ message: "Slabs array is required and must not be empty" });
+    }
+
+    const cleanSlabs = slabs.map((s, idx) => ({
+      id: s.id || `slab_${idx + 1}`,
+      tier: s.tier || `Tier ${idx + 1}`,
+      minDisbursement: Math.max(0, Number(s.minDisbursement || 0)),
+      rewardAmount: Math.max(0, Number(s.rewardAmount || 0)),
+      rewardType: s.rewardType === "PERCENT" ? "PERCENT" : "FLAT",
+    })).sort((a, b) => a.minDisbursement - b.minDisbursement);
+
+    await Config.findOneAndUpdate(
+      { key: "INCENTIVE_SLAB_POLICY" },
+      { key: "INCENTIVE_SLAB_POLICY", value: cleanSlabs },
+      { upsert: true, new: true }
+    );
+
+    res.json({ message: "Incentive slabs updated successfully", slabs: cleanSlabs });
+  } catch (err) {
+    console.error("Error updating ASM incentive slabs:", err);
+    res.status(500).json({ message: "Failed to update incentive slabs", error: err.message });
+  }
+});
 
 export default router;
 

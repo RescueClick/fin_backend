@@ -883,3 +883,148 @@ export const sendDeleteAccountConfirmationEmail = async (user) => {
     return false;
   }
 };
+
+/**
+ * Send official Commission Payout Invoice & Statement email to partner when Admin settles payout (DONE)
+ */
+export const sendPartnerPayoutInvoiceEmail = async ({
+  partner,
+  customerName = "Customer",
+  appNo = "APP",
+  loanType = "Personal Loan",
+  approvedAmount = 0,
+  payoutAmount = 0,
+  payoutPercentage = 0,
+  utrNumber = "",
+  note = "",
+  bankName = "",
+  accountNumber = "",
+  ifscCode = "",
+}) => {
+  if (!partner?.email) {
+    console.warn("⚠️ sendPartnerPayoutInvoiceEmail: Partner has no email address.");
+    return false;
+  }
+
+  const formatINR = (val) =>
+    `₹${Number(val || 0).toLocaleString("en-IN", {
+      maximumFractionDigits: 2,
+      minimumFractionDigits: 2,
+    })}`;
+
+  const dateStr = new Date().toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+
+  const invoiceNo = `INV-PO-${appNo}-${Date.now().toString().slice(-4)}`;
+  const partnerFullName = `${partner.firstName || ""} ${partner.lastName || ""}`.trim() || "Channel Partner";
+  const maskedAcc = accountNumber
+    ? `XXXX-XXXX-${String(accountNumber).slice(-4)}`
+    : "Registered Bank Account";
+
+  const content = `
+    <h2>Dear ${partnerFullName},</h2>
+    <p style="font-size: 15px; color: #4b5563;">
+      We are pleased to inform you that your commission payout for disbursed loan application <strong>#${appNo}</strong> has been successfully processed and transferred to your bank account.
+    </p>
+
+    <!-- INVOICE SUMMARY BOX -->
+    <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); color: white; border-radius: 12px; padding: 20px; margin: 20px 0; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+      <div style="display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 12px; margin-bottom: 15px;">
+        <div>
+          <span style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; display: block;">Invoice Reference</span>
+          <strong style="font-size: 14px; font-family: monospace; color: #38bdf8;">${invoiceNo}</strong>
+        </div>
+        <div style="text-align: right;">
+          <span style="font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; display: block;">Settlement Date</span>
+          <strong style="font-size: 13px; color: #ffffff;">${dateStr}</strong>
+        </div>
+      </div>
+
+      <div style="margin-bottom: 15px;">
+        <span style="font-size: 12px; color: #94a3b8; display: block;">Commission Paid</span>
+        <span style="font-size: 28px; font-weight: 900; color: #10b981; letter-spacing: -0.5px;">${formatINR(payoutAmount)}</span>
+        ${
+          payoutPercentage
+            ? `<span style="font-size: 12px; color: #cbd5e1; margin-left: 8px;">(${payoutPercentage}% of loan)</span>`
+            : ""
+        }
+      </div>
+
+      <div style="background: rgba(255,255,255,0.06); border-radius: 8px; padding: 12px; font-size: 12px; line-height: 1.6;">
+        <div><strong>Beneficiary Bank:</strong> ${bankName || "Partner Bank"}</div>
+        <div><strong>Account Number:</strong> ${maskedAcc}</div>
+        ${ifscCode ? `<div><strong>IFSC Code:</strong> ${ifscCode}</div>` : ""}
+        ${
+          utrNumber
+            ? `<div style="margin-top: 6px; color: #38bdf8;"><strong>Bank Reference / UTR:</strong> ${utrNumber}</div>`
+            : ""
+        }
+      </div>
+    </div>
+
+    <!-- LOAN & FILE BREAKDOWN TABLE -->
+    <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; margin-bottom: 20px;">
+      <h3 style="margin-top: 0; margin-bottom: 12px; color: #0f172a; font-size: 14px;">Application & Commission Breakdown</h3>
+      <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+        <tr style="border-bottom: 1px solid #e2e8f0;">
+          <td style="padding: 8px 0; color: #64748b;">Application No</td>
+          <td style="padding: 8px 0; font-weight: bold; text-align: right; color: #0f172a; font-family: monospace;">#${appNo}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #e2e8f0;">
+          <td style="padding: 8px 0; color: #64748b;">Customer / Borrower</td>
+          <td style="padding: 8px 0; font-weight: bold; text-align: right; color: #0f172a;">${customerName}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #e2e8f0;">
+          <td style="padding: 8px 0; color: #64748b;">Loan Type</td>
+          <td style="padding: 8px 0; font-weight: bold; text-align: right; color: #0f172a;">${loanType}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #e2e8f0;">
+          <td style="padding: 8px 0; color: #64748b;">Approved Disbursal Amount</td>
+          <td style="padding: 8px 0; font-weight: bold; text-align: right; color: #0f172a;">${formatINR(approvedAmount)}</td>
+        </tr>
+        <tr style="border-bottom: 1px solid #e2e8f0;">
+          <td style="padding: 8px 0; color: #64748b;">Agreed Commission Rate</td>
+          <td style="padding: 8px 0; font-weight: bold; text-align: right; color: #0f172a;">${payoutPercentage ? `${payoutPercentage}%` : "Flat"}</td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 0; color: #0f172a; font-weight: bold; font-size: 14px;">Total Transferred</td>
+          <td style="padding: 8px 0; font-weight: 900; text-align: right; color: #059669; font-size: 16px;">${formatINR(payoutAmount)}</td>
+        </tr>
+      </table>
+    </div>
+
+    ${
+      note
+        ? `<div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 12px; font-size: 13px; color: #166534; margin-bottom: 20px;">
+            <strong>Transaction Note:</strong> ${note}
+          </div>`
+        : ""
+    }
+
+    <p style="font-size: 13px; color: #64748b; line-height: 1.6;">
+      This email serves as your official Commission Settlement Advice. For any queries regarding this transfer or for TDS certificates, please reach out to our partner accounts team.
+    </p>
+
+    <div style="text-align: center; margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0;">
+      <p style="font-size: 12px; color: #94a3b8; margin: 0;">
+        Thank you for being a valued Partner with <strong>${COMPANY_NAME}</strong>.
+      </p>
+    </div>
+  `;
+
+  try {
+    await sendMail({
+      to: partner.email,
+      subject: `Commission Payout Invoice - #${appNo} (${formatINR(payoutAmount)}) | ${COMPANY_NAME}`,
+      html: getEmailTemplate("Commission Settlement Advice", content),
+    });
+    console.log(`✅ Commission payout invoice email successfully sent to partner ${partner.email} for app #${appNo}`);
+    return true;
+  } catch (error) {
+    console.error("❌ Failed to send commission payout invoice email:", error);
+    return false;
+  }
+};

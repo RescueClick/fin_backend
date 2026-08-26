@@ -11,6 +11,8 @@ const configSchema = new mongoose.Schema(
         "PARTNER_TARGET_POLICY",
         "PUBLIC_LOAN_DEFAULT_PARTNER_CODE",
         "REFERRAL_REWARD_AMOUNTS",
+        "DEFAULT_PAYOUT_POLICY",
+        "INCENTIVE_SLAB_POLICY",
       ],
     },
     value: {

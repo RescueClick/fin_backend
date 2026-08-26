@@ -30,6 +30,8 @@ import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendPartnerRegistrationEmail, sendLoanApplicationEmail, sendDeleteAccountRequestEmail } from "../utils/emailService.js";
 import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
+import { getActiveIncentiveSlabs, calculatePartnerMilestone } from "../utils/incentiveSlabCalculator.js";
+import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { ReferralReward } from "../models/ReferralReward.js";
 import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
 import {
@@ -3827,7 +3829,24 @@ router.get(
   }
 );
 
-// 2) CURRENT-MONTH INCENTIVE SUMMARY
+// 2) MILESTONE INCENTIVE SLABS LIST
+// GET /api/partner/incentives/slabs
+router.get(
+  "/incentives/slabs",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const slabs = await getActiveIncentiveSlabs();
+      return res.json({ slabs });
+    } catch (err) {
+      console.error("Error fetching partner incentive slabs:", err);
+      return res.status(500).json({ message: "Error fetching incentive slabs" });
+    }
+  }
+);
+
+// 3) CURRENT-MONTH MILESTONE INCENTIVE SUMMARY
 // GET /api/partner/incentives/current
 router.get(
   "/incentives/current",
@@ -3840,36 +3859,77 @@ router.get(
       const month = now.getMonth() + 1; // 1-12
       const year = now.getFullYear();
 
-      const incentives = await Incentive.find({
+      const startDate = new Date(year, month - 1, 1);
+      const endDate = new Date(year, month, 1);
+
+      // Fetch active slabs
+      const activeSlabs = await getActiveIncentiveSlabs();
+
+      // Fetch partner's disbursed applications for this month
+      const disbursedApps = await Application.find({
+        partnerId,
+        status: "DISBURSED",
+        isDeleted: { $ne: true },
+      }).lean();
+
+      let monthlyDisbursed = 0;
+      let disbursedCount = 0;
+
+      disbursedApps.forEach((app) => {
+        const dDate = getDisbursedAt(app);
+        if (isDateInRange(dDate, startDate, endDate)) {
+          monthlyDisbursed += parseFloat(app.approvedLoanAmount) || 0;
+          disbursedCount += 1;
+        }
+      });
+
+      // Calculate milestone progress
+      const milestone = calculatePartnerMilestone(monthlyDisbursed, activeSlabs);
+
+      // Check for existing Incentive document in DB
+      const incentiveDoc = await Incentive.findOne({
         partnerId,
         month,
         year,
-      })
-        .select(
-          "amount status paidAt notes fileCountTarget achievedFileCount disbursementTarget achievedDisbursement month year"
-        )
-        .sort({ createdAt: -1 })
-        .lean();
+      }).lean();
 
-      const totalIncentiveThisMonth = incentives.reduce(
-        (sum, i) => sum + (Number(i.amount) || 0),
-        0
-      );
+      const isPaid = incentiveDoc?.status === "PAID";
+      const currentStatus = isPaid
+        ? "PAID"
+        : milestone.isEligible
+        ? "PENDING"
+        : "IN_PROGRESS";
+
+      const finalAmount =
+        incentiveDoc?.amount != null ? incentiveDoc.amount : milestone.incentiveAmount;
 
       return res.json({
         month,
         year,
-        totalIncentiveThisMonth,
-        incentives,
+        disbursedVolume: monthlyDisbursed,
+        disbursedCount,
+        achievedSlab: milestone.achievedSlab,
+        nextSlab: milestone.nextSlab,
+        tier: milestone.tier,
+        isEligible: milestone.isEligible,
+        incentiveAmount: Math.round(finalAmount),
+        remainingToNextMilestone: milestone.remainingToNextMilestone,
+        progressPercent: milestone.progressPercent,
+        status: currentStatus,
+        isPaid,
+        paidAt: incentiveDoc?.paidAt || null,
+        notes: incentiveDoc?.notes || null,
+        utrNumber: incentiveDoc?.notes || null,
+        slabs: activeSlabs,
       });
     } catch (err) {
-      console.error("Error fetching current month incentives:", err);
+      console.error("Error fetching current month milestone incentives:", err);
       return res.status(500).json({ message: "Error fetching incentives" });
     }
   }
 );
 
-// 3) PAYOUT HISTORY (MONTH/YEAR)
+// 4) PAYOUT HISTORY (MONTH/YEAR)
 // GET /api/partner/payouts/history?month=MM&year=YYYY
 router.get(
   "/payouts/history",
@@ -3924,7 +3984,7 @@ router.get(
   }
 );
 
-// 4) INCENTIVE HISTORY (MONTH/YEAR)
+// 5) INCENTIVE HISTORY (MONTH/YEAR)
 // GET /api/partner/incentives/history?month=MM&year=YYYY
 router.get(
   "/incentives/history",
@@ -3942,12 +4002,27 @@ router.get(
       month = month ? Number(month) : currentMonth;
       year = year ? Number(year) : currentYear;
 
-      if (Number.isNaN(month) || month < 1 || month > 12) {
-        return res.status(400).json({ message: "Invalid month. Use 1-12." });
-      }
-      if (Number.isNaN(year) || year < 2000) {
-        return res.status(400).json({ message: "Invalid year." });
-      }
+      const startDate = new Date(year, month - 1, 1);
+      const endDate = new Date(year, month, 1);
+
+      const activeSlabs = await getActiveIncentiveSlabs();
+
+      // Calculate monthly volume
+      const disbursedApps = await Application.find({
+        partnerId,
+        status: "DISBURSED",
+        isDeleted: { $ne: true },
+      }).lean();
+
+      let monthlyDisbursed = 0;
+      disbursedApps.forEach((app) => {
+        const dDate = getDisbursedAt(app);
+        if (isDateInRange(dDate, startDate, endDate)) {
+          monthlyDisbursed += parseFloat(app.approvedLoanAmount) || 0;
+        }
+      });
+
+      const milestone = calculatePartnerMilestone(monthlyDisbursed, activeSlabs);
 
       const incentives = await Incentive.find({
         partnerId,
@@ -3968,7 +4043,11 @@ router.get(
       return res.json({
         month,
         year,
-        totalIncentive,
+        totalIncentive: totalIncentive > 0 ? totalIncentive : (milestone.isEligible ? milestone.incentiveAmount : 0),
+        disbursedVolume: monthlyDisbursed,
+        tier: milestone.tier,
+        isEligible: milestone.isEligible,
+        incentiveAmount: milestone.incentiveAmount,
         incentives,
       });
     } catch (err) {
@@ -4653,5 +4732,97 @@ router.post(
     }
   }
 );
+
+// GET /api/partner/levels-config - Live dynamic levels & perks configuration for mobile & web apps
+router.get("/levels-config", async (req, res) => {
+  try {
+    const cfg = await Config.findOne({ key: "PARTNER_LEVELS_CONFIG" });
+    if (cfg && cfg.value && cfg.value.levels) {
+      return res.json({ success: true, ...cfg.value });
+    }
+    return res.json({
+      success: true,
+      hero: {
+        label: "PERFORMANCE & MILESTONE REWARDS",
+        title: "Unlock Milestone Bonuses",
+        subtitle: "Achieve higher monthly disbursement targets to unlock bigger cash bonuses, VIP badges, and priority perks.",
+        bgColor: "#0D9488",
+      },
+      levels: [
+        {
+          id: "BRONZE",
+          name: "Bronze",
+          iconName: "Shield",
+          color: "#B45309",
+          bgColor: "#FFFBEB",
+          accentColor: "#FEF3C7",
+          criteria: "Default level for all new partners (Up to ₹10L volume)",
+          minDisbursement: 0,
+          rewardAmount: 0,
+          benefits: [
+            "Standard commission payouts on every loan",
+            "Basic partner support channels",
+            "Access to all standard loan products & banks",
+            "Eligible for monthly milestone incentives",
+          ],
+        },
+        {
+          id: "SILVER",
+          name: "Silver",
+          iconName: "Award",
+          color: "#64748B",
+          bgColor: "#F8FAFC",
+          accentColor: "#F1F5F9",
+          criteria: "Achieve ₹20L+ monthly disbursement volume",
+          minDisbursement: 2000000,
+          rewardAmount: 2500,
+          benefits: [
+            "Earn ₹2,500+ monthly milestone cash bonus",
+            "Priority file processing & fast-track approval",
+            "Exclusive Silver dashboard badge",
+            "Dedicated email & support helpline",
+          ],
+        },
+        {
+          id: "GOLD",
+          name: "Gold",
+          iconName: "Star",
+          color: "#CA8A04",
+          bgColor: "#FEFCE8",
+          accentColor: "#FEF9C3",
+          criteria: "Achieve ₹50L+ monthly disbursement volume",
+          minDisbursement: 5000000,
+          rewardAmount: 7500,
+          benefits: [
+            "Earn ₹7,500+ monthly milestone cash bonus",
+            "Dedicated Relationship Manager (RM)",
+            "Priority payout settlement & fast-track clearance",
+            "Early access to exclusive high-ticket loan products",
+          ],
+        },
+        {
+          id: "PLATINUM",
+          name: "Platinum",
+          iconName: "Trophy",
+          color: "#0F172A",
+          bgColor: "#F8FAFC",
+          accentColor: "#E2E8F0",
+          criteria: "Achieve ₹1Cr+ monthly disbursement volume",
+          minDisbursement: 10000000,
+          rewardAmount: 20000,
+          benefits: [
+            "Earn ₹20,000+ monthly milestone cash bonus",
+            "24/7 VIP desk support & relationship priority",
+            "Eligible for 'Partner of the Month' cash rewards",
+            "Executive certificates & festival bonus perks",
+          ],
+        },
+      ],
+    });
+  } catch (err) {
+    console.error("Error fetching partner levels config for partner app:", err);
+    return res.status(500).json({ message: "Failed to fetch partner levels config", error: err.message });
+  }
+});
 
 export default router;

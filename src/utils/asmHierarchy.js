@@ -80,10 +80,32 @@ export async function getAsmScopeIds(asmId) {
 
 /** Prefer stable disbursement timestamp over updatedAt (RM moves bump updatedAt). */
 export function getDisbursedAt(app) {
-  const stage = app?.stageHistory?.find((s) => s.to === "DISBURSED");
-  if (stage?.at) return new Date(stage.at);
-  if (app?.disbursedDate) return new Date(app.disbursedDate);
-  if (app?.updatedAt) return new Date(app.updatedAt);
+  if (!app) return null;
+  if (app.disbursedAt) {
+    const d = new Date(app.disbursedAt);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  if (app.disbursedDate) {
+    const d = new Date(app.disbursedDate);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  if (Array.isArray(app.stageHistory)) {
+    const stage = app.stageHistory.find(
+      (s) => s.to && String(s.to).toUpperCase() === "DISBURSED"
+    );
+    if (stage?.at) {
+      const d = new Date(stage.at);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+  }
+  if (app.createdAt) {
+    const d = new Date(app.createdAt);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  if (app.updatedAt) {
+    const d = new Date(app.updatedAt);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
   return null;
 }
 

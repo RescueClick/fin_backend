@@ -9,7 +9,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "verify:loan-doc-rules": "node src/scripts/verifyLoanDocRules.js",
-    "dev": "node index.js",
+    "dev": "node --watch index.js",
     "cleanup:dupes:dry": "node src/scripts/cleanupDuplicateApplications.js",
     "cleanup:dupes:apply": "node src/scripts/cleanupDuplicateApplications.js --apply"
   },

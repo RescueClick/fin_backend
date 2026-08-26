@@ -24,11 +24,26 @@ const router = Router();
 // });
 
 async function resolveDefaultCompanyPartner() {
+  try {
+    const { Config } = await import("../models/Config.js");
+    const doc = await Config.findOne({ key: "PUBLIC_LOAN_DEFAULT_PARTNER_CODE" }).lean();
+    if (doc?.value?.partnerId && mongoose.isValidObjectId(doc.value.partnerId)) {
+      const p = await User.findOne({ _id: doc.value.partnerId, role: ROLES.PARTNER, status: "ACTIVE" });
+      if (p) return p;
+    }
+    if (doc?.value?.partnerCode) {
+      const p = await User.findOne({ partnerCode: doc.value.partnerCode, role: ROLES.PARTNER, status: "ACTIVE" });
+      if (p) return p;
+    }
+  } catch (err) {
+    console.error("resolveDefaultCompanyPartner config error:", err);
+  }
+
   if (process.env.DEFAULT_COMPANY_PARTNER_CODE) {
     const p = await User.findOne({ partnerCode: process.env.DEFAULT_COMPANY_PARTNER_CODE, role: ROLES.PARTNER });
     if (p) return p;
   }
-  const sanjay = await User.findOne({ role: ROLES.PARTNER, firstName: /sanjay/i });
+  const sanjay = await User.findOne({ role: ROLES.PARTNER, firstName: /sanjay/i, status: "ACTIVE" });
   if (sanjay) return sanjay;
   return await User.findOne({ role: ROLES.PARTNER, status: "ACTIVE" });
 }
