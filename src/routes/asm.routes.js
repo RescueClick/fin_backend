@@ -4444,6 +4444,18 @@ router.post(
         return res.status(404).json({ message: "Application not found under this ASM hierarchy" });
       }
 
+      if (app.status === "DISBURSED") {
+        return res.status(400).json({
+          message: "Cannot reject or change status after DISBURSED.",
+        });
+      }
+
+      if (to === "REJECTED" && (!note || !String(note).trim())) {
+        return res.status(400).json({
+          message: "A remark/reason is required to reject this application.",
+        });
+      }
+
       if (to === "APPROVED" && (approvedLoanAmount == null || isNaN(Number(approvedLoanAmount)))) {
         return res.status(400).json({
           message: "approvedLoanAmount is required and must be a number for APPROVED status",

@@ -392,7 +392,8 @@ router.get("/my-rms", auth, requireRole(ROLES.RSM), async (req, res) => {
 /**
  * RSM LOAN PROCESSING ROUTES
  * ---------------------------------
- * RSM handles loan processing statuses: UNDER_REVIEW → APPROVED/REJECTED → DISBURSED
+ * RSM handles loan processing statuses: UNDER_REVIEW → APPROVED/REJECTED → AGREEMENT → DISBURSED
+ * Reject is allowed until DISBURSED (from UNDER_REVIEW, APPROVED, AGREEMENT).
  */
 
 // POST /api/rsm/applications/:id/transition
@@ -452,8 +453,8 @@ router.post(
         DOC_COMPLETE: ["LOGIN", "DOC_INCOMPLETE"],
         LOGIN: ["UNDER_REVIEW", "DOC_INCOMPLETE"],
         UNDER_REVIEW: ["APPROVED", "REJECTED", "DOC_INCOMPLETE"],
-        APPROVED: ["AGREEMENT", "DISBURSED", "DOC_INCOMPLETE"],
-        AGREEMENT: ["DISBURSED", "DOC_INCOMPLETE"],
+        APPROVED: ["AGREEMENT", "DISBURSED", "DOC_INCOMPLETE", "REJECTED"],
+        AGREEMENT: ["DISBURSED", "DOC_INCOMPLETE", "REJECTED"],
         REJECTED: ["DOC_INCOMPLETE"],
       };
 
@@ -461,6 +462,18 @@ router.post(
         return res.status(400).json({
           message: `Cannot transition from ${currentStatus} to ${to}. Allowed transitions: ${allowedTransitions[currentStatus]?.join(", ") || "none"
             }`,
+        });
+      }
+
+      if (currentStatus === "DISBURSED") {
+        return res.status(400).json({
+          message: "Cannot reject or change status after DISBURSED.",
+        });
+      }
+
+      if (to === "REJECTED" && (!note || !String(note).trim())) {
+        return res.status(400).json({
+          message: "A remark/reason is required to reject this application.",
         });
       }
 
