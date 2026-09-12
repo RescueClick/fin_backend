@@ -1,0 +1,23 @@
+{
+  "timestamp": "2026-09-12T16-45-12-626Z",
+  "summary": {
+    "referralrewards": 0,
+    "followups": 4141,
+    "incentives": 1,
+    "banners": 1,
+    "chatmessages": 1,
+    "referralbanners": 4,
+    "applications": 164,
+    "conversations": 2,
+    "bankmasters": 38,
+    "payouts": 4,
+    "deleteaccountrequests": 14,
+    "users": 538,
+    "withdrawalrequests": 2,
+    "targets": 331,
+    "cibilreports": 0,
+    "reassignmentauditlogs": 103,
+    "notifications": 8475,
+    "configs": 4
+  }
+}

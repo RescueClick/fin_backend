@@ -1,4 +1,5 @@
 import "dotenv/config";
+// touch index.js to trigger nodemon restart
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -18,6 +19,7 @@ import analyticsRoutes from "./src/routes/analytics.routes.js";
 import referralRoutes from "./src/routes/referral.routes.js";
 import referralBannerRoutes from "./src/routes/referralBanner.routes.js";
 import cibilRoutes from "./src/routes/cibil.routes.js";
+import chatRoutes from "./src/routes/chat.routes.js";
 import { connectDB } from "./src/db/db.js";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -155,8 +157,14 @@ app.get("/health", (_, res) => res.json({ status: "ok" }));
 // API Routes (registered after static file routes)
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
-app.use("/api/asm", asmRoutes);
-app.use("/api/rsm", rsmRoutes);
+
+// Mount routes for Senior Regional Sales Manager (RSM) and Specialized Area Sales Manager (ASM)
+// Supporting both /api/rsm and /api/asm seamlessly with smart fallthrough
+app.use("/api/rsm", asmRoutes); // Senior manager endpoints priority on /api/rsm
+app.use("/api/rsm", rsmRoutes); // Specialized endpoints fallback on /api/rsm
+
+app.use("/api/asm", rsmRoutes); // Specialized endpoints priority on /api/asm
+app.use("/api/asm", asmRoutes); // Senior manager endpoints fallback on /api/asm
 app.use("/api/rm", rmRoutes);
 app.use("/api/partner", partnerRoutes);
 app.use("/api/customer", customerRoutes);
@@ -166,6 +174,7 @@ app.use("/api/analytics", analyticsRoutes); // Universal Analytics API
 app.use("/api/referral", referralRoutes); // Customer/partner: my referral code, referrals, earnings
 app.use("/api/referral-banners", referralBannerRoutes); // Referral benefit banners: app display + admin CRUD
 app.use("/api/cibil", cibilRoutes); // CIBIL checks and payments
+app.use("/api/chat", chatRoutes); // Internal Staff Chat (Admin, ASM, RSM, RM)
 
 
 
@@ -208,6 +217,7 @@ global.io = io;
 
 connectDB(process.env.MONGO_URI)
   .then(() => {
+    // Start HTTP server on configured port
     server.listen(PORT, () => {
       console.log(`\n${"=".repeat(60)}`);
       console.log(`🚀 API Server Running on Port: ${PORT}`);

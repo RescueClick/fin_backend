@@ -1,0 +1,36 @@
+[
+  {
+    "_id": "6a7eecde0c8a25243599705c",
+    "partnerId": "6a4d1c23e39a880fb3f12c56",
+    "asmId": "6a65e75844d77ea296313ecf",
+    "amount": 1800,
+    "note": "20352860137",
+    "status": "PAID",
+    "rejectReason": "",
+    "settledPayoutIds": [
+      "6a67729344d77ea29631ddaf"
+    ],
+    "settledIncentiveIds": [],
+    "createdAt": "2026-08-14T10:24:30.660Z",
+    "updatedAt": "2026-08-26T12:24:32.588Z",
+    "__v": 1,
+    "asmReviewedAt": "2026-08-25T09:05:24.680Z",
+    "reviewedByAsm": "6a65e75844d77ea296313ecf",
+    "adminReviewedAt": "2026-08-26T12:24:32.587Z",
+    "reviewedByAdmin": "6a439c6d815f90506104cb6e"
+  },
+  {
+    "_id": "6aa2fa22d65a7d62d17fc48a",
+    "partnerId": "6a69a13a9757095939699d06",
+    "asmId": "6a65e75844d77ea296313ecf",
+    "amount": 6000,
+    "note": "",
+    "status": "PENDING_ASM",
+    "rejectReason": "",
+    "settledPayoutIds": [],
+    "settledIncentiveIds": [],
+    "createdAt": "2026-09-10T18:42:42.003Z",
+    "updatedAt": "2026-09-10T18:42:42.003Z",
+    "__v": 0
+  }
+]

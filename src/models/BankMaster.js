@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { RSM_TYPES } from "../config/roles.js";
+import { ASM_TYPES, RSM_TYPES } from "../config/roles.js";
 
 const bankMasterSchema = new mongoose.Schema(
   {
@@ -14,10 +14,17 @@ const bankMasterSchema = new mongoose.Schema(
     portalLink: { type: String, required: true, trim: true },
 
     /**
-     * Which RSM type(s) can see/use this bank.
+     * Which ASM type(s) can see/use this bank.
      * - PERSONAL
-     * - BUSINESS_HOME
+     * - BUSINESS
+     * - HOME_LAP
      */
+    asmTypes: {
+      type: [String],
+      enum: Object.values(ASM_TYPES),
+      default: [],
+      index: true,
+    },
     rsmTypes: {
       type: [String],
       enum: Object.values(RSM_TYPES),

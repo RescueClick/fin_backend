@@ -1,12 +1,12 @@
 import mongoose from "mongoose";
 
 const followUpSchema = new mongoose.Schema({
-    // Target of follow-up (can be Partner, RM, or RSM)
+    // Target of follow-up (can be Partner, RM, ASM, or RSM)
     targetId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    // Type of follow-up: PARTNER (RM→Partner), RM (RSM→RM), RSM (ASM→RSM)
+    // Type of follow-up: PARTNER (RM→Partner), RM (ASM→RM), ASM (RSM→ASM)
     followUpType: { 
       type: String, 
-      enum: ["PARTNER", "RM", "RSM"], 
+      enum: ["PARTNER", "RM", "RSM", "ASM"], 
       default: "PARTNER" // Backward compatibility
     },
     // For backward compatibility - if partnerId is set, it's a partner follow-up

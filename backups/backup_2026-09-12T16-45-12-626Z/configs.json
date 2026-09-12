@@ -1,0 +1,264 @@
+[
+  {
+    "_id": "69b71c66180aae7d837eeda0",
+    "key": "PARTNER_TARGET_POLICY",
+    "value": {
+      "fileCountTarget": 5,
+      "disbursementTarget": 0
+    },
+    "createdAt": "2026-03-15T20:53:58.211Z",
+    "updatedAt": "2026-08-26T12:12:33.670Z",
+    "__v": 0
+  },
+  {
+    "_id": "69c6f137945a1be3d5297f40",
+    "key": "PUBLIC_LOAN_DEFAULT_PARTNER_CODE",
+    "value": {
+      "partnerId": "6a8c3dc27038cfc5ab162d2a",
+      "partnerCode": "PT-SG772096"
+    },
+    "createdAt": "2026-03-27T21:05:59.710Z",
+    "updatedAt": "2026-08-26T20:40:35.000Z",
+    "__v": 0
+  },
+  {
+    "_id": "6aa52623035a474cc5e0bef2",
+    "key": "INCENTIVE_SLAB_POLICY",
+    "__v": 0,
+    "createdAt": "2026-09-12T10:14:59.656Z",
+    "updatedAt": "2026-09-12T16:26:10.531Z",
+    "value": [
+      {
+        "id": "slab_1",
+        "tier": "Bronze",
+        "minDisbursement": 1000000,
+        "rewardAmount": 1000,
+        "rewardType": "FLAT",
+        "description": "Bronze (₹10L) ➔ ₹1,000 Bonus"
+      },
+      {
+        "id": "slab_2",
+        "tier": "Silver",
+        "minDisbursement": 2000000,
+        "rewardAmount": 2000,
+        "rewardType": "FLAT",
+        "description": "Silver (₹20L) ➔ ₹2,000 Bonus"
+      },
+      {
+        "id": "slab_3",
+        "tier": "Gold",
+        "minDisbursement": 3000000,
+        "rewardAmount": 3000,
+        "rewardType": "FLAT",
+        "description": "Gold (₹30L) ➔ ₹3,000 Bonus"
+      },
+      {
+        "id": "slab_4",
+        "tier": "Ruby",
+        "minDisbursement": 4000000,
+        "rewardAmount": 4000,
+        "rewardType": "FLAT",
+        "description": "Ruby (₹40L) ➔ ₹4,000 Bonus"
+      },
+      {
+        "id": "slab_5",
+        "tier": "Diamond",
+        "minDisbursement": 5000000,
+        "rewardAmount": 5000,
+        "rewardType": "FLAT",
+        "description": "Diamond (₹50L) ➔ ₹5,000 Bonus"
+      },
+      {
+        "id": "slab_6",
+        "tier": "Platinum",
+        "minDisbursement": 10000000,
+        "rewardAmount": 10000,
+        "rewardType": "FLAT",
+        "description": "Platinum (₹100L) ➔ ₹10,000 Bonus"
+      },
+      {
+        "id": "slab_7",
+        "tier": "Titanium",
+        "minDisbursement": 20000000,
+        "rewardAmount": 20000,
+        "rewardType": "FLAT",
+        "description": "Titanium (₹200L) ➔ ₹20,000 Bonus"
+      },
+      {
+        "id": "slab_8",
+        "tier": "Crown Elite",
+        "minDisbursement": 50000000,
+        "rewardAmount": 50000,
+        "rewardType": "FLAT",
+        "description": "Crown Elite (₹500L) ➔ ₹50,000 Bonus"
+      }
+    ]
+  },
+  {
+    "_id": "6aa5596d035a474cc5e0c297",
+    "key": "PARTNER_LEVELS_CONFIG",
+    "__v": 0,
+    "createdAt": "2026-09-12T13:53:49.981Z",
+    "updatedAt": "2026-09-12T16:26:12.473Z",
+    "value": {
+      "hero": {
+        "label": "PERFORMANCE ",
+        "badgeText": "PERFORMANCE ",
+        "title": "Unlock Milestone Bonuses",
+        "subtitle": "Achieve higher monthly disbursement targets to unlock bigger cash bonuses, VIP badges, and priority perks.",
+        "bgColor": "#0D9488",
+        "borderColor": "#047857",
+        "badgeBgColor": "#A7F3D0",
+        "badgeTextColor": "#065F46",
+        "textColor": "#FFFFFF",
+        "subtextColor": "#D1FAE5",
+        "monthColor": "#A7F3D0",
+        "showMonthBadge": true,
+        "showTag": true,
+        "showFormulaPills": true,
+        "formulaPills": [],
+        "isActive": true,
+        "targetTab": "ladder",
+        "monthLabel": ""
+      },
+      "levels": [
+        {
+          "id": "BRONZE",
+          "name": "Bronze",
+          "iconName": "Shield",
+          "color": "#B45309",
+          "bgColor": "#FFFBEB",
+          "accentColor": "#FEF3C7",
+          "criteria": "Achieve ₹10L+ monthly disbursement volume",
+          "minDisbursement": 1000000,
+          "rewardAmount": 1000,
+          "benefits": [
+            "Earn ₹1,000 monthly milestone cash bonus",
+            "Standard commission payouts on every loan",
+            "Access to all standard loan products & banks",
+            "Eligible for monthly milestone incentives"
+          ]
+        },
+        {
+          "id": "SILVER",
+          "name": "Silver",
+          "iconName": "Award",
+          "color": "#64748B",
+          "bgColor": "#F8FAFC",
+          "accentColor": "#F1F5F9",
+          "criteria": "Achieve ₹20L+ monthly disbursement volume",
+          "minDisbursement": 2000000,
+          "rewardAmount": 2000,
+          "benefits": [
+            "Earn ₹2,000 monthly milestone cash bonus",
+            "Priority file processing & fast-track approval",
+            "Exclusive Silver dashboard badge",
+            "Dedicated email & support helpline"
+          ]
+        },
+        {
+          "id": "GOLD",
+          "name": "Gold",
+          "iconName": "Star",
+          "color": "#CA8A04",
+          "bgColor": "#FEFCE8",
+          "accentColor": "#FEF9C3",
+          "criteria": "Achieve ₹30L+ monthly disbursement volume",
+          "minDisbursement": 3000000,
+          "rewardAmount": 3000,
+          "benefits": [
+            "Earn ₹3,000 monthly milestone cash bonus",
+            "Dedicated Relationship Manager (RM)",
+            "Faster loan logins & desk clearance",
+            "Special festive campaigns & booster incentives"
+          ]
+        },
+        {
+          "id": "RUBY",
+          "name": "Ruby",
+          "iconName": "Gem",
+          "color": "#E11D48",
+          "bgColor": "#FFF1F2",
+          "accentColor": "#FFE4E6",
+          "criteria": "Achieve ₹40L+ monthly disbursement volume",
+          "minDisbursement": 4000000,
+          "rewardAmount": 4000,
+          "benefits": [
+            "Earn ₹4,000 monthly milestone cash bonus",
+            "Priority underwriting & fast turnaround",
+            "Exclusive Ruby tier dashboard badge",
+            "Direct credit coordinator support"
+          ]
+        },
+        {
+          "id": "DIAMOND",
+          "name": "Diamond",
+          "iconName": "Sparkles",
+          "color": "#0D9488",
+          "bgColor": "#F0FDF4",
+          "accentColor": "#CCFBF1",
+          "criteria": "Achieve ₹50L+ monthly disbursement volume",
+          "minDisbursement": 5000000,
+          "rewardAmount": 5000,
+          "benefits": [
+            "Earn ₹5,000 monthly milestone cash bonus",
+            "Senior Relationship Manager (RM) assigned",
+            "Priority payout clearance & same-day validation",
+            "Early access to exclusive high-ticket loan products"
+          ]
+        },
+        {
+          "id": "PLATINUM",
+          "name": "Platinum",
+          "iconName": "Trophy",
+          "color": "#0F172A",
+          "bgColor": "#F8FAFC",
+          "accentColor": "#E2E8F0",
+          "criteria": "Achieve ₹1Cr+ monthly disbursement volume",
+          "minDisbursement": 10000000,
+          "rewardAmount": 10000,
+          "benefits": [
+            "Earn ₹10,000 monthly milestone cash bonus",
+            "24/7 VIP desk support & relationship priority",
+            "Fast-track instant payout settlement",
+            "Executive partner certificates & VIP recognition"
+          ]
+        },
+        {
+          "id": "TITANIUM",
+          "name": "Titanium",
+          "iconName": "Crown",
+          "color": "#7C3AED",
+          "bgColor": "#FAF5FF",
+          "accentColor": "#F3E8FF",
+          "criteria": "Achieve ₹2Cr+ monthly disbursement volume",
+          "minDisbursement": 20000000,
+          "rewardAmount": 20000,
+          "benefits": [
+            "Earn ₹20,000 monthly milestone cash bonus",
+            "VIP partner status across all lender banks",
+            "Direct escalation line to DhanSource credit heads",
+            "Quarterly awards & luxury networking invitations"
+          ]
+        },
+        {
+          "id": "CROWN_ELITE",
+          "name": "Crown Elite",
+          "iconName": "Crown",
+          "color": "#2563EB",
+          "bgColor": "#EFF6FF",
+          "accentColor": "#DBEAFE",
+          "criteria": "Achieve ₹5Cr+ monthly disbursement volume",
+          "minDisbursement": 50000000,
+          "rewardAmount": 50000,
+          "benefits": [
+            "Earn ₹50,000 monthly milestone cash bonus (+unlimited scaling)",
+            "Highest commission tier & top revenue share",
+            "DhanSource Elite Council membership",
+            "All-inclusive Annual Gala VIP invitation"
+          ]
+        }
+      ]
+    }
+  }
+]

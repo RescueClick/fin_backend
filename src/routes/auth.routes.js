@@ -94,6 +94,7 @@ router.post(
       role: user.role,
       rmId: user.rmId ? String(user.rmId) : undefined,
       asmId: user.asmId ? String(user.asmId) : undefined,
+      rsmId: user.rsmId ? String(user.rsmId) : undefined,
     });
 
     let partnerCodeOut = user.partnerCode;
@@ -121,14 +122,25 @@ router.post(
         token,
         user: {
           id: user._id,
+          _id: user._id,
           firstName: user.firstName,
           lastName: user.lastName,
           email: user.email,
           role: user.role,
           status: user.status,
           employeeId: user.employeeId,
+          rsmId: user.rsmId,
           asmId: user.asmId,
           rmId: user.rmId,
+          personalAsmId: user.personalAsmId,
+          businessAsmId: user.businessAsmId,
+          homeLapAsmId: user.homeLapAsmId,
+          personalRsmId: user.personalRsmId,
+          businessRsmId: user.businessRsmId,
+          homeLapRsmId: user.homeLapRsmId,
+          asmType: user.asmType,
+          rsmType: user.rsmType,
+          rsmCode: user.rsmCode,
           asmCode: user.asmCode,
           rmCode: user.rmCode,
           partnerCode: partnerCodeOut,
@@ -255,14 +267,25 @@ router.post(
         token,
         user: {
           id: user._id,
+          _id: user._id,
           firstName: user.firstName,
           lastName: user.lastName,
           email: user.email,
           role: user.role,
           status: user.status,
           employeeId: user.employeeId,
+          rsmId: user.rsmId,
           asmId: user.asmId,
           rmId: user.rmId,
+          personalAsmId: user.personalAsmId,
+          businessAsmId: user.businessAsmId,
+          homeLapAsmId: user.homeLapAsmId,
+          personalRsmId: user.personalRsmId,
+          businessRsmId: user.businessRsmId,
+          homeLapRsmId: user.homeLapRsmId,
+          asmType: user.asmType,
+          rsmType: user.rsmType,
+          rsmCode: user.rsmCode,
           asmCode: user.asmCode,
           rmCode: user.rmCode,
           partnerCode: partnerCodeOut,
@@ -278,7 +301,7 @@ router.post(
 router.post(
   "/login-as/:userId",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ASM, ROLES.RSM, ROLES.RM),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM, ROLES.RM),
   async (req, res) => {
     try {
       const { userId } = req.params;
@@ -288,16 +311,20 @@ router.post(
       // Find the user to impersonate
       const targetUser = await User.findById(userId);
       if (!targetUser) return res.status(404).json({ message: "User not found" });
-      if (targetUser.status !== "ACTIVE")
+
+      const isAdminUser = currentUserRole === ROLES.SUPER_ADMIN || currentUserRole === ROLES.ADMIN;
+      if (targetUser.status !== "ACTIVE" && !isAdminUser) {
         return res
           .status(403)
           .json({ message: "Cannot login as inactive user" });
+      }
 
-      // Enforce hierarchy: SUPER_ADMIN > ASM > RSM > RM > PARTNER > CUSTOMER
+      // Enforce hierarchy: SUPER_ADMIN > RSM > ASM > RM > PARTNER > CUSTOMER
       const roleHierarchy = {
-        [ROLES.SUPER_ADMIN]: [ROLES.ASM, ROLES.RSM, ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
-        [ROLES.ASM]: [ROLES.RSM, ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
-        [ROLES.RSM]: [ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
+        [ROLES.SUPER_ADMIN]: [ROLES.RSM, ROLES.ASM, ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
+        [ROLES.ADMIN]: [ROLES.RSM, ROLES.ASM, ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
+        [ROLES.RSM]: [ROLES.ASM, ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
+        [ROLES.ASM]: [ROLES.RM, ROLES.PARTNER, ROLES.CUSTOMER],
         [ROLES.RM]: [ROLES.PARTNER, ROLES.CUSTOMER],
       };
 
@@ -308,17 +335,24 @@ router.post(
         });
       }
 
-      // Additional hierarchy check: Verify parent-child relationship
-      if (currentUserRole === ROLES.ASM) {
-        // ASM can only login as their own RMs or RMs' partners
-        if (targetUser.role === ROLES.RM && targetUser.asmId?.toString() !== currentUserId) {
-          return res.status(403).json({ message: "You can only login as RMs assigned to you" });
+      // Additional hierarchy check: Verify parent-child relationship (Super Admin bypasses)
+      if (currentUserRole === ROLES.RSM) {
+        if (targetUser.role === ROLES.ASM && targetUser.rsmId?.toString() !== currentUserId && targetUser.asmId?.toString() !== currentUserId) {
+          return res.status(403).json({ message: "You can only login as ASMs assigned to you" });
         }
-        if (targetUser.role === ROLES.PARTNER) {
-          const rm = await User.findById(targetUser.rmId);
-          if (!rm || rm.asmId?.toString() !== currentUserId) {
-            return res.status(403).json({ message: "You can only login as partners under your RMs" });
-          }
+      } else if (currentUserRole === ROLES.ASM) {
+        // ASM can login as their own RMs or RMs' partners
+        const isAssignedRm = targetUser.role === ROLES.RM && (
+          targetUser.personalAsmId?.toString() === currentUserId ||
+          targetUser.businessAsmId?.toString() === currentUserId ||
+          targetUser.homeLapAsmId?.toString() === currentUserId ||
+          targetUser.personalRsmId?.toString() === currentUserId ||
+          targetUser.businessRsmId?.toString() === currentUserId ||
+          targetUser.homeLapRsmId?.toString() === currentUserId ||
+          targetUser.asmId?.toString() === currentUserId
+        );
+        if (targetUser.role === ROLES.RM && !isAssignedRm) {
+          return res.status(403).json({ message: "You can only login as RMs assigned to you" });
         }
       } else if (currentUserRole === ROLES.RM) {
         // RM can only login as their own partners
@@ -335,12 +369,15 @@ router.post(
         });
       }
 
+      const parentToken = req.headers.authorization ? req.headers.authorization.replace(/^Bearer\s+/i, "") : undefined;
+
       // Issue token for the target user with parent info
       const token = signAccessToken({
         sub: String(targetUser._id),
         role: targetUser.role,
-        rmId: targetUser.rmId ? String(targetUser.rmId) : undefined,
+        rsmId: targetUser.rsmId ? String(targetUser.rsmId) : undefined,
         asmId: targetUser.asmId ? String(targetUser.asmId) : undefined,
+        rmId: targetUser.rmId ? String(targetUser.rmId) : undefined,
         partnerId: targetUser.partnerId ? String(targetUser.partnerId) : undefined,
         impersonatedBy: currentUserId, // Parent user ID
         parentRole: currentUserRole, // Parent role
@@ -351,22 +388,38 @@ router.post(
         token,
         user: {
           id: targetUser._id,
+          _id: targetUser._id,
           firstName: targetUser.firstName,
           lastName: targetUser.lastName,
           email: targetUser.email,
           role: targetUser.role,
+          status: targetUser.status,
+          rsmId: targetUser.rsmId,
           asmId: targetUser.asmId,
           rmId: targetUser.rmId,
+          personalAsmId: targetUser.personalAsmId,
+          businessAsmId: targetUser.businessAsmId,
+          homeLapAsmId: targetUser.homeLapAsmId,
+          personalRsmId: targetUser.personalRsmId,
+          businessRsmId: targetUser.businessRsmId,
+          homeLapRsmId: targetUser.homeLapRsmId,
+          asmType: targetUser.asmType,
+          rsmType: targetUser.rsmType,
+          rsmCode: targetUser.rsmCode || targetUser.asmCode,
+          asmCode: targetUser.asmCode || targetUser.rsmCode,
+          rmCode: targetUser.rmCode,
           partnerId: targetUser.partnerId,
           partnerCode: targetUser.partnerCode,
           employeeId: targetUser.employeeId,
         },
         parent: {
           id: currentUser._id,
+          _id: currentUser._id,
           firstName: currentUser.firstName,
           lastName: currentUser.lastName,
           email: currentUser.email,
           role: currentUser.role,
+          token: parentToken,
         },
       });
     } catch (err) {
@@ -757,27 +810,40 @@ router.post("/reset-password/confirm/:token", async (req, res) => {
 
 router.post("/change-password", auth, async (req, res) => {
   try {
-    const userId = req.user.sub; // from JWT
-    const { oldPassword, newPassword, confirmPassword } = req.body;
+    const isAdmin = req.user.role === ROLES.SUPER_ADMIN;
+    const { oldPassword, newPassword, confirmPassword, userId } = req.body;
 
-    if (!oldPassword || !newPassword || !confirmPassword) {
+    const targetUserId = isAdmin && userId ? userId : req.user.sub;
+
+    if (!isAdmin && (!oldPassword || !newPassword || !confirmPassword)) {
       return res.status(400).json({ message: "All fields are required" });
     }
 
-    if (newPassword !== confirmPassword) {
+    if (!newPassword) {
+      return res.status(400).json({ message: "New password is required" });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: "Password must be at least 6 characters" });
+    }
+
+    if (confirmPassword && newPassword !== confirmPassword) {
       return res.status(400).json({ message: "Passwords do not match" });
     }
 
-    const user = await User.findById(userId);
+    const user = await User.findById(targetUserId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const valid = await argon2.verify(user.passwordHash, oldPassword);
-    if (!valid) {
-      return res.status(400).json({ message: "Old password is incorrect" });
+    if (!isAdmin) {
+      const valid = await argon2.verify(user.passwordHash, oldPassword);
+      if (!valid) {
+        return res.status(400).json({ message: "Old password is incorrect" });
+      }
     }
 
     // Save new password
     user.passwordHash = await argon2.hash(newPassword);
+    if (user.tempPassword) user.tempPassword = undefined;
     await user.save();
 
     // Send confirmation email

@@ -8,6 +8,11 @@ const withdrawalRequestSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    rsmId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      index: true,
+    },
     asmId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -17,11 +22,13 @@ const withdrawalRequestSchema = new mongoose.Schema(
     note: { type: String, trim: true, default: "" },
     status: {
       type: String,
-      enum: ["PENDING_ASM", "PENDING_ADMIN", "PAID", "REJECTED"],
-      default: "PENDING_ASM",
+      enum: ["PENDING_ASM", "PENDING_RSM", "PENDING_ADMIN", "PAID", "REJECTED"],
+      default: "PENDING_RSM",
       index: true,
     },
     rejectReason: { type: String, trim: true, default: "" },
+    reviewedByRsm: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    rsmReviewedAt: { type: Date },
     reviewedByAsm: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     asmReviewedAt: { type: Date },
     reviewedByAdmin: { type: mongoose.Schema.Types.ObjectId, ref: "User" },

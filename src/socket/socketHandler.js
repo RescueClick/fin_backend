@@ -112,6 +112,17 @@ export const initializeSocket = (io) => {
       socket.join("customer"); // Join general customer room
       console.log(`📥 Customer ${userId} joined rooms: user_${userId.toString()}, customer`);
     }
+
+    // Join internal staff room for internal chat presence
+    const isStaffRole = ["SUPER_ADMIN", "ADMIN", "ASM", "RSM", "RM"].includes(role);
+    if (isStaffRole) {
+      socket.join("internal_staff");
+      io.to("internal_staff").emit("chat:presence", {
+        userId,
+        isOnline: true,
+        timestamp: new Date(),
+      });
+    }
     
     // Log all rooms user is in
     const rooms = Array.from(socket.rooms);
@@ -711,6 +722,62 @@ export const initializeSocket = (io) => {
       }
     });
 
+    // ========== INTERNAL STAFF CHAT EVENTS ==========
+
+    socket.on("chat:join_conversation", ({ conversationId }) => {
+      if (conversationId) {
+        socket.join(`chat_conv_${conversationId}`);
+      }
+    });
+
+    socket.on("chat:leave_conversation", ({ conversationId }) => {
+      if (conversationId) {
+        socket.leave(`chat_conv_${conversationId}`);
+      }
+    });
+
+    socket.on("chat:typing", ({ conversationId, recipientId }) => {
+      if (conversationId) {
+        socket.to(`chat_conv_${conversationId}`).emit("chat:user_typing", {
+          conversationId,
+          userId,
+          name: `${userData.firstName || ""} ${userData.lastName || ""}`.trim() || "Staff",
+        });
+      } else if (recipientId) {
+        io.to(`user_${recipientId}`).emit("chat:user_typing", {
+          userId,
+          name: `${userData.firstName || ""} ${userData.lastName || ""}`.trim() || "Staff",
+        });
+      }
+    });
+
+    socket.on("chat:stop_typing", ({ conversationId, recipientId }) => {
+      if (conversationId) {
+        socket.to(`chat_conv_${conversationId}`).emit("chat:user_stop_typing", {
+          conversationId,
+          userId,
+        });
+      } else if (recipientId) {
+        io.to(`user_${recipientId}`).emit("chat:user_stop_typing", {
+          userId,
+        });
+      }
+    });
+
+    socket.on("chat:get_online_staff", (callback) => {
+      const onlineIds = [];
+      for (const [uid, info] of activeUsers.entries()) {
+        if (["SUPER_ADMIN", "ADMIN", "ASM", "RSM", "RM"].includes(info.role)) {
+          onlineIds.push(uid);
+        }
+      }
+      if (typeof callback === "function") {
+        callback({ success: true, onlineUserIds: onlineIds });
+      } else {
+        socket.emit("chat:online_staff_list", { onlineUserIds: onlineIds });
+      }
+    });
+
     // ========== DISCONNECT ==========
 
     socket.on("disconnect", (reason) => {
@@ -719,6 +786,14 @@ export const initializeSocket = (io) => {
         
         // Remove from active users
         activeUsers.delete(userId);
+
+        if (["SUPER_ADMIN", "ADMIN", "ASM", "RSM", "RM"].includes(role)) {
+          io.to("internal_staff").emit("chat:presence", {
+            userId,
+            isOnline: false,
+            timestamp: new Date(),
+          });
+        }
 
         // Emit user offline status
         io.to(role).emit("userOffline", {

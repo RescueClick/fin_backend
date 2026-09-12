@@ -1,38 +1,41 @@
 /**
- * ASM → RSM → RM → Partner scope helpers.
- * RMs may link via personalRsmId / businessHomeRsmId OR direct asmId.
+ * RSM → ASM → RM → Partner scope helpers.
+ * Senior Manager: RSM
+ * Specialized Line Managers: ASMs (Personal, Business, Home/LAP)
+ * Relationship Managers: RMs
  */
 import { User } from "../models/User.js";
 import { ROLES } from "../config/roles.js";
-
 import mongoose from "mongoose";
 
-/** All RM ids that belong under an ASM (strict direct asmId priority + fallback to RSM chain). */
-export async function getRmIdsUnderAsm(asmId, session = null) {
-  if (!asmId) return [];
-  const asmOid = new mongoose.Types.ObjectId(asmId);
+/** All RM ids that belong under a Senior Regional Sales Manager (RSM). */
+export async function getRmIdsUnderRsm(rsmId, session = null) {
+  if (!rsmId) return [];
+  const rsmOid = new mongoose.Types.ObjectId(rsmId);
 
-  let rsmQuery = User.find({
-    role: ROLES.RSM,
-    asmId: asmOid,
+  // Subordinate ASMs under this RSM
+  let asmQuery = User.find({
+    role: { $in: [ROLES.ASM, ROLES.RSM] },
+    $or: [{ rsmId: rsmOid }, { asmId: rsmOid }],
     status: { $ne: "DELETED" },
   }).select("_id");
-  if (session) rsmQuery = rsmQuery.session(session);
-  const rsms = await rsmQuery.lean();
-  const rsmIds = rsms.map((r) => r._id);
+  if (session) asmQuery = asmQuery.session(session);
+  const asms = await asmQuery.lean();
+  const asmIds = asms.map((a) => a._id);
 
   let rmQuery = User.find({
     role: ROLES.RM,
     status: { $ne: "DELETED" },
     $or: [
-      { asmId: asmOid },
-      {
-        asmId: { $in: [null, undefined] },
-        $or: [
-          { personalRsmId: { $in: rsmIds } },
-          { businessHomeRsmId: { $in: rsmIds } },
-        ],
-      },
+      { rsmId: rsmOid },
+      { asmId: rsmOid },
+      { personalAsmId: { $in: asmIds } },
+      { businessAsmId: { $in: asmIds } },
+      { homeLapAsmId: { $in: asmIds } },
+      { personalRsmId: { $in: asmIds } },
+      { businessRsmId: { $in: asmIds } },
+      { homeLapRsmId: { $in: asmIds } },
+      { businessHomeRsmId: { $in: asmIds } },
     ],
   }).select("_id");
   if (session) rmQuery = rmQuery.session(session);
@@ -40,30 +43,69 @@ export async function getRmIdsUnderAsm(asmId, session = null) {
   return rms.map((r) => r._id);
 }
 
-/** Resolve ASM id for an RM via direct asmId or RSM parents. */
-export async function resolveAsmIdForRm(rm) {
-  if (!rm) return null;
-  if (rm.asmId) return rm.asmId;
+/** All RM ids that belong under a manager (handles both Senior RSM and Specialized ASM). */
+export async function getRmIdsUnderAsm(managerId, session = null) {
+  if (!managerId) return [];
+  const mOid = new mongoose.Types.ObjectId(managerId);
 
-  const rsmId = rm.personalRsmId || rm.businessHomeRsmId;
-  if (!rsmId) return null;
+  // Check role of manager
+  const manager = await User.findById(mOid).select("role").lean();
+  if (manager?.role === ROLES.RSM) {
+    return getRmIdsUnderRsm(managerId, session);
+  }
 
-  const rsm = await User.findOne({ _id: rsmId, role: ROLES.RSM })
-    .select("asmId")
-    .lean();
-  return rsm?.asmId || null;
+  // If manager is specialized ASM
+  let rmQuery = User.find({
+    role: ROLES.RM,
+    status: { $ne: "DELETED" },
+    $or: [
+      { personalAsmId: mOid },
+      { businessAsmId: mOid },
+      { homeLapAsmId: mOid },
+      { personalRsmId: mOid },
+      { businessRsmId: mOid },
+      { homeLapRsmId: mOid },
+      { businessHomeRsmId: mOid },
+      { asmId: mOid },
+    ],
+  }).select("_id");
+  if (session) rmQuery = rmQuery.session(session);
+  const rms = await rmQuery.lean();
+  return rms.map((r) => r._id);
 }
 
-/**
- * Full ASM scope used by partner lists, payouts, incentives.
- * Partners are resolved from current rmId (survives RM→RM moves).
- */
-export async function getAsmScopeIds(asmId) {
-  const rsmIds = (
-    await User.find({ role: ROLES.RSM, asmId }).select("_id").lean()
-  ).map((r) => r._id);
+/** Resolve parent RSM id for an RM. */
+export async function resolveRsmIdForRm(rm) {
+  if (!rm) return null;
+  if (rm.rsmId) return rm.rsmId;
+  if (rm.asmId) return rm.asmId;
 
-  const rmIds = await getRmIdsUnderAsm(asmId);
+  const asmId = rm.personalAsmId || rm.businessAsmId || rm.homeLapAsmId || rm.personalRsmId || rm.businessRsmId;
+  if (!asmId) return null;
+
+  const asm = await User.findOne({ _id: asmId, role: { $in: [ROLES.ASM, ROLES.RSM] } })
+    .select("rsmId asmId")
+    .lean();
+  return asm?.rsmId || asm?.asmId || null;
+}
+
+export const resolveAsmIdForRm = resolveRsmIdForRm;
+
+/**
+ * Full scope ids (RSM/ASM/RM/Partners) for Senior Manager or Line Manager.
+ */
+export async function getRsmScopeIds(rsmId) {
+  const rsmOid = new mongoose.Types.ObjectId(rsmId);
+  const asmIds = (
+    await User.find({
+      role: { $in: [ROLES.ASM, ROLES.RSM] },
+      $or: [{ rsmId: rsmOid }, { asmId: rsmOid }],
+    })
+      .select("_id")
+      .lean()
+  ).map((a) => a._id);
+
+  const rmIds = await getRmIdsUnderRsm(rsmId);
 
   const partnerIds = (
     await User.find({
@@ -75,7 +117,30 @@ export async function getAsmScopeIds(asmId) {
       .lean()
   ).map((p) => p._id);
 
-  return { rsmIds, rmIds, partnerIds };
+  return { rsmIds: [rsmOid], asmIds, rmIds, partnerIds };
+}
+
+export async function getAsmScopeIds(managerId) {
+  const mOid = new mongoose.Types.ObjectId(managerId);
+  const manager = await User.findById(mOid).select("role").lean();
+  if (manager?.role === ROLES.RSM) {
+    const scope = await getRsmScopeIds(managerId);
+    return { rsmIds: scope.asmIds, asmIds: scope.asmIds, rmIds: scope.rmIds, partnerIds: scope.partnerIds };
+  }
+
+  // If specialized ASM
+  const rmIds = await getRmIdsUnderAsm(managerId);
+  const partnerIds = (
+    await User.find({
+      role: ROLES.PARTNER,
+      rmId: { $in: rmIds },
+      status: { $ne: "PENDING" },
+    })
+      .select("_id")
+      .lean()
+  ).map((p) => p._id);
+
+  return { rsmIds: [mOid], asmIds: [mOid], rmIds, partnerIds };
 }
 
 /** Prefer stable disbursement timestamp over updatedAt (RM moves bump updatedAt). */

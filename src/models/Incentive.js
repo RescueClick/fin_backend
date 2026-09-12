@@ -9,10 +9,15 @@ const incentiveSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    rsmId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      index: true,
+    },
     asmId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: false,
       index: true,
     },
     month: { type: Number, required: true }, // 1-12

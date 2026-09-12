@@ -168,7 +168,7 @@ router.get("/partner/history", auth, requireRole(ROLES.PARTNER), async (req, res
 
 // GET /api/cibil/admin/all
 // Admin route to fetch all checks for analytics
-router.get("/admin/all", auth, requireRole(ROLES.ADMIN), async (req, res) => {
+router.get("/admin/all", auth, requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN), async (req, res) => {
   try {
     const reports = await CibilReport.find()
       .populate("partnerId", "firstName lastName partnerCode email")

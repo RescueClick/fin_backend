@@ -1,0 +1,47 @@
+[
+  {
+    "_id": "6aa57ad25ed6dc811177fd7d",
+    "participants": [
+      "6a439c6d815f90506104cb6e",
+      "6a8d3aa8b346b8a87530ab89"
+    ],
+    "lastMessage": {
+      "text": "",
+      "senderName": "",
+      "hasAttachment": false,
+      "createdAt": "2026-09-12T16:16:18.564Z"
+    },
+    "unreadCounts": {
+      "6a439c6d815f90506104cb6e": 0,
+      "6a8d3aa8b346b8a87530ab89": 0
+    },
+    "loanRef": null,
+    "clearedFor": [],
+    "createdAt": "2026-09-12T16:16:18.568Z",
+    "updatedAt": "2026-09-12T16:16:18.568Z",
+    "__v": 0
+  },
+  {
+    "_id": "6aa57b8dcb33a9f28bbfbfef",
+    "participants": [
+      "6a439c6d815f90506104cb6e",
+      "6a8931bdf609166f305adfe2"
+    ],
+    "lastMessage": {
+      "text": "hii",
+      "sender": "6a439c6d815f90506104cb6e",
+      "senderName": "Anil Bagad",
+      "hasAttachment": false,
+      "createdAt": "2026-09-12T16:19:30.357Z"
+    },
+    "unreadCounts": {
+      "6a439c6d815f90506104cb6e": 0,
+      "6a8931bdf609166f305adfe2": 1
+    },
+    "loanRef": null,
+    "clearedFor": [],
+    "createdAt": "2026-09-12T16:19:26.018Z",
+    "updatedAt": "2026-09-12T16:19:30.359Z",
+    "__v": 0
+  }
+]

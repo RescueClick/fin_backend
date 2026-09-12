@@ -102,7 +102,12 @@ export async function rebalanceHierarchyTargetsReplace({
     for (const rsm of rsms) {
       const rms = await User.find({
         role: ROLES.RM,
-        $or: [{ personalRsmId: rsm._id }, { businessHomeRsmId: rsm._id }],
+        $or: [
+          { personalRsmId: rsm._id },
+          { businessRsmId: rsm._id },
+          { homeLapRsmId: rsm._id },
+          { businessHomeRsmId: rsm._id },
+        ],
       }).lean();
       const uniqueRms = rms.filter(
         (rm, idx, self) =>
@@ -363,7 +368,15 @@ export async function rebalanceHierarchyTargetsAdd({
     distributionSummary.rsmCount += rsms.length;
 
     for (const rsm of rsms) {
-      const rms = await User.find({ role: ROLES.RM, $or: [{ personalRsmId: rsm._id }, { businessHomeRsmId: rsm._id }] }).lean();
+      const rms = await User.find({
+        role: ROLES.RM,
+        $or: [
+          { personalRsmId: rsm._id },
+          { businessRsmId: rsm._id },
+          { homeLapRsmId: rsm._id },
+          { businessHomeRsmId: rsm._id },
+        ],
+      }).lean();
       const uniqueRms = rms.filter((rm, idx, self) => idx === self.findIndex((x) => String(x._id) === String(rm._id)));
 
       let rsmTargetDoc = await Target.findOne({ assignedTo: rsm._id, role: ROLES.RSM, month: targetMonth, year: targetYear });

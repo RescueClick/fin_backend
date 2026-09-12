@@ -1,0 +1,53 @@
+[
+  {
+    "_id": "6a67729344d77ea29631ddaf",
+    "application": "6a5774cd4dd011cd30560d10",
+    "type": "LOAN_DISBURSEMENT",
+    "partnerId": "6a4d1c23e39a880fb3f12c56",
+    "amount": 1800,
+    "payOutStatus": "DONE",
+    "note": "",
+    "addedBy": "69cd478a5fa30bba81e88a34",
+    "createdAt": "2026-07-27T15:00:35.903Z",
+    "updatedAt": "2026-08-26T12:24:32.562Z",
+    "__v": 0
+  },
+  {
+    "_id": "6a6860ef0ce84447646926eb",
+    "application": "6a6083e24dd011cd3057c124",
+    "type": "LOAN_DISBURSEMENT",
+    "partnerId": "6a4ccec9dbd013b52b079bd1",
+    "amount": 3000,
+    "payOutStatus": "DONE",
+    "addedBy": "6a439c6d815f90506104cb6e",
+    "createdAt": "2026-07-28T07:57:35.757Z",
+    "updatedAt": "2026-08-07T11:29:56.909Z",
+    "__v": 0
+  },
+  {
+    "_id": "6a75962807977a3cf59ca56e",
+    "application": "6a6c78274fc326925bee282b",
+    "type": "LOAN_DISBURSEMENT",
+    "partnerId": "6a4ccec9dbd013b52b079bd1",
+    "amount": 5500,
+    "payOutStatus": "DONE",
+    "addedBy": "6a439c6d815f90506104cb6e",
+    "createdAt": "2026-08-07T08:24:08.734Z",
+    "updatedAt": "2026-09-11T06:03:07.073Z",
+    "__v": 0,
+    "note": ""
+  },
+  {
+    "_id": "6a8d8be4269a22adbb0fb1d3",
+    "application": "6a86c6155da1071b63a5a240",
+    "type": "LOAN_DISBURSEMENT",
+    "partnerId": "6a69a13a9757095939699d06",
+    "amount": 6000,
+    "payOutStatus": "DONE",
+    "addedBy": "6a439c6d815f90506104cb6e",
+    "createdAt": "2026-08-25T12:34:44.970Z",
+    "updatedAt": "2026-09-11T06:07:37.515Z",
+    "__v": 0,
+    "note": ""
+  }
+]

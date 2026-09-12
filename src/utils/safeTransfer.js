@@ -297,18 +297,18 @@ export async function reassignAsmWorkload({
     throw err;
   }
 
-  let newAsmQuery = User.findOne({ _id: toId, role: ROLES.ASM, status: "ACTIVE" });
+  let newAsmQuery = User.findOne({ _id: toId, role: { $in: [ROLES.ASM, ROLES.RSM] }, status: "ACTIVE" });
   if (session) newAsmQuery = newAsmQuery.session(session);
   const newAsm = await newAsmQuery.lean();
   if (!newAsm) {
-    const err = new Error("New ASM not found or inactive");
+    const err = new Error("New Manager not found or inactive");
     err.status = 404;
     throw err;
   }
 
   const rsmUpdate = await User.updateMany(
-    { role: ROLES.RSM, asmId: fromId },
-    { $set: { asmId: toId } },
+    { role: { $in: [ROLES.ASM, ROLES.RSM] }, $or: [{ asmId: fromId }, { rsmId: fromId }] },
+    { $set: { asmId: toId, rsmId: toId } },
     sessionOpt(session)
   );
 
@@ -317,7 +317,7 @@ export async function reassignAsmWorkload({
 
   const rmUpdate = await User.updateMany(
     { role: ROLES.RM, _id: { $in: rmIds } },
-    { $set: { asmId: toId } },
+    { $set: { asmId: toId, rsmId: toId } },
     sessionOpt(session)
   );
 
@@ -406,54 +406,51 @@ export async function reassignRsmWorkload({
     throw err;
   }
 
-  let oldRsmQuery = User.findOne({ _id: fromId, role: ROLES.RSM });
+  let oldRsmQuery = User.findOne({ _id: fromId, role: { $in: [ROLES.RSM, ROLES.ASM] } });
   if (session) oldRsmQuery = oldRsmQuery.session(session);
   const oldRsm = await oldRsmQuery.lean();
   if (!oldRsm) {
-    const err = new Error("Old RSM not found");
+    const err = new Error("Old manager not found");
     err.status = 404;
     throw err;
   }
 
-  let toRsmQuery = User.findOne({ _id: toId, role: ROLES.RSM, status: "ACTIVE" });
+  let toRsmQuery = User.findOne({ _id: toId, role: { $in: [ROLES.RSM, ROLES.ASM] }, status: "ACTIVE" });
   if (session) toRsmQuery = toRsmQuery.session(session);
   const toRsm = await toRsmQuery.lean();
   if (!toRsm) {
-    const err = new Error("New RSM not found or inactive");
+    const err = new Error("New manager not found or inactive");
     err.status = 404;
     throw err;
   }
 
-  const oldType = oldRsm.rsmType || toRsm.rsmType;
+  const oldType = oldRsm.asmType || oldRsm.rsmType || toRsm.asmType || toRsm.rsmType;
   let rmUpdate = { modifiedCount: 0 };
   let rmIds = [];
 
   if (oldType === "PERSONAL") {
-    let rmsQuery = User.find({ role: ROLES.RM, personalRsmId: fromId }).select("_id");
-    if (session) rmsQuery = rmsQuery.session(session);
-    const rms = await rmsQuery.lean();
-    rmIds = rms.map((r) => r._id);
-
-    rmUpdate = await User.updateMany(
-      { role: ROLES.RM, personalRsmId: fromId },
-      { $set: { personalRsmId: toId } },
-      sessionOpt(session)
-    );
-  } else if (oldType === "BUSINESS_HOME") {
-    let rmsQuery = User.find({ role: ROLES.RM, businessHomeRsmId: fromId }).select("_id");
-    if (session) rmsQuery = rmsQuery.session(session);
-    const rms = await rmsQuery.lean();
-    rmIds = rms.map((r) => r._id);
-
-    rmUpdate = await User.updateMany(
-      { role: ROLES.RM, businessHomeRsmId: fromId },
-      { $set: { businessHomeRsmId: toId } },
-      sessionOpt(session)
-    );
-  } else {
     let rmsQuery = User.find({
       role: ROLES.RM,
-      $or: [{ personalRsmId: fromId }, { businessHomeRsmId: fromId }],
+      $or: [{ personalAsmId: fromId }, { personalRsmId: fromId }],
+    }).select("_id");
+    if (session) rmsQuery = rmsQuery.session(session);
+    const rms = await rmsQuery.lean();
+    rmIds = rms.map((r) => r._id);
+
+    rmUpdate = await User.updateMany(
+      { role: ROLES.RM, $or: [{ personalAsmId: fromId }, { personalRsmId: fromId }] },
+      { $set: { personalAsmId: toId, personalRsmId: toId } },
+      sessionOpt(session)
+    );
+  } else if (oldType === "BUSINESS") {
+    let rmsQuery = User.find({
+      role: ROLES.RM,
+      $or: [
+        { businessAsmId: fromId },
+        { businessRsmId: fromId },
+        { businessHomeRsmId: fromId },
+        { businessHomeAsmId: fromId },
+      ],
     }).select("_id");
     if (session) rmsQuery = rmsQuery.session(session);
     const rms = await rmsQuery.lean();
@@ -462,11 +459,103 @@ export async function reassignRsmWorkload({
     rmUpdate = await User.updateMany(
       {
         role: ROLES.RM,
-        $or: [{ personalRsmId: fromId }, { businessHomeRsmId: fromId }],
+        $or: [
+          { businessAsmId: fromId },
+          { businessRsmId: fromId },
+          { businessHomeRsmId: fromId },
+          { businessHomeAsmId: fromId },
+        ],
+      },
+      {
+        $set: {
+          businessAsmId: toId,
+          businessRsmId: toId,
+          businessHomeRsmId: toId,
+          businessHomeAsmId: toId,
+        },
+      },
+      sessionOpt(session)
+    );
+  } else if (oldType === "HOME_LAP") {
+    let rmsQuery = User.find({
+      role: ROLES.RM,
+      $or: [
+        { homeLapAsmId: fromId },
+        { homeLapRsmId: fromId },
+        { businessHomeRsmId: fromId },
+        { businessHomeAsmId: fromId },
+      ],
+    }).select("_id");
+    if (session) rmsQuery = rmsQuery.session(session);
+    const rms = await rmsQuery.lean();
+    rmIds = rms.map((r) => r._id);
+
+    rmUpdate = await User.updateMany(
+      {
+        role: ROLES.RM,
+        $or: [
+          { homeLapAsmId: fromId },
+          { homeLapRsmId: fromId },
+          { businessHomeRsmId: fromId },
+          { businessHomeAsmId: fromId },
+        ],
+      },
+      {
+        $set: {
+          homeLapAsmId: toId,
+          homeLapRsmId: toId,
+          businessHomeRsmId: toId,
+          businessHomeAsmId: toId,
+        },
+      },
+      sessionOpt(session)
+    );
+  } else if (oldType === "BUSINESS_HOME") {
+    let rmsQuery = User.find({
+      role: ROLES.RM,
+      $or: [{ businessHomeRsmId: fromId }, { businessRsmId: fromId }, { homeLapRsmId: fromId }],
+    }).select("_id");
+    if (session) rmsQuery = rmsQuery.session(session);
+    const rms = await rmsQuery.lean();
+    rmIds = rms.map((r) => r._id);
+
+    rmUpdate = await User.updateMany(
+      {
+        role: ROLES.RM,
+        $or: [{ businessHomeRsmId: fromId }, { businessRsmId: fromId }, { homeLapRsmId: fromId }],
+      },
+      { $set: { businessHomeRsmId: toId, businessRsmId: toId, homeLapRsmId: toId } },
+      sessionOpt(session)
+    );
+  } else {
+    let rmsQuery = User.find({
+      role: ROLES.RM,
+      $or: [
+        { personalRsmId: fromId },
+        { businessRsmId: fromId },
+        { homeLapRsmId: fromId },
+        { businessHomeRsmId: fromId },
+      ],
+    }).select("_id");
+    if (session) rmsQuery = rmsQuery.session(session);
+    const rms = await rmsQuery.lean();
+    rmIds = rms.map((r) => r._id);
+
+    rmUpdate = await User.updateMany(
+      {
+        role: ROLES.RM,
+        $or: [
+          { personalRsmId: fromId },
+          { businessRsmId: fromId },
+          { homeLapRsmId: fromId },
+          { businessHomeRsmId: fromId },
+        ],
       },
       {
         $set: {
           personalRsmId: toId,
+          businessRsmId: toId,
+          homeLapRsmId: toId,
           businessHomeRsmId: toId,
         },
       },
@@ -483,15 +572,17 @@ export async function reassignRsmWorkload({
     );
   }
 
-  // Update applications: all applications previously assigned to old RSM
-  // + applications under affected RMs with loanType matching RSM type
+  // Update applications: all applications previously assigned to old manager
+  // + applications under affected RMs with loanType matching manager specialty
+  const parentId = toRsm.rsmId || toRsm.asmId;
   const appSet = {
-    rsmId: toId,
-    ...(toRsm.asmId ? { asmId: toRsm.asmId } : {}),
+    asmId: toId,
+    rsmId: parentId || toId,
   };
 
   const appFilter = {
     $or: [
+      { asmId: fromId },
       { rsmId: fromId },
       ...(rmIds.length
         ? [
@@ -499,6 +590,10 @@ export async function reassignRsmWorkload({
               rmId: { $in: rmIds },
               ...(oldType === "PERSONAL"
                 ? { loanType: "PERSONAL" }
+                : oldType === "BUSINESS"
+                ? { loanType: "BUSINESS" }
+                : oldType === "HOME_LAP"
+                ? { loanType: { $in: ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED", "LAP"] } }
                 : oldType === "BUSINESS_HOME"
                 ? { loanType: { $ne: "PERSONAL" } }
                 : {}),
@@ -548,10 +643,20 @@ export async function transferRmToRsm({
   const updateFields = {};
   if (rsmType === "PERSONAL") {
     updateFields.personalRsmId = rsmOid;
+  } else if (rsmType === "BUSINESS") {
+    updateFields.businessRsmId = rsmOid;
+    updateFields.businessHomeRsmId = rsmOid; // legacy compatibility
+  } else if (rsmType === "HOME_LAP") {
+    updateFields.homeLapRsmId = rsmOid;
+    updateFields.businessHomeRsmId = rsmOid; // legacy compatibility
   } else if (rsmType === "BUSINESS_HOME") {
     updateFields.businessHomeRsmId = rsmOid;
+    updateFields.businessRsmId = rsmOid;
+    updateFields.homeLapRsmId = rsmOid;
   } else {
     updateFields.personalRsmId = rsmOid;
+    updateFields.businessRsmId = rsmOid;
+    updateFields.homeLapRsmId = rsmOid;
     updateFields.businessHomeRsmId = rsmOid;
   }
 
@@ -566,6 +671,10 @@ export async function transferRmToRsm({
     rmId: rmOid,
     ...(rsmType === "PERSONAL"
       ? { loanType: "PERSONAL" }
+      : rsmType === "BUSINESS"
+      ? { loanType: "BUSINESS" }
+      : rsmType === "HOME_LAP"
+      ? { loanType: { $in: ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED", "LAP"] } }
       : rsmType === "BUSINESS_HOME"
       ? { loanType: { $ne: "PERSONAL" } }
       : {}),

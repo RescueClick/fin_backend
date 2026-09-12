@@ -79,17 +79,27 @@ async function loadRsmReportingScope(rsmId) {
 function loanTypeMatchesRsmRole(loanType, rsmTypeNorm) {
   if (!rsmTypeNorm) return true;
   if (rsmTypeNorm === RSM_TYPES.PERSONAL) return loanType === "PERSONAL";
+  if (rsmTypeNorm === RSM_TYPES.BUSINESS) return loanType === "BUSINESS";
+  if (rsmTypeNorm === RSM_TYPES.HOME_LAP) {
+    return ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED", "LAP"].includes(loanType);
+  }
   if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
-    return ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"].includes(loanType);
+    return ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED", "LAP"].includes(loanType);
   }
   return true;
 }
 
 function loanTypeFilterForRsmType(rsmTypeNorm) {
   if (rsmTypeNorm === RSM_TYPES.PERSONAL) return { loanType: "PERSONAL" };
+  if (rsmTypeNorm === RSM_TYPES.BUSINESS) return { loanType: "BUSINESS" };
+  if (rsmTypeNorm === RSM_TYPES.HOME_LAP) {
+    return {
+      loanType: { $in: ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED", "LAP"] },
+    };
+  }
   if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
     return {
-      loanType: { $in: ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"] },
+      loanType: { $in: ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED", "LAP"] },
     };
   }
   return {};
@@ -98,17 +108,58 @@ function loanTypeFilterForRsmType(rsmTypeNorm) {
 async function eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm) {
   const base = { role: ROLES.RM };
   if (rsmTypeNorm === RSM_TYPES.PERSONAL) {
-    return User.find({ ...base, personalRsmId: rsmObjectId }).distinct("_id");
+    return User.find({ ...base, $or: [{ personalAsmId: rsmObjectId }, { personalRsmId: rsmObjectId }] }).distinct("_id");
+  }
+  if (rsmTypeNorm === RSM_TYPES.BUSINESS) {
+    return User.find({
+      ...base,
+      $or: [
+        { businessAsmId: rsmObjectId },
+        { businessRsmId: rsmObjectId },
+        { businessHomeRsmId: rsmObjectId },
+        { businessHomeAsmId: rsmObjectId },
+      ],
+    }).distinct("_id");
+  }
+  if (rsmTypeNorm === RSM_TYPES.HOME_LAP) {
+    return User.find({
+      ...base,
+      $or: [
+        { homeLapAsmId: rsmObjectId },
+        { homeLapRsmId: rsmObjectId },
+        { businessHomeRsmId: rsmObjectId },
+        { businessHomeAsmId: rsmObjectId },
+      ],
+    }).distinct("_id");
   }
   if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
-    return User.find({ ...base, businessHomeRsmId: rsmObjectId }).distinct("_id");
+    return User.find({
+      ...base,
+      $or: [
+        { businessHomeAsmId: rsmObjectId },
+        { businessHomeRsmId: rsmObjectId },
+        { businessAsmId: rsmObjectId },
+        { businessRsmId: rsmObjectId },
+        { homeLapAsmId: rsmObjectId },
+        { homeLapRsmId: rsmObjectId },
+      ],
+    }).distinct("_id");
   }
-  const [personal, business] = await Promise.all([
-    User.find({ ...base, personalRsmId: rsmObjectId }).distinct("_id"),
-    User.find({ ...base, businessHomeRsmId: rsmObjectId }).distinct("_id"),
-  ]);
-  const seen = new Set([...personal, ...business].map((id) => id.toString()));
-  return [...seen].map((id) => new mongoose.Types.ObjectId(id));
+  return User.find({
+    ...base,
+    $or: [
+      { personalAsmId: rsmObjectId },
+      { personalRsmId: rsmObjectId },
+      { businessAsmId: rsmObjectId },
+      { businessRsmId: rsmObjectId },
+      { homeLapAsmId: rsmObjectId },
+      { homeLapRsmId: rsmObjectId },
+      { businessHomeRsmId: rsmObjectId },
+      { businessHomeAsmId: rsmObjectId },
+      { asmId: rsmObjectId },
+      { rsmId: rsmObjectId },
+    ],
+  }).distinct("_id");
 }
 
 const RSM_ALLOWED_STATUSES = [
@@ -124,27 +175,28 @@ const RSM_ALLOWED_STATUSES = [
 function expectedRsmIdForApplication(app) {
   const rm = app.rmId;
   if (!rm) return null;
-  if (app.loanType === "PERSONAL") return rm.personalRsmId || null;
+  if (app.loanType === "PERSONAL") return rm.personalAsmId || rm.personalRsmId || null;
+  if (app.loanType === "BUSINESS") return rm.businessAsmId || rm.businessHomeAsmId || rm.businessRsmId || rm.businessHomeRsmId || null;
   if (
-    ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"].includes(
+    ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED", "LAP"].includes(
       app.loanType
     )
   ) {
-    return rm.businessHomeRsmId || null;
+    return rm.homeLapAsmId || rm.businessHomeAsmId || rm.homeLapRsmId || rm.businessHomeRsmId || null;
   }
   return null;
 }
 
 /**
- * Fix application routing: set rsmId/asmId from RM's personalRsmId / businessHomeRsmId when missing or wrong.
+ * Fix application routing: set asmId/rsmId when missing or wrong.
  * Only applies to applications where documents have been completed by RM (DOC_COMPLETE and subsequent stages).
  */
 async function repairDocCompleteRoutingForRsm(rsmUserId) {
   const rsmObjectId = toObjectId(rsmUserId);
-  const rsm = await User.findById(rsmUserId).select("rsmType asmId").lean();
+  const rsm = await User.findById(rsmUserId).select("asmType rsmType rsmId asmId").lean();
   if (!rsm) return;
 
-  const rsmTypeNorm = normalizeRsmTypeValue(rsm.rsmType);
+  const rsmTypeNorm = normalizeRsmTypeValue(rsm.asmType || rsm.rsmType);
   const loanFilter = loanTypeFilterForRsmType(rsmTypeNorm);
   const eligibleRmIds = await eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm);
   if (!eligibleRmIds.length) return;
@@ -154,8 +206,8 @@ async function repairDocCompleteRoutingForRsm(rsmUserId) {
     status: { $in: RSM_ALLOWED_STATUSES },
     ...loanFilter,
   })
-    .select("_id appNo rsmId rmId loanType status")
-    .populate("rmId", "personalRsmId businessHomeRsmId")
+    .select("_id appNo asmId rsmId rmId loanType status")
+    .populate("rmId", "personalAsmId businessAsmId homeLapAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
     .lean();
 
   const me = rsmObjectId.toString();
@@ -165,12 +217,12 @@ async function repairDocCompleteRoutingForRsm(rsmUserId) {
     const expected = expectedRsmIdForApplication(appLike);
     if (!expected || expected.toString() !== me) continue;
 
-    const cur = row.rsmId ? row.rsmId.toString() : null;
+    const cur = row.asmId ? row.asmId.toString() : (row.rsmId ? row.rsmId.toString() : null);
     if (cur === me) continue;
 
     await Application.updateOne(
       { _id: row._id },
-      { $set: { rsmId: rsmObjectId, asmId: rsm.asmId || null } }
+      { $set: { asmId: rsmObjectId, rsmId: rsm.rsmId || rsm.asmId || null } }
     );
   }
 }
@@ -182,17 +234,17 @@ async function repairDocCompleteRoutingForRsm(rsmUserId) {
  */
 async function loadApplicationForRsm(applicationId, rsmUserId) {
   const rsmObjectId = toObjectId(rsmUserId);
-  const rsmProfile = await User.findById(rsmUserId).select("rsmType asmId").lean();
+  const rsmProfile = await User.findById(rsmUserId).select("asmType rsmType rsmId asmId").lean();
   if (!rsmProfile) return null;
 
-  const rsmTypeNorm = normalizeRsmTypeValue(rsmProfile.rsmType);
+  const rsmTypeNorm = normalizeRsmTypeValue(rsmProfile.asmType || rsmProfile.rsmType);
   const app = await Application.findById(applicationId).populate(
     "rmId",
-    "personalRsmId businessHomeRsmId"
+    "personalAsmId businessAsmId homeLapAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId"
   );
   if (!app || !app.rmId) return null;
 
-  // RSM can ONLY access applications that are at DOC_COMPLETE or beyond
+  // RSM/ASM can ONLY access applications that are at DOC_COMPLETE or beyond
   if (!RSM_ALLOWED_STATUSES.includes(app.status)) {
     return null;
   }
@@ -200,7 +252,7 @@ async function loadApplicationForRsm(applicationId, rsmUserId) {
   if (!loanTypeMatchesRsmRole(app.loanType, rsmTypeNorm)) return null;
 
   const meStr = rsmObjectId.toString();
-  const assignedStr = app.rsmId ? app.rsmId.toString() : null;
+  const assignedStr = app.asmId ? app.asmId.toString() : (app.rsmId ? app.rsmId.toString() : null);
 
   if (assignedStr === meStr) {
     return app;
@@ -210,8 +262,8 @@ async function loadApplicationForRsm(applicationId, rsmUserId) {
   const mappingSaysUs = expected?.toString() === meStr;
 
   if (mappingSaysUs) {
-    app.rsmId = rsmObjectId;
-    app.asmId = rsmProfile.asmId || null;
+    app.asmId = rsmObjectId;
+    app.rsmId = rsmProfile.rsmId || rsmProfile.asmId || null;
     await app.save();
     return app;
   }
@@ -221,7 +273,7 @@ async function loadApplicationForRsm(applicationId, rsmUserId) {
 
 // GET /api/rsm/my-rsms  (ASM only)
 // List RSMs under the logged-in ASM
-router.get("/my-rsms", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get(["/my-rsms", "/my-asms"], auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
 
@@ -241,7 +293,7 @@ router.get("/my-rsms", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.post(
   "/create-rm",
   auth,
-  requireRole(ROLES.RSM),
+  requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const { firstName, lastName, phone, dob, joinDate, region, email, password, assignToRsmType } = req.body || {};
@@ -310,8 +362,16 @@ router.post(
       // Set the appropriate RSM link based on type
       if (assignToRsmType === RSM_TYPES.PERSONAL) {
         rmData.personalRsmId = rsmId;
+      } else if (assignToRsmType === RSM_TYPES.BUSINESS) {
+        rmData.businessRsmId = rsmId;
+        rmData.businessHomeRsmId = rsmId; // backward-compatibility
+      } else if (assignToRsmType === RSM_TYPES.HOME_LAP) {
+        rmData.homeLapRsmId = rsmId;
+        rmData.businessHomeRsmId = rsmId; // backward-compatibility
       } else if (assignToRsmType === RSM_TYPES.BUSINESS_HOME) {
         rmData.businessHomeRsmId = rsmId;
+        rmData.businessRsmId = rsmId;
+        rmData.homeLapRsmId = rsmId;
       }
 
       // Also set asmId for convenience (inherited from RSM)
@@ -358,6 +418,8 @@ router.post(
         rmCode: rm.rmCode,
         employeeId: rm.employeeId,
         personalRsmId: rm.personalRsmId,
+        businessRsmId: rm.businessRsmId,
+        homeLapRsmId: rm.homeLapRsmId,
         businessHomeRsmId: rm.businessHomeRsmId,
         tempPassword: password ? undefined : rawPassword,
       });
@@ -370,7 +432,7 @@ router.post(
 
 // GET /api/rsm/my-rms
 // RMs on this RSM's line only: PERSONAL RSM → personalRsmId; BUSINESS_HOME → businessHomeRsmId
-router.get("/my-rms", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.get("/my-rms", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const scope = await loadRsmReportingScope(rsmId);
@@ -401,7 +463,7 @@ router.get("/my-rms", auth, requireRole(ROLES.RSM), async (req, res) => {
 router.post(
   "/applications/:id/transition",
   auth,
-  requireRole(ROLES.RSM),
+  requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const { to, note, approvedLoanAmount } = req.body;
@@ -619,29 +681,29 @@ router.post(
 
 // GET /api/rsm/applications
 // List all applications assigned to this RSM
-router.get("/applications", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.get("/applications", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const { status } = req.query;
     const rsmObjectId = toObjectId(rsmId);
 
-    const rsm = await User.findById(rsmId).select("rsmType").lean();
+    const rsm = await User.findById(rsmId).select("asmType rsmType").lean();
     if (!rsm) {
-      return res.status(404).json({ message: "RSM not found" });
+      return res.status(404).json({ message: "Manager not found" });
     }
 
-    const rsmTypeNorm = normalizeRsmTypeValue(rsm.rsmType);
+    const rsmTypeNorm = normalizeRsmTypeValue(rsm.asmType || rsm.rsmType);
     const loanTypeFilter = loanTypeFilterForRsmType(rsmTypeNorm);
 
     if (rsmTypeNorm) {
-      console.log(`🔍 RSM ${rsmId} list: type ${rsmTypeNorm} (raw: ${JSON.stringify(rsm.rsmType)})`);
+      console.log(`🔍 Manager ${rsmId} list: type ${rsmTypeNorm}`);
     } else {
       console.log(
-        `⚠️ RSM ${rsmId} has no usable rsmType (${rsm.rsmType}); listing all loans for this rsmId`
+        `⚠️ Manager ${rsmId} has no usable asmType (${rsm.asmType || rsm.rsmType}); listing all loans for this manager`
       );
     }
 
-    // Fix all rows: missing or wrong rsmId vs RM personal/business RSM mapping (for completed documents)
+    // Fix all rows: missing or wrong asmId vs RM mapping (for completed documents)
     await repairDocCompleteRoutingForRsm(rsmId);
 
     const eligibleRmIds = await eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm);
@@ -653,6 +715,7 @@ router.get("/applications", auth, requireRole(ROLES.RSM), async (req, res) => {
       $and: [
         {
           $or: [
+            { asmId: rsmObjectId },
             { rsmId: rsmObjectId },
             ...(eligibleRmIds.length ? [{ rmId: { $in: eligibleRmIds }, ...loanTypeFilter }] : []),
           ],
@@ -705,7 +768,7 @@ router.get("/applications", auth, requireRole(ROLES.RSM), async (req, res) => {
 
 // GET /api/rsm/applications/:id
 // Get single application details for RSM
-router.get("/applications/:id", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.get("/applications/:id", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const { id } = req.params;
@@ -752,7 +815,7 @@ router.get("/applications/:id", auth, requireRole(ROLES.RSM), async (req, res) =
 router.get(
   "/applications/:id/docs/:docType/download",
   auth,
-  requireRole(ROLES.RSM),
+  requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const { id, docType } = req.params;
@@ -937,15 +1000,15 @@ router.get(
 
 // GET /api/rsm/dashboard
 // RSM dashboard with KPIs
-router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
 
-    // RSM profile
-    const rsm = await User.findOne({ _id: rsmId, role: ROLES.RSM }).lean();
-    if (!rsm) return res.status(404).json({ message: "RSM not found" });
+    // RSM/ASM profile
+    const rsm = await User.findOne({ _id: rsmId, role: { $in: [ROLES.ASM, ROLES.RSM] } }).lean();
+    if (!rsm) return res.status(404).json({ message: "Manager not found" });
 
-    const rsmTypeNorm = normalizeRsmTypeValue(rsm.rsmType);
+    const rsmTypeNorm = normalizeRsmTypeValue(rsm.asmType || rsm.rsmType);
     await repairDocCompleteRoutingForRsm(rsmId);
     const ltFilter = loanTypeFilterForRsmType(rsmTypeNorm);
     const rsmObjectId = toObjectId(rsmId);
@@ -953,13 +1016,29 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
     const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
     let rmScope = {
       role: ROLES.RM,
-      $or: [{ personalRsmId: rsmObjectId }, { businessHomeRsmId: rsmObjectId }],
+      $or: [
+        { personalAsmId: rsmObjectId },
+        { businessAsmId: rsmObjectId },
+        { homeLapAsmId: rsmObjectId },
+        { personalRsmId: rsmObjectId },
+        { businessRsmId: rsmObjectId },
+        { homeLapRsmId: rsmObjectId },
+        { businessHomeRsmId: rsmObjectId },
+      ],
       ...userBase,
     };
     if (rsmTypeNorm === RSM_TYPES.PERSONAL) {
-      rmScope = { role: ROLES.RM, personalRsmId: rsmObjectId, ...userBase };
+      rmScope = { role: ROLES.RM, $or: [{ personalAsmId: rsmObjectId }, { personalRsmId: rsmObjectId }], ...userBase };
+    } else if (rsmTypeNorm === RSM_TYPES.BUSINESS) {
+      rmScope = { role: ROLES.RM, $or: [{ businessAsmId: rsmObjectId }, { businessRsmId: rsmObjectId }, { businessHomeRsmId: rsmObjectId }, { businessHomeAsmId: rsmObjectId }], ...userBase };
+    } else if (rsmTypeNorm === RSM_TYPES.HOME_LAP) {
+      rmScope = { role: ROLES.RM, $or: [{ homeLapAsmId: rsmObjectId }, { homeLapRsmId: rsmObjectId }, { businessHomeRsmId: rsmObjectId }, { businessHomeAsmId: rsmObjectId }], ...userBase };
     } else if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
-      rmScope = { role: ROLES.RM, businessHomeRsmId: rsmObjectId, ...userBase };
+      rmScope = {
+        role: ROLES.RM,
+        $or: [{ businessHomeRsmId: rsmObjectId }, { businessHomeAsmId: rsmObjectId }, { businessRsmId: rsmObjectId }, { homeLapRsmId: rsmObjectId }, { businessAsmId: rsmObjectId }, { homeLapAsmId: rsmObjectId }],
+        ...userBase,
+      };
     }
     const rms = await User.find(rmScope).lean();
     const rmIds = rms.map((rm) => rm._id);
@@ -968,6 +1047,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
       $and: [
         {
           $or: [
+            { asmId: rsmObjectId },
             { rsmId: rsmObjectId },
             ...(rmIds.length ? [{ rmId: { $in: rmIds }, ...ltFilter }] : []),
           ],
@@ -1240,7 +1320,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM), async (req, res) => {
 
 // GET /api/rsm/profile
 // Get RSM profile with ASM details
-router.get("/profile", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.get("/profile", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsm = await User.findById(req.user.sub)
       .select("-passwordHash")
@@ -1255,6 +1335,8 @@ router.get("/profile", auth, requireRole(ROLES.RSM), async (req, res) => {
     }
 
     res.json({
+      _id: rsm._id,
+      id: rsm._id,
       employeeId: rsm.employeeId,
       firstName: rsm.firstName,
       lastName: rsm.lastName,
@@ -1282,7 +1364,7 @@ router.get("/profile", auth, requireRole(ROLES.RSM), async (req, res) => {
 });
 
 // PATCH /api/rsm/profile/update
-router.patch("/profile/update", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.patch("/profile/update", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const {
@@ -1363,25 +1445,29 @@ router.patch("/profile/update", auth, requireRole(ROLES.RSM), async (req, res) =
 
 // GET /api/rsm/banks
 // RSM fetches banks allowed for their rsmType
-router.get("/banks", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.get("/banks", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsm = await User.findById(req.user.sub)
-      .select("rsmType")
+      .select("asmType rsmType")
       .lean();
 
     if (!rsm) {
-      return res.status(404).json({ message: "RSM not found" });
+      return res.status(404).json({ message: "Manager not found" });
     }
 
-    if (!rsm.rsmType) {
+    const managerType = String(rsm.asmType || rsm.rsmType || "").trim().toUpperCase();
+    if (!managerType) {
       return res.status(400).json({
-        message: "RSM type is not set for this user. Please contact admin.",
+        message: "Manager type is not set for this user. Please contact admin.",
       });
     }
 
     const banks = await BankMaster.find({
       isActive: true,
-      rsmTypes: rsm.rsmType,
+      $or: [
+        { asmTypes: managerType },
+        { rsmTypes: managerType },
+      ],
     })
       .sort({ bankName: 1 })
       .lean();
@@ -1401,6 +1487,8 @@ router.get("/banks", auth, requireRole(ROLES.RSM), async (req, res) => {
     let filtered = banks.filter((b) => {
       const lt = normalizeLoanType(b.loanType);
       if (rsmType === String(RSM_TYPES.PERSONAL)) return lt === "PERSONAL";
+      if (rsmType === String(RSM_TYPES.BUSINESS)) return lt === "BUSINESS";
+      if (rsmType === String(RSM_TYPES.HOME_LAP)) return lt.startsWith("HOME_LOAN_") || lt.startsWith("LAP_") || lt === "LAP";
       if (rsmType === String(RSM_TYPES.BUSINESS_HOME)) return lt === "BUSINESS" || lt.startsWith("HOME_LOAN_") || lt.startsWith("LAP_") || lt === "LAP";
       return true;
     });
@@ -1432,7 +1520,7 @@ router.get("/banks", auth, requireRole(ROLES.RSM), async (req, res) => {
 
 // GET /api/rsm/rm/:rmId/analytics
 // RSM views analytics for a specific RM
-router.get("/rm/:rmId/analytics", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.get("/rm/:rmId/analytics", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const { rmId } = req.params;
@@ -1618,7 +1706,7 @@ router.get("/rm/:rmId/analytics", auth, requireRole(ROLES.RSM), async (req, res)
 
 // POST /api/rsm/rm/:rmId/follow-up
 // RSM takes follow-up from RM
-router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const { rmId } = req.params;
@@ -1666,7 +1754,7 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM), async (req, res
 
 // GET /api/rsm/rms/follow-ups
 // RSM gets all RM follow-ups (+ partner fill performance)
-router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const scope = await loadRsmReportingScope(rsmId);
@@ -1772,7 +1860,7 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM), async (req, res) => 
 
 
 // POST /api/rsm/rm/activate (RSM can activate their RMs)
-router.post("/rm-activate", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.post("/rm-activate", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { rmId } = req.body;
 
@@ -1830,7 +1918,7 @@ router.post("/rm-activate", auth, requireRole(ROLES.RSM), async (req, res) => {
 });
 
 // POST /api/rsm/rm/deactivate (RSM can deactivate their RMs) - with automatic reassignment
-router.post("/rm-deactivate", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.post("/rm-deactivate", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const rmId = req.body?.rmId || req.body?.oldRmId;
@@ -1959,7 +2047,7 @@ router.post("/rm-deactivate", auth, requireRole(ROLES.RSM), async (req, res) => 
 // ==================== PARTNERS DIRECTORY (RSM) ====================
 
 // GET /api/rsm/get-partners — partners under RSM → RMs hierarchy
-router.get("/get-partners", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.get("/get-partners", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const scope = await loadRsmReportingScope(rsmId);
@@ -2007,7 +2095,7 @@ router.get("/get-partners", auth, requireRole(ROLES.RSM), async (req, res) => {
 
 // GET /api/rsm/partners/targets
 // RSM gets all partner targets under their hierarchy
-router.get("/partners/targets", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.get("/partners/targets", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const { year, month } = req.query;
@@ -2105,7 +2193,7 @@ router.get("/partners/targets", auth, requireRole(ROLES.RSM), async (req, res) =
 
 
 // partner deactivate
-router.post("/partner-deactivate", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.post("/partner-deactivate", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const { oldPartnerId, newPartnerId } = req.body;
@@ -2221,7 +2309,7 @@ router.post("/partner-deactivate", auth, requireRole(ROLES.RSM), async (req, res
 
 
 // partner activate
-router.post("/partner-activate", auth, requireRole(ROLES.RSM), async (req, res) => {
+router.post("/partner-activate", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { partnerId } = req.body;
   } catch (error) {

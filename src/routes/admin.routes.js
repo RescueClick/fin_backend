@@ -3,7 +3,7 @@ import argon2 from "argon2";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { ROLES, RSM_TYPES } from "../config/roles.js";
-import { assertValidRmRsmPair } from "../utils/rmRsmHierarchy.js";
+import { assertValidRmRsmAssignments, assertValidRmRsmPair } from "../utils/rmRsmHierarchy.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import { User } from "../models/User.js";
 import { makeRmCode, makeAsmCode } from "../utils/codes.js";
@@ -248,18 +248,33 @@ router.post(
 
       if (normalizedRsmTypes.length) {
         const hasPersonal = normalizedRsmTypes.includes(RSM_TYPES.PERSONAL);
+        const hasBusiness = normalizedRsmTypes.includes(RSM_TYPES.BUSINESS);
+        const hasHomeLap = normalizedRsmTypes.includes(RSM_TYPES.HOME_LAP);
         const hasBusinessHome = normalizedRsmTypes.includes(RSM_TYPES.BUSINESS_HOME);
 
-        // If both are selected, admin explicitly wants both groups → allow any loanType.
-        if (hasPersonal && !hasBusinessHome && !isPersonal(normalizedLoanType)) {
+        if (hasPersonal && !hasBusiness && !hasHomeLap && !hasBusinessHome && !isPersonal(normalizedLoanType)) {
           return res.status(400).json({
             message: `Invalid loanType for rsmTypes=PERSONAL. Expected PERSONAL but got "${loanType}".`,
+          });
+        }
+
+        if (hasBusiness && !hasPersonal && !hasHomeLap && !hasBusinessHome && !isBusiness(normalizedLoanType)) {
+          return res.status(400).json({
+            message: `Invalid loanType for rsmTypes=BUSINESS. Expected BUSINESS but got "${loanType}".`,
+          });
+        }
+
+        if (hasHomeLap && !hasPersonal && !hasBusiness && !hasBusinessHome && !isHomeLoan(normalizedLoanType)) {
+          return res.status(400).json({
+            message: `Invalid loanType for rsmTypes=HOME_LAP. Expected HOME_LOAN_* or LAP_* but got "${loanType}".`,
           });
         }
 
         if (
           hasBusinessHome &&
           !hasPersonal &&
+          !hasBusiness &&
+          !hasHomeLap &&
           !(isBusiness(normalizedLoanType) || isHomeLoan(normalizedLoanType))
         ) {
           return res.status(400).json({
@@ -400,17 +415,33 @@ router.put(
 
       if (normalizedRsmTypes.length) {
         const hasPersonal = normalizedRsmTypes.includes(RSM_TYPES.PERSONAL);
+        const hasBusiness = normalizedRsmTypes.includes(RSM_TYPES.BUSINESS);
+        const hasHomeLap = normalizedRsmTypes.includes(RSM_TYPES.HOME_LAP);
         const hasBusinessHome = normalizedRsmTypes.includes(RSM_TYPES.BUSINESS_HOME);
 
-        if (hasPersonal && !hasBusinessHome && !isPersonal(nextLoanType)) {
+        if (hasPersonal && !hasBusiness && !hasHomeLap && !hasBusinessHome && !isPersonal(nextLoanType)) {
           return res.status(400).json({
             message: `Invalid loanType for rsmTypes=PERSONAL. Expected PERSONAL but got "${nextLoanType}".`,
+          });
+        }
+
+        if (hasBusiness && !hasPersonal && !hasHomeLap && !hasBusinessHome && !isBusiness(nextLoanType)) {
+          return res.status(400).json({
+            message: `Invalid loanType for rsmTypes=BUSINESS. Expected BUSINESS but got "${nextLoanType}".`,
+          });
+        }
+
+        if (hasHomeLap && !hasPersonal && !hasBusiness && !hasBusinessHome && !isHomeLoan(nextLoanType)) {
+          return res.status(400).json({
+            message: `Invalid loanType for rsmTypes=HOME_LAP. Expected HOME_LOAN_* or LAP_* but got "${nextLoanType}".`,
           });
         }
 
         if (
           hasBusinessHome &&
           !hasPersonal &&
+          !hasBusiness &&
+          !hasHomeLap &&
           !(isBusiness(nextLoanType) || isHomeLoan(nextLoanType))
         ) {
           return res.status(400).json({
@@ -506,16 +537,47 @@ router.delete("/banks/:bankId", auth, requireRole(ROLES.SUPER_ADMIN), async (req
 });
 
 router.post(
-  "/create-asm",
+  ["/create-asm", "/create-asms"],
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res, next) => {
     try {
-      const { firstName, lastName, phone, email, dob, joinDate, region, password } =
-        req.body || {};
+      const {
+        firstName,
+        lastName,
+        phone,
+        email,
+        dob,
+        joinDate,
+        region,
+        password,
+        rsmId,
+        asmId,
+        asmType,
+        rsmType,
+        rmIds,
+      } = req.body || {};
 
       if (!firstName || !lastName || !email || !phone) {
-        return res.status(400).json({ message: "name and email required" });
+        return res.status(400).json({ message: "First name, last name, phone, and email are required" });
+      }
+
+      const specialtyType = asmType || rsmType;
+      const parentRsmId = rsmId || asmId;
+
+      // Area Sales Manager (ASM) must have a specialty type and report to an RSM
+      if (!specialtyType) {
+        return res.status(400).json({
+          message: "ASM specialty type (asmType) is required (e.g. PERSONAL, BUSINESS, HOME_LAP)",
+        });
+      }
+      if (!Object.values(ASM_TYPES).includes(specialtyType)) {
+        return res.status(400).json({
+          message: `Invalid specialty type. Allowed: ${Object.values(ASM_TYPES).join(", ")}`,
+        });
+      }
+      if (!parentRsmId) {
+        return res.status(400).json({ message: "Reporting Regional Sales Manager (rsmId) is required" });
       }
 
       const normalizedEmail = String(email).toLowerCase();
@@ -538,35 +600,61 @@ router.post(
         return res.status(409).json({ message, field });
       }
 
+      let parentRsm = null;
+      if (parentRsmId) {
+        parentRsm = await User.findOne({ _id: parentRsmId, role: { $in: [ROLES.RSM, ROLES.ASM] } });
+        if (!parentRsm) return res.status(404).json({ message: "Reporting RSM not found" });
+      }
+
       const rawPassword =
         password || `Asm@${Math.random().toString(36).slice(2, 10)}`;
 
+      // Create Area Sales Manager (ASM)
+      const targetRole = ROLES.ASM;
       const asm = await User.create({
         firstName,
         lastName,
         phone: normalizedPhone,
-        email: email.toLowerCase(),
+        email: normalizedEmail,
         passwordHash: await argon2.hash(rawPassword),
-        role: ROLES.ASM,
-        employeeId: await generateEmployeeId("ASM"),
+        role: targetRole,
+        employeeId: await generateEmployeeId(targetRole),
         asmCode: makeAsmCode(),
+        rsmCode: makeAsmCode(),
         dob,
         joinDate: joinDate ? new Date(joinDate) : new Date(),
-        region,
-        adminId: req.user.sub, // link to the admin creating ASM
+        region: (parentRsm && parentRsm.region) || region || "N/A",
+        asmType: specialtyType || null,
+        rsmType: specialtyType || null,
+        rsmId: parentRsm ? parentRsm._id : null,
+        asmId: parentRsm ? parentRsm._id : null,
+        adminId: req.user.sub,
       });
 
-      // 📧 Send credentials mail using professional email service
+      // Transfer selected RMs if provided
+      let transferredRmsCount = 0;
+      if (Array.isArray(rmIds) && rmIds.length > 0) {
+        for (const rmId of rmIds) {
+          try {
+            await transferRmToRsm({ rmId, toRsmId: asm._id });
+            transferredRmsCount++;
+          } catch (trErr) {
+            console.warn(`Could not transfer RM ${rmId}:`, trErr.message);
+          }
+        }
+      }
+
+      // Send credentials mail
       try {
-        const emailSent = await sendUserAccountEmail(asm, "ASM", rawPassword, {
+        const emailSent = await sendUserAccountEmail(asm, targetRole, rawPassword, {
           firstName: req.user.firstName || "Admin",
           lastName: req.user.lastName || "",
         });
         if (emailSent) {
-          console.log(`✅ ASM creation email sent to: ${email}`);
+          console.log(`✅ ${targetRole} creation email sent to: ${email}`);
         }
       } catch (mailErr) {
-        console.error("❌ Failed to send ASM creation email:", mailErr.message);
+        console.error(`❌ Failed to send ${targetRole} creation email:`, mailErr.message);
       }
 
       // Auto-rebalance hierarchy for current period if targets already exist
@@ -585,17 +673,22 @@ router.post(
       }
 
       return res.status(201).json({
-        message: "ASM created and targets redistributed",
+        message: `${targetRole} created successfully`,
         id: asm._id,
+        role: asm.role,
         asmCode: asm.asmCode,
+        rsmCode: asm.rsmCode,
         employeeId: asm.employeeId,
+        asmType: asm.asmType,
+        rsmType: asm.rsmType,
+        rsmId: asm.rsmId,
         region: asm.region,
         dob: asm.dob,
+        transferredRmsCount,
         tempPassword: password ? undefined : rawPassword,
       });
     } catch (err) {
       console.error("Create ASM Error:", err);
-      // Let global error handler convert duplicate-key and other errors properly.
       return next(err);
     }
   }
@@ -616,7 +709,12 @@ router.post(
         joinDate,
         region,
         password,
+        personalAsmId,
+        businessAsmId,
+        homeLapAsmId,
         personalRsmId,
+        businessRsmId,
+        homeLapRsmId,
         businessHomeRsmId,
       } = req.body || {};
 
@@ -633,9 +731,13 @@ router.post(
         });
       }
 
-      if (!personalRsmId || !businessHomeRsmId) {
+      const effPersonalId = personalAsmId || personalRsmId;
+      const effBizId = businessAsmId || businessRsmId || businessHomeRsmId;
+      const effHomeLapId = homeLapAsmId || homeLapRsmId || businessHomeRsmId;
+
+      if (!effPersonalId || (!effBizId && !effHomeLapId)) {
         return res.status(400).json({
-          message: "Both personalRsmId and businessHomeRsmId are required",
+          message: "Personal and Business/Home loan manager assignments are required",
         });
       }
 
@@ -659,50 +761,24 @@ router.post(
         return res.status(409).json({ message, field });
       }
 
-      // Check if Personal RSM exists and is of correct type
-      const personalRsm = await User.findOne({
-        _id: personalRsmId,
-        role: ROLES.RSM,
-        rsmType: RSM_TYPES.PERSONAL
+      // Validate assigned managers
+      const validationCheck = await assertValidRmRsmAssignments({
+        personalRsmId: effPersonalId,
+        businessRsmId: effBizId,
+        homeLapRsmId: effHomeLapId,
+        businessHomeRsmId: effBizId,
       });
-      if (!personalRsm) {
-        return res.status(404).json({
-          message: "Personal Loan RSM not found or invalid type"
-        });
-      }
-
-      // Check if Business/Home RSM exists and is of correct type
-      const businessHomeRsm = await User.findOne({
-        _id: businessHomeRsmId,
-        role: ROLES.RSM,
-        rsmType: RSM_TYPES.BUSINESS_HOME
-      });
-      if (!businessHomeRsm) {
-        return res.status(404).json({
-          message: "Business & Home Loan RSM not found or invalid type"
-        });
-      }
-
-      // Both RSMs should be under the same ASM
-      if (personalRsm.asmId.toString() !== businessHomeRsm.asmId.toString()) {
-        return res.status(400).json({
-          message: "Both RSMs must be under the same ASM",
-        });
-      }
-
-      const pairCheck = await assertValidRmRsmPair(
-        personalRsm._id,
-        businessHomeRsm._id
-      );
-      if (!pairCheck.ok) {
-        return res.status(400).json({ message: pairCheck.message });
+      if (!validationCheck.ok) {
+        return res.status(400).json({ message: validationCheck.message });
       }
 
       const rawPassword =
         password || `Rm@${Math.random().toString(36).slice(2, 10)}`;
 
-      // Get ASM for region inheritance
-      const asm = await User.findById(personalRsm.asmId);
+      // Get primary manager to determine parent senior RSM
+      const primaryMgr = await User.findById(effPersonalId).select("rsmId asmId").lean();
+      const resolvedSeniorRsmId = req.body?.rsmId || primaryMgr?.rsmId || primaryMgr?.asmId || validationCheck.rsmId || validationCheck.asmId;
+      const seniorMgr = resolvedSeniorRsmId ? await User.findById(resolvedSeniorRsmId) : null;
 
       // Create RM
       const rm = await User.create({
@@ -710,14 +786,21 @@ router.post(
         firstName,
         lastName,
         phone: normalizedPhone,
-        region: region || asm?.region || "N/A", // Use provided region or inherit from ASM
+        region: region || seniorMgr?.region || "N/A",
         email: email.toLowerCase(),
         passwordHash: await argon2.hash(rawPassword),
         role: ROLES.RM,
         rmCode: makeRmCode(),
-        asmId: personalRsm.asmId, // link to ASM (inherited from RSM)
-        personalRsmId: personalRsm._id, // link to Personal Loan RSM
-        businessHomeRsmId: businessHomeRsm._id, // link to Business/Home Loan RSM
+        rsmId: resolvedSeniorRsmId,
+        asmId: resolvedSeniorRsmId,
+        personalAsmId: effPersonalId,
+        personalRsmId: effPersonalId,
+        businessAsmId: effBizId || null,
+        businessRsmId: effBizId || null,
+        homeLapAsmId: effHomeLapId || null,
+        homeLapRsmId: effHomeLapId || null,
+        businessHomeAsmId: effBizId || null,
+        businessHomeRsmId: effBizId || null,
         dob,
         joinDate: joinDate ? new Date(joinDate) : new Date(),
       });
@@ -756,6 +839,8 @@ router.post(
         rmCode: rm.rmCode,
         employeeId: rm.employeeId,
         personalRsmId: rm.personalRsmId,
+        businessRsmId: rm.businessRsmId,
+        homeLapRsmId: rm.homeLapRsmId,
         businessHomeRsmId: rm.businessHomeRsmId,
         asmId: rm.asmId,
         assignedAsm: asm ? {
@@ -774,9 +859,9 @@ router.post(
   }
 );
 
-// Create RSM (Admin only) - moved from /api/rsm/create-rsm
+// Create RSM or ASM (Admin only)
 router.post(
-  "/create-rsm",
+  ["/create-rsm", "/create-rsms"],
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
@@ -790,39 +875,32 @@ router.post(
         joinDate,
         region,
         password,
+        rsmId,
         asmId,
         rsmType,
+        asmType,
         rmIds,
       } = req.body || {};
 
-      if (!firstName || !lastName || !email || !phone || !rsmType || !asmId) {
+      if (!firstName || !lastName || !email || !phone) {
         return res.status(400).json({
-          message:
-            "firstName, lastName, email, phone, asmId and rsmType are required",
+          message: "First name, last name, phone, and email are required",
         });
       }
 
-      if (!Object.values(RSM_TYPES).includes(rsmType)) {
-        return res.status(400).json({
-          message: `Invalid rsmType. Allowed: ${Object.values(RSM_TYPES).join(
-            ", "
-          )}`,
-        });
-      }
-
-      // Check if ASM exists
-      const asm = await User.findOne({ _id: asmId, role: ROLES.ASM });
-      if (!asm) return res.status(404).json({ message: "ASM not found" });
+      const specialtyType = asmType || rsmType;
+      const parentRsmId = rsmId || asmId;
 
       const normalizedEmail = String(email).toLowerCase();
+      const normalizedPhone = String(phone).trim();
       const exists = await User.findOne({
-        $or: [{ email: normalizedEmail }, { phone }],
+        $or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
       })
         .select("email phone")
         .lean();
       if (exists) {
         const emailTaken = String(exists.email || "").toLowerCase() === normalizedEmail;
-        const phoneTaken = String(exists.phone || "") === String(phone || "");
+        const phoneTaken = String(exists.phone || "") === normalizedPhone;
         const field = emailTaken && phoneTaken ? "email,phone" : emailTaken ? "email" : "phone";
         const message =
           emailTaken && phoneTaken
@@ -836,19 +914,31 @@ router.post(
       const rawPassword =
         password || `Rsm@${Math.random().toString(36).slice(2, 10)}`;
 
+      let parentRsm = null;
+      if (parentRsmId) {
+        parentRsm = await User.findOne({ _id: parentRsmId, role: { $in: [ROLES.RSM, ROLES.ASM] } });
+      }
+
+      // RSM creation has no type - creates Senior Regional Sales Manager (RSM)
+      const targetRole = ROLES.RSM;
       const rsm = await User.create({
         firstName,
         lastName,
-        phone,
-        email: email.toLowerCase(),
+        phone: normalizedPhone,
+        email: normalizedEmail,
         passwordHash: await argon2.hash(rawPassword),
-        role: ROLES.RSM,
-        employeeId: await generateEmployeeId("RSM"),
+        role: targetRole,
+        employeeId: await generateEmployeeId(targetRole),
+        rsmCode: makeAsmCode(),
+        asmCode: makeAsmCode(),
         dob,
         joinDate: joinDate ? new Date(joinDate) : new Date(),
-        region: asm.region || region,
-        asmId: asm._id,
-        rsmType,
+        region: (parentRsm && parentRsm.region) || region || "N/A",
+        asmType: specialtyType || null,
+        rsmType: specialtyType || null,
+        rsmId: parentRsm ? parentRsm._id : null,
+        asmId: parentRsm ? parentRsm._id : null,
+        adminId: req.user.sub,
       });
 
       // Transfer selected RMs if provided
@@ -859,7 +949,7 @@ router.post(
             await transferRmToRsm({ rmId, toRsmId: rsm._id });
             transferredRmsCount++;
           } catch (trErr) {
-            console.warn(`Could not transfer RM ${rmId} to new RSM:`, trErr.message);
+            console.warn(`Could not transfer RM ${rmId}:`, trErr.message);
           }
         }
       }
@@ -868,7 +958,7 @@ router.post(
       try {
         const emailSent = await sendUserAccountEmail(
           rsm,
-          "RSM",
+          targetRole,
           password ? null : rawPassword,
           {
             firstName: req.user.firstName || "Admin",
@@ -876,11 +966,11 @@ router.post(
           }
         );
         if (emailSent) {
-          console.log(`✅ RSM creation email sent to: ${email}`);
+          console.log(`✅ ${targetRole} creation email sent to: ${email}`);
         }
       } catch (mailErr) {
         console.error(
-          "❌ Failed to send RSM creation email:",
+          `❌ Failed to send ${targetRole} creation email:`,
           mailErr.message
         );
       }
@@ -901,23 +991,28 @@ router.post(
       }
 
       return res.status(201).json({
-        message: "RSM created successfully",
+        message: `${targetRole} created successfully`,
         id: rsm._id,
+        role: rsm.role,
         employeeId: rsm.employeeId,
+        rsmCode: rsm.rsmCode,
+        asmCode: rsm.asmCode,
+        asmType: rsm.asmType,
         rsmType: rsm.rsmType,
+        rsmId: rsm.rsmId,
         asmId: rsm.asmId,
         transferredRmsCount,
         tempPassword: password ? undefined : rawPassword,
       });
     } catch (err) {
-      console.error("Create RSM Error:", err);
+      console.error("Create RSM/ASM Error:", err);
       return res.status(500).json({ message: "Internal Server Error" });
     }
   }
 );
 
 router.get(
-  "/get-rm",
+  ["/get-rm", "/get-rms"],
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
@@ -926,10 +1021,34 @@ router.get(
         .select("-passwordHash -__v") // hide password & __v
         .populate({
           path: "asmId",
-          select: "firstName lastName employeeId",
+          select: "firstName lastName employeeId phone email",
+        })
+        .populate({
+          path: "rsmId",
+          select: "firstName lastName employeeId phone email",
+        })
+        .populate({
+          path: "personalAsmId",
+          select: "firstName lastName employeeId phone email",
+        })
+        .populate({
+          path: "businessAsmId",
+          select: "firstName lastName employeeId phone email",
+        })
+        .populate({
+          path: "homeLapAsmId",
+          select: "firstName lastName employeeId phone email",
         })
         .populate({
           path: "personalRsmId",
+          select: "firstName lastName employeeId phone email",
+        })
+        .populate({
+          path: "businessRsmId",
+          select: "firstName lastName employeeId phone email",
+        })
+        .populate({
+          path: "homeLapRsmId",
           select: "firstName lastName employeeId phone email",
         })
         .populate({
@@ -938,45 +1057,116 @@ router.get(
         })
         .lean();
 
-      // Flatten asm and RSM details into same object
+      // Flatten ASM and RSM details into same object
       const formatted = list.map((rm) => {
+        const personalAsm = rm.personalAsmId || rm.personalRsmId;
+        const businessAsm = rm.businessAsmId || rm.businessRsmId;
+        // Accurate: only use actual HL/LAP assignment; do NOT fall back to business manager
+        const homeLapAsm = rm.homeLapAsmId || rm.homeLapRsmId || null;
+        const rsm = rm.rsmId;
         const asm = rm.asmId;
-        const personalRsm = rm.personalRsmId;
-        const businessHomeRsm = rm.businessHomeRsmId;
 
         // Store original IDs before destructuring
-        const originalPersonalRsmId = typeof rm.personalRsmId === 'object' && rm.personalRsmId?._id
-          ? rm.personalRsmId._id
-          : rm.personalRsmId;
-        const originalBusinessHomeRsmId = typeof rm.businessHomeRsmId === 'object' && rm.businessHomeRsmId?._id
-          ? rm.businessHomeRsmId._id
-          : rm.businessHomeRsmId;
+        const originalPersonalAsmId = rm.personalAsmId?._id || rm.personalAsmId || rm.personalRsmId?._id || rm.personalRsmId || null;
+        const originalBusinessAsmId = rm.businessAsmId?._id || rm.businessAsmId || rm.businessRsmId?._id || rm.businessRsmId || null;
+        const originalHomeLapAsmId = rm.homeLapAsmId?._id || rm.homeLapAsmId || rm.homeLapRsmId?._id || rm.homeLapRsmId || null;
 
         // Extract base RM data without populated objects
         const {
           asmId: _asmId,
+          rsmId: _rsmId,
+          personalAsmId: _personalAsmId,
+          businessAsmId: _businessAsmId,
+          homeLapAsmId: _homeLapAsmId,
           personalRsmId: _personalRsmId,
+          businessRsmId: _businessRsmId,
+          homeLapRsmId: _homeLapRsmId,
           businessHomeRsmId: _businessHomeRsmId,
           ...rmBase
         } = rm;
 
+        const personalAsmObj = personalAsm && personalAsm._id ? {
+          _id: personalAsm._id,
+          firstName: personalAsm.firstName || "",
+          lastName: personalAsm.lastName || "",
+          employeeId: personalAsm.employeeId || "",
+          phone: personalAsm.phone || "",
+          email: personalAsm.email || "",
+        } : null;
+
+        const businessAsmObj = businessAsm && businessAsm._id ? {
+          _id: businessAsm._id,
+          firstName: businessAsm.firstName || "",
+          lastName: businessAsm.lastName || "",
+          employeeId: businessAsm.employeeId || "",
+          phone: businessAsm.phone || "",
+          email: businessAsm.email || "",
+        } : null;
+
+        const homeLapAsmObj = homeLapAsm && homeLapAsm._id ? {
+          _id: homeLapAsm._id,
+          firstName: homeLapAsm.firstName || "",
+          lastName: homeLapAsm.lastName || "",
+          employeeId: homeLapAsm.employeeId || "",
+          phone: homeLapAsm.phone || "",
+          email: homeLapAsm.email || "",
+        } : null;
+
         return {
           ...rmBase,
-          asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
-          asmEmployeeId: asm ? asm.employeeId : null,
-          asmId: asm ? asm._id : null, // use _id, not asmId
-          // Personal Loan RSM details
-          personalRsmId: personalRsm ? personalRsm._id : originalPersonalRsmId || null,
-          personalRsmName: personalRsm ? `${personalRsm.firstName} ${personalRsm.lastName}` : null,
-          personalRsmEmployeeId: personalRsm ? personalRsm.employeeId : null,
-          personalRsmPhone: personalRsm ? personalRsm.phone : null,
-          personalRsmEmail: personalRsm ? personalRsm.email : null,
-          // Business & Home Loan RSM details
-          businessHomeRsmId: businessHomeRsm ? businessHomeRsm._id : originalBusinessHomeRsmId || null,
-          businessHomeRsmName: businessHomeRsm ? `${businessHomeRsm.firstName} ${businessHomeRsm.lastName}` : null,
-          businessHomeRsmEmployeeId: businessHomeRsm ? businessHomeRsm.employeeId : null,
-          businessHomeRsmPhone: businessHomeRsm ? businessHomeRsm.phone : null,
-          businessHomeRsmEmail: businessHomeRsm ? businessHomeRsm.email : null,
+          // Manager objects for frontend display
+          personalAsm: personalAsmObj,
+          businessAsm: businessAsmObj,
+          homeLapAsm: homeLapAsmObj,
+          personalRsm: personalAsmObj,
+          businessRsm: businessAsmObj,
+          homeLapRsm: homeLapAsmObj,
+
+          // ASM Details
+          personalAsmId: personalAsmObj ? personalAsmObj._id : originalPersonalAsmId || null,
+          personalAsmName: personalAsmObj ? `${personalAsmObj.firstName} ${personalAsmObj.lastName}`.trim() : null,
+          personalAsmEmployeeId: personalAsmObj ? personalAsmObj.employeeId : null,
+          personalAsmPhone: personalAsmObj ? personalAsmObj.phone : null,
+          personalAsmEmail: personalAsmObj ? personalAsmObj.email : null,
+
+          businessAsmId: businessAsmObj ? businessAsmObj._id : originalBusinessAsmId || null,
+          businessAsmName: businessAsmObj ? `${businessAsmObj.firstName} ${businessAsmObj.lastName}`.trim() : null,
+          businessAsmEmployeeId: businessAsmObj ? businessAsmObj.employeeId : null,
+          businessAsmPhone: businessAsmObj ? businessAsmObj.phone : null,
+          businessAsmEmail: businessAsmObj ? businessAsmObj.email : null,
+
+          homeLapAsmId: homeLapAsmObj ? homeLapAsmObj._id : originalHomeLapAsmId || null,
+          homeLapAsmName: homeLapAsmObj ? `${homeLapAsmObj.firstName} ${homeLapAsmObj.lastName}`.trim() : null,
+          homeLapAsmEmployeeId: homeLapAsmObj ? homeLapAsmObj.employeeId : null,
+          homeLapAsmPhone: homeLapAsmObj ? homeLapAsmObj.phone : null,
+          homeLapAsmEmail: homeLapAsmObj ? homeLapAsmObj.email : null,
+
+          // Legacy RSM field names for backward compatibility
+          personalRsmId: personalAsmObj ? personalAsmObj._id : originalPersonalAsmId || null,
+          personalRsmName: personalAsmObj ? `${personalAsmObj.firstName} ${personalAsmObj.lastName}`.trim() : null,
+          personalRsmEmployeeId: personalAsmObj ? personalAsmObj.employeeId : null,
+          personalRsmPhone: personalAsmObj ? personalAsmObj.phone : null,
+          personalRsmEmail: personalAsmObj ? personalAsmObj.email : null,
+
+          businessRsmId: businessAsmObj ? businessAsmObj._id : originalBusinessAsmId || null,
+          businessRsmName: businessAsmObj ? `${businessAsmObj.firstName} ${businessAsmObj.lastName}`.trim() : null,
+          businessRsmEmployeeId: businessAsmObj ? businessAsmObj.employeeId : null,
+          businessRsmPhone: businessAsmObj ? businessAsmObj.phone : null,
+          businessRsmEmail: businessAsmObj ? businessAsmObj.email : null,
+
+          homeLapRsmId: homeLapAsmObj ? homeLapAsmObj._id : originalHomeLapAsmId || null,
+          homeLapRsmName: homeLapAsmObj ? `${homeLapAsmObj.firstName} ${homeLapAsmObj.lastName}`.trim() : null,
+          homeLapRsmEmployeeId: homeLapAsmObj ? homeLapAsmObj.employeeId : null,
+          homeLapRsmPhone: homeLapAsmObj ? homeLapAsmObj.phone : null,
+          homeLapRsmEmail: homeLapAsmObj ? homeLapAsmObj.email : null,
+
+          // Senior RSM details
+          rsmName: rsm ? `${rsm.firstName} ${rsm.lastName}`.trim() : (asm ? `${asm.firstName} ${asm.lastName}`.trim() : null),
+          rsmEmployeeId: rsm ? rsm.employeeId : (asm ? asm.employeeId : null),
+          rsmId: rsm ? rsm._id : (rm.rsmId || null),
+          asmName: asm ? `${asm.firstName} ${asm.lastName}`.trim() : (rsm ? `${rsm.firstName} ${rsm.lastName}`.trim() : null),
+          asmEmployeeId: asm ? asm.employeeId : (rsm ? rsm.employeeId : null),
+          asmId: asm ? asm._id : (rm.asmId || null),
         };
       });
 
@@ -988,42 +1178,32 @@ router.get(
   }
 );
 
-// List all RSMs (Admin)
+// List all Regional Sales Managers (Senior RSMs)
 router.get(
-  "/get-rsm",
+  ["/get-rsm", "/get-rsms"],
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const list = await User.find({ role: ROLES.RSM, $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] })
         .select("-passwordHash -__v")
-        .populate({
-          path: "asmId",
-          select: "firstName lastName employeeId",
-        })
         .lean();
 
-      const formatted = list.map((rsm) => {
-        const asm = rsm.asmId;
-        return {
-          _id: rsm._id,
-          firstName: rsm.firstName,
-          lastName: rsm.lastName,
-          email: rsm.email,
-          phone: rsm.phone,
-          employeeId: rsm.employeeId,
-          rsmType: rsm.rsmType || null, // Explicitly include rsmType
-          region: rsm.region,
-          status: rsm.status,
-          createdAt: rsm.createdAt,
-          updatedAt: rsm.updatedAt,
-          asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
-          asmEmployeeId: asm ? asm.employeeId : null,
-          asmId: asm ? asm._id : null,
-        };
-      });
+      const formatted = list.map((rsm) => ({
+        _id: rsm._id,
+        firstName: rsm.firstName,
+        lastName: rsm.lastName,
+        email: rsm.email,
+        phone: rsm.phone,
+        employeeId: rsm.employeeId,
+        rsmCode: rsm.rsmCode || rsm.asmCode || rsm.employeeId,
+        asmCode: rsm.rsmCode || rsm.asmCode || rsm.employeeId,
+        region: rsm.region,
+        status: rsm.status,
+        createdAt: rsm.createdAt,
+        updatedAt: rsm.updatedAt,
+      }));
 
-      console.log("RSMs fetched:", formatted.length, "RSMs with types:", formatted.map(r => ({ name: `${r.firstName} ${r.lastName}`, type: r.rsmType })));
       res.json(formatted);
     } catch (err) {
       console.error("Error fetching RSMs:", err);
@@ -1032,16 +1212,55 @@ router.get(
   }
 );
 
-// List all ASMs (Admin)
+// List all Area Sales Managers (Specialized ASMs)
 router.get(
-  "/get-asm",
+  ["/get-asm", "/get-asms"],
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
-    const list = await User.find({ role: ROLES.ASM, $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] })
-      .select("-passwordHash")
-      .lean();
-    res.json(list);
+    try {
+      const list = await User.find({ role: ROLES.ASM, $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] })
+        .select("-passwordHash -__v")
+        .populate({
+          path: "rsmId",
+          select: "firstName lastName employeeId",
+        })
+        .populate({
+          path: "asmId",
+          select: "firstName lastName employeeId",
+        })
+        .lean();
+
+      const formatted = list.map((asm) => {
+        const parentRsm = asm.rsmId || asm.asmId;
+        const currentType = asm.asmType || asm.rsmType || null;
+        return {
+          _id: asm._id,
+          firstName: asm.firstName,
+          lastName: asm.lastName,
+          email: asm.email,
+          phone: asm.phone,
+          employeeId: asm.employeeId,
+          asmType: currentType,
+          rsmType: currentType, // backward compatibility
+          region: asm.region,
+          status: asm.status,
+          createdAt: asm.createdAt,
+          updatedAt: asm.updatedAt,
+          rsmName: parentRsm ? `${parentRsm.firstName} ${parentRsm.lastName}` : null,
+          rsmEmployeeId: parentRsm ? parentRsm.employeeId : null,
+          rsmId: parentRsm ? parentRsm._id : null,
+          asmName: parentRsm ? `${parentRsm.firstName} ${parentRsm.lastName}` : null,
+          asmEmployeeId: parentRsm ? parentRsm.employeeId : null,
+          asmId: parentRsm ? parentRsm._id : null,
+        };
+      });
+
+      res.json(formatted);
+    } catch (err) {
+      console.error("Error fetching ASMs:", err);
+      res.status(500).json({ message: "Error fetching ASMs" });
+    }
   }
 );
 
@@ -1063,11 +1282,21 @@ router.get(
         .select("-passwordHash -__v")
         .populate({
           path: "rmId",
-          select: "firstName lastName employeeId asmId personalRsmId businessHomeRsmId",
+          select: "firstName lastName employeeId asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
           populate: [
             { path: "asmId", select: "firstName lastName employeeId" },
             {
               path: "personalRsmId",
+              select: "asmId firstName lastName employeeId",
+              populate: { path: "asmId", select: "firstName lastName employeeId" },
+            },
+            {
+              path: "businessRsmId",
+              select: "asmId firstName lastName employeeId",
+              populate: { path: "asmId", select: "firstName lastName employeeId" },
+            },
+            {
+              path: "homeLapRsmId",
               select: "asmId firstName lastName employeeId",
               populate: { path: "asmId", select: "firstName lastName employeeId" },
             },
@@ -1085,6 +1314,8 @@ router.get(
         const asm =
           rm?.asmId ||
           rm?.personalRsmId?.asmId ||
+          rm?.businessRsmId?.asmId ||
+          rm?.homeLapRsmId?.asmId ||
           rm?.businessHomeRsmId?.asmId ||
           null;
 
@@ -1316,11 +1547,21 @@ router.get(
           select: "firstName lastName employeeId rmId",
           populate: {
             path: "rmId",
-            select: "firstName lastName employeeId asmId personalRsmId businessHomeRsmId",
+            select: "firstName lastName employeeId asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
             populate: [
               { path: "asmId", select: "firstName lastName employeeId" },
               {
                 path: "personalRsmId",
+                select: "asmId firstName lastName employeeId",
+                populate: { path: "asmId", select: "firstName lastName employeeId" },
+              },
+              {
+                path: "businessRsmId",
+                select: "asmId firstName lastName employeeId",
+                populate: { path: "asmId", select: "firstName lastName employeeId" },
+              },
+              {
+                path: "homeLapRsmId",
                 select: "asmId firstName lastName employeeId",
                 populate: { path: "asmId", select: "firstName lastName employeeId" },
               },
@@ -1334,11 +1575,21 @@ router.get(
         })
         .populate({
           path: "rmId",
-          select: "firstName lastName employeeId asmId personalRsmId businessHomeRsmId",
+          select: "firstName lastName employeeId asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
           populate: [
             { path: "asmId", select: "firstName lastName employeeId" },
             {
               path: "personalRsmId",
+              select: "asmId firstName lastName employeeId",
+              populate: { path: "asmId", select: "firstName lastName employeeId" },
+            },
+            {
+              path: "businessRsmId",
+              select: "asmId firstName lastName employeeId",
+              populate: { path: "asmId", select: "firstName lastName employeeId" },
+            },
+            {
+              path: "homeLapRsmId",
               select: "asmId firstName lastName employeeId",
               populate: { path: "asmId", select: "firstName lastName employeeId" },
             },
@@ -1355,6 +1606,8 @@ router.get(
       const pickAsm = (rm) =>
         rm?.asmId ||
         rm?.personalRsmId?.asmId ||
+        rm?.businessRsmId?.asmId ||
+        rm?.homeLapRsmId?.asmId ||
         rm?.businessHomeRsmId?.asmId ||
         null;
 
@@ -2312,13 +2565,13 @@ router.post(
         });
 
         oldAsm = await User.findOneAndUpdate(
-          { _id: oldAsmId, role: ROLES.ASM },
+          { _id: oldAsmId, role: { $in: [ROLES.ASM, ROLES.RSM] } },
           { $set: { status: "SUSPENDED" } },
           { new: true, session }
         );
-        newAsm = await User.findById(newAsmId).session(session);
-        if (!newAsm || newAsm.role !== ROLES.ASM) {
-          throw new Error("New ASM not found or invalid");
+        newAsm = await User.findOne({ _id: newAsmId, role: { $in: [ROLES.ASM, ROLES.RSM] } }).session(session);
+        if (!newAsm) {
+          throw new Error("New manager not found or invalid");
         }
 
         reassignmentAudit = buildReassignmentAudit({
@@ -2463,14 +2716,14 @@ router.post(
       let reassignmentAudit;
       let transferResult;
       await session.withTransaction(async () => {
-        oldRsm = await User.findById(rsmId).session(session);
-        if (!oldRsm || oldRsm.role !== ROLES.RSM) {
-          throw new Error("Old RSM not found");
+        oldRsm = await User.findOne({ _id: rsmId, role: { $in: [ROLES.RSM, ROLES.ASM] } }).session(session);
+        if (!oldRsm) {
+          throw new Error("Old manager not found");
         }
 
-        newRsm = await User.findOne({ _id: newRsmId, role: ROLES.RSM, status: "ACTIVE" }).session(session);
+        newRsm = await User.findOne({ _id: newRsmId, role: { $in: [ROLES.RSM, ROLES.ASM] }, status: "ACTIVE" }).session(session);
         if (!newRsm) {
-          throw new Error("Active replacement RSM not found");
+          throw new Error("Active replacement manager not found");
         }
 
         transferResult = await reassignRsmWorkload({
@@ -2480,7 +2733,7 @@ router.post(
         });
 
         await User.findOneAndUpdate(
-          { _id: rsmId, role: ROLES.RSM },
+          { _id: rsmId, role: { $in: [ROLES.RSM, ROLES.ASM] } },
           { $set: { status: "SUSPENDED" } },
           { new: true, session }
         );
@@ -2660,6 +2913,8 @@ router.get(
       const rms = await User.find({ role: ROLES.RM })
         .populate("asmId", "firstName lastName employeeId")
         .populate("personalRsmId", "firstName lastName employeeId status")
+        .populate("businessRsmId", "firstName lastName employeeId status")
+        .populate("homeLapRsmId", "firstName lastName employeeId status")
         .populate("businessHomeRsmId", "firstName lastName employeeId status")
         .select("-passwordHash -__v")
         .lean();
@@ -3033,7 +3288,12 @@ router.delete(
 
       const rmStillLinked = await User.countDocuments({
         role: ROLES.RM,
-        $or: [{ personalRsmId: rsmId }, { businessHomeRsmId: rsmId }],
+        $or: [
+          { personalRsmId: rsmId },
+          { businessRsmId: rsmId },
+          { homeLapRsmId: rsmId },
+          { businessHomeRsmId: rsmId },
+        ],
       });
       if (rmStillLinked > 0) {
         return res.status(400).json({
@@ -3058,6 +3318,123 @@ router.delete(
     } catch (error) {
       console.error("Error deleting RSM:", error);
       res.status(500).json({ message: "Failed to delete RSM" });
+    }
+  }
+);
+
+// Update RSM or ASM details and/or role specialty type (SUPER_ADMIN)
+router.patch(
+  ["/rsm/:rsmId", "/asm/:asmId"],
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const targetId = req.params.rsmId || req.params.asmId;
+      if (!mongoose.Types.ObjectId.isValid(targetId)) {
+        return res.status(400).json({ message: "Invalid manager id" });
+      }
+
+      const rsm = await User.findOne({ _id: targetId, role: { $in: [ROLES.ASM, ROLES.RSM] } });
+      if (!rsm) {
+        return res.status(404).json({ message: "Manager not found" });
+      }
+
+      const { firstName, lastName, phone, email, rsmType, asmType, asmId, rsmId, region } = req.body || {};
+      const newType = asmType || rsmType;
+
+      if (newType && !Object.values(ASM_TYPES).includes(newType)) {
+        return res.status(400).json({
+          message: `Invalid specialty type. Allowed: ${Object.values(ASM_TYPES).join(", ")}`,
+        });
+      }
+
+      // Check email/phone uniqueness if changed
+      if (email && email.trim().toLowerCase() !== (rsm.email || "").toLowerCase()) {
+        const existingEmail = await User.findOne({
+          _id: { $ne: rsm._id },
+          email: email.trim().toLowerCase(),
+        }).lean();
+        if (existingEmail) {
+          return res.status(409).json({ message: "Email already in use", field: "email" });
+        }
+        rsm.email = email.trim().toLowerCase();
+      }
+
+      if (phone && phone.trim() !== (rsm.phone || "")) {
+        const existingPhone = await User.findOne({
+          _id: { $ne: rsm._id },
+          phone: phone.trim(),
+        }).lean();
+        if (existingPhone) {
+          return res.status(409).json({ message: "Phone number already in use", field: "phone" });
+        }
+        rsm.phone = phone.trim();
+      }
+
+      if (firstName !== undefined && firstName.trim() !== "") {
+        rsm.firstName = firstName.trim();
+      }
+      if (lastName !== undefined && lastName.trim() !== "") {
+        rsm.lastName = lastName.trim();
+      }
+      if (region !== undefined) {
+        rsm.region = region;
+      }
+
+      const parentManagerId = rsmId || asmId;
+      if (parentManagerId && mongoose.Types.ObjectId.isValid(parentManagerId)) {
+        const parent = await User.findOne({ _id: parentManagerId, role: { $in: [ROLES.RSM, ROLES.ASM] } });
+        if (!parent) return res.status(404).json({ message: "Parent manager not found" });
+        rsm.rsmId = parent._id;
+        rsm.asmId = parent._id;
+      }
+
+      const oldType = rsm.asmType || rsm.rsmType;
+      if (newType && newType !== oldType) {
+        rsm.asmType = newType;
+        rsm.rsmType = newType;
+
+        // Sync RMs linked to this manager
+        if (newType === ASM_TYPES.BUSINESS) {
+          await User.updateMany(
+            { role: ROLES.RM, $or: [{ businessHomeRsmId: rsm._id }, { businessRsmId: rsm._id }, { businessAsmId: rsm._id }] },
+            { $set: { businessAsmId: rsm._id, businessRsmId: rsm._id, businessHomeRsmId: rsm._id, businessHomeAsmId: rsm._id } }
+          );
+        } else if (newType === ASM_TYPES.HOME_LAP) {
+          await User.updateMany(
+            { role: ROLES.RM, $or: [{ businessHomeRsmId: rsm._id }, { homeLapRsmId: rsm._id }, { homeLapAsmId: rsm._id }] },
+            { $set: { homeLapAsmId: rsm._id, homeLapRsmId: rsm._id } }
+          );
+        } else if (newType === ASM_TYPES.PERSONAL) {
+          await User.updateMany(
+            { role: ROLES.RM, $or: [{ personalRsmId: rsm._id }, { personalAsmId: rsm._id }] },
+            { $set: { personalAsmId: rsm._id, personalRsmId: rsm._id } }
+          );
+        }
+      }
+
+      await rsm.save();
+
+      return res.json({
+        message: "Manager updated successfully",
+        rsm: {
+          _id: rsm._id,
+          firstName: rsm.firstName,
+          lastName: rsm.lastName,
+          email: rsm.email,
+          phone: rsm.phone,
+          employeeId: rsm.employeeId,
+          asmType: rsm.asmType || rsm.rsmType,
+          rsmType: rsm.asmType || rsm.rsmType,
+          rsmId: rsm.rsmId || rsm.asmId,
+          asmId: rsm.rsmId || rsm.asmId,
+          region: rsm.region,
+          status: rsm.status,
+        },
+      });
+    } catch (error) {
+      console.error("Error updating RSM:", error);
+      res.status(500).json({ message: error.message || "Failed to update RSM" });
     }
   }
 );
@@ -3400,7 +3777,7 @@ router.get(
 router.patch(
   "/profile/update",
   auth,
-  requireRole(ROLES.ADMIN),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
   async (req, res) => {
     try {
       const adminId = req.user.sub;
@@ -3463,7 +3840,7 @@ router.patch(
       );
 
       const updatedAdmin = await User.findOneAndUpdate(
-        { _id: adminId, role: ROLES.ADMIN },
+        { _id: adminId, role: { $in: [ROLES.SUPER_ADMIN, ROLES.ADMIN] } },
         { $set: updateData },
         { new: true, runValidators: true, projection: "-passwordHash" }
       );
@@ -4041,6 +4418,8 @@ router.get(
           role: ROLES.RM,
           $or: [
             { personalRsmId: id },
+            { businessRsmId: id },
+            { homeLapRsmId: id },
             { businessHomeRsmId: id }
           ],
           status: "ACTIVE" // Only ACTIVE RMs
@@ -6191,13 +6570,55 @@ router.put(
   }
 );
 
+export const DEFAULT_HERO_CONFIG = {
+  label: "EXTRA CASH BONUS",
+  badgeText: "EXTRA CASH BONUS",
+  title: "Unlock Milestone Bonuses",
+  subtitle: "Achieve higher monthly disbursement targets to unlock bigger cash bonuses, VIP badges, and priority perks.",
+  bgColor: "#064E3B",
+  borderColor: "#047857",
+  badgeBgColor: "#A7F3D0",
+  badgeTextColor: "#065F46",
+  textColor: "#FFFFFF",
+  subtextColor: "#D1FAE5",
+  monthColor: "#A7F3D0",
+  showMonthBadge: true,
+  showTag: true,
+  showFormulaPills: true,
+  formulaPills: [],
+  isActive: true,
+  targetTab: "ladder",
+  monthLabel: "",
+};
+
+export const sanitizeHeroConfig = (hero = {}, fallback = DEFAULT_HERO_CONFIG) => {
+  const badge = hero?.badgeText || hero?.label || fallback.badgeText || "EXTRA CASH BONUS";
+  return {
+    label: badge,
+    badgeText: badge,
+    title: hero?.title !== undefined && hero?.title !== null ? String(hero.title) : fallback.title,
+    subtitle: hero?.subtitle !== undefined && hero?.subtitle !== null ? String(hero.subtitle) : fallback.subtitle,
+    bgColor: hero?.bgColor || fallback.bgColor || "#064E3B",
+    borderColor: hero?.borderColor || fallback.borderColor || "#047857",
+    badgeBgColor: hero?.badgeBgColor || fallback.badgeBgColor || "#A7F3D0",
+    badgeTextColor: hero?.badgeTextColor || fallback.badgeTextColor || "#065F46",
+    textColor: hero?.textColor || fallback.textColor || "#FFFFFF",
+    subtextColor: hero?.subtextColor || fallback.subtextColor || "#D1FAE5",
+    monthColor: hero?.monthColor || fallback.monthColor || "#A7F3D0",
+    showMonthBadge: hero?.showMonthBadge !== undefined ? Boolean(hero.showMonthBadge) : (fallback.showMonthBadge !== undefined ? fallback.showMonthBadge : true),
+    showTag: hero?.showTag !== undefined ? Boolean(hero.showTag) : (fallback.showTag !== undefined ? fallback.showTag : true),
+    showFormulaPills: hero?.showFormulaPills !== undefined ? Boolean(hero.showFormulaPills) : (fallback.showFormulaPills !== undefined ? fallback.showFormulaPills : true),
+    formulaPills: Array.isArray(hero?.formulaPills)
+      ? hero.formulaPills.filter((p) => p && typeof p === "object" && p.vol && p.reward).map((p) => ({ vol: String(p.vol), reward: String(p.reward) }))
+      : (fallback.formulaPills || []),
+    isActive: hero?.isActive !== undefined ? Boolean(hero.isActive) : (fallback.isActive !== undefined ? fallback.isActive : true),
+    targetTab: hero?.targetTab === "incentive" ? "incentive" : "ladder",
+    monthLabel: hero?.monthLabel !== undefined && hero?.monthLabel !== null ? String(hero.monthLabel) : (fallback.monthLabel || ""),
+  };
+};
+
 export const DEFAULT_PARTNER_LEVELS_CONFIG = {
-  hero: {
-    label: "PERFORMANCE & MILESTONE REWARDS",
-    title: "Unlock Milestone Bonuses",
-    subtitle: "Achieve higher monthly disbursement targets to unlock bigger cash bonuses, VIP badges, and priority perks.",
-    bgColor: "#0D9488",
-  },
+  hero: DEFAULT_HERO_CONFIG,
   levels: [
     {
       id: "BRONZE",
@@ -6347,7 +6768,8 @@ router.get(
     try {
       const cfg = await Config.findOne({ key: "PARTNER_LEVELS_CONFIG" });
       if (cfg && cfg.value && cfg.value.levels) {
-        return res.json({ success: true, ...cfg.value });
+        const mergedHero = sanitizeHeroConfig(cfg.value.hero, DEFAULT_HERO_CONFIG);
+        return res.json({ success: true, hero: mergedHero, levels: cfg.value.levels });
       }
       return res.json({ success: true, ...DEFAULT_PARTNER_LEVELS_CONFIG });
     } catch (err) {
@@ -6365,29 +6787,30 @@ router.put(
   async (req, res) => {
     try {
       const { hero, levels } = req.body;
-      if (!Array.isArray(levels) || levels.length === 0) {
-        return res.status(400).json({ message: "Levels list must be a non-empty array" });
+      const existing = await Config.findOne({ key: "PARTNER_LEVELS_CONFIG" });
+
+      let cleanLevels = [];
+      if (Array.isArray(levels) && levels.length > 0) {
+        cleanLevels = levels.map((lvl, idx) => ({
+          id: (lvl.id || lvl.name || `LEVEL_${idx + 1}`).toUpperCase().trim(),
+          name: lvl.name || `Level ${idx + 1}`,
+          iconName: lvl.iconName || "Shield",
+          color: lvl.color || "#0D9488",
+          bgColor: lvl.bgColor || "#F8FAFC",
+          accentColor: lvl.accentColor || "#E2E8F0",
+          criteria: lvl.criteria || "",
+          minDisbursement: Math.max(0, Number(lvl.minDisbursement || 0)),
+          rewardAmount: Math.max(0, Number(lvl.rewardAmount || 0)),
+          benefits: Array.isArray(lvl.benefits) ? lvl.benefits.filter(Boolean) : [],
+        }));
+      } else if (existing?.value?.levels && Array.isArray(existing.value.levels) && existing.value.levels.length > 0) {
+        cleanLevels = existing.value.levels;
+      } else {
+        cleanLevels = DEFAULT_PARTNER_LEVELS_CONFIG.levels;
       }
 
-      const cleanLevels = levels.map((lvl, idx) => ({
-        id: (lvl.id || lvl.name || `LEVEL_${idx + 1}`).toUpperCase().trim(),
-        name: lvl.name || `Level ${idx + 1}`,
-        iconName: lvl.iconName || "Shield",
-        color: lvl.color || "#0D9488",
-        bgColor: lvl.bgColor || "#F8FAFC",
-        accentColor: lvl.accentColor || "#E2E8F0",
-        criteria: lvl.criteria || "",
-        minDisbursement: Math.max(0, Number(lvl.minDisbursement || 0)),
-        rewardAmount: Math.max(0, Number(lvl.rewardAmount || 0)),
-        benefits: Array.isArray(lvl.benefits) ? lvl.benefits.filter(Boolean) : [],
-      }));
-
-      const cleanHero = {
-        label: hero?.label || "PERFORMANCE & MILESTONE REWARDS",
-        title: hero?.title || "Unlock Milestone Bonuses",
-        subtitle: hero?.subtitle || "Achieve higher monthly disbursement targets to unlock bigger cash bonuses, VIP badges, and priority perks.",
-        bgColor: hero?.bgColor || "#0D9488",
-      };
+      const existingHero = existing?.value?.hero || DEFAULT_HERO_CONFIG;
+      const cleanHero = sanitizeHeroConfig(hero, existingHero);
 
       const updated = await Config.findOneAndUpdate(
         { key: "PARTNER_LEVELS_CONFIG" },
@@ -6439,6 +6862,50 @@ router.put(
     } catch (err) {
       console.error("Error updating partner levels config:", err);
       return res.status(500).json({ message: "Failed to update partner levels config", error: err.message });
+    }
+  }
+);
+
+// PUT /api/admin/milestone-banner - Dedicated endpoint to edit the milestone bonus banner card
+router.put(
+  "/milestone-banner",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  async (req, res) => {
+    try {
+      const heroInput = req.body?.hero || req.body;
+      const existing = await Config.findOne({ key: "PARTNER_LEVELS_CONFIG" });
+      const existingLevels = (existing?.value?.levels && Array.isArray(existing.value.levels))
+        ? existing.value.levels
+        : DEFAULT_PARTNER_LEVELS_CONFIG.levels;
+      const existingHero = existing?.value?.hero || DEFAULT_HERO_CONFIG;
+
+      const cleanHero = sanitizeHeroConfig(heroInput, existingHero);
+
+      await Config.findOneAndUpdate(
+        { key: "PARTNER_LEVELS_CONFIG" },
+        { key: "PARTNER_LEVELS_CONFIG", value: { hero: cleanHero, levels: existingLevels } },
+        { upsert: true, new: true }
+      );
+
+      if (global.io) {
+        global.io.emit("partnerLevelsUpdated", {
+          hero: cleanHero,
+          levels: existingLevels,
+          timestamp: Date.now(),
+        });
+        global.io.emit("dashboardUpdate", { type: "partnerLevels" });
+      }
+
+      return res.json({
+        success: true,
+        message: "Milestone bonus banner card updated successfully",
+        hero: cleanHero,
+        levels: existingLevels,
+      });
+    } catch (err) {
+      console.error("Error updating milestone banner config:", err);
+      return res.status(500).json({ message: "Failed to update milestone banner", error: err.message });
     }
   }
 );
@@ -7057,6 +7524,8 @@ router.post(
             role: ROLES.RM,
             $or: [
               { personalRsmId: rsm._id },
+              { businessRsmId: rsm._id },
+              { homeLapRsmId: rsm._id },
               { businessHomeRsmId: rsm._id }
             ]
           }).lean();
@@ -7871,5 +8340,86 @@ router.put("/partner/:id", auth, requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN), as
     return res.status(500).json({ message: error.message || "Failed to update partner details" });
   }
 });
+
+// ==========================================
+// ADMIN: CHANGE/RESET PASSWORD FOR ANY USER
+// ==========================================
+router.post(
+  ["/users/:id/change-password", "/change-user-password"],
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const id = req.params.id || req.body.userId || req.body.id;
+      const email = req.body.email ? String(req.body.email).trim().toLowerCase() : null;
+      const { newPassword, confirmPassword } = req.body;
+
+      if (!newPassword) {
+        return res.status(400).json({ message: "New password is required" });
+      }
+
+      if (String(newPassword).length < 6) {
+        return res
+          .status(400)
+          .json({ message: "Password must be at least 6 characters long" });
+      }
+
+      if (confirmPassword && newPassword !== confirmPassword) {
+        return res.status(400).json({ message: "Passwords do not match" });
+      }
+
+      let user = null;
+      if (id && mongoose.Types.ObjectId.isValid(id)) {
+        user = await User.findById(id);
+      }
+      if (!user && email) {
+        user = await User.findOne({ email });
+      }
+
+      if (!user) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      user.passwordHash = await argon2.hash(String(newPassword));
+      if (user.tempPassword) {
+        user.tempPassword = undefined;
+      }
+      await user.save();
+
+      // Best effort email notification
+      try {
+        if (user.email) {
+          await sendMail({
+            to: user.email,
+            subject: "Your DhanSource Account Password Has Been Updated",
+            html: `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+                <h2 style="color: #0d9d84;">Password Updated</h2>
+                <p>Hello ${user.firstName || "User"},</p>
+                <p>Your password for your DhanSource account (<strong>${user.email}</strong>) has been successfully updated by the system administrator.</p>
+                <p>You can now log in using your updated credentials.</p>
+                <p>If you did not expect this change, please contact DhanSource Admin Support immediately.</p>
+                <br/>
+                <p style="color: #666; font-size: 12px;">DhanSource Team</p>
+              </div>
+            `,
+          });
+        }
+      } catch (mailErr) {
+        console.warn("Could not send password change notification email:", mailErr.message);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Password updated successfully for ${user.firstName || ""} ${user.lastName || ""} (${user.role})`.trim(),
+      });
+    } catch (error) {
+      console.error("Admin change user password error:", error);
+      return res
+        .status(500)
+        .json({ message: error.message || "Failed to update user password" });
+    }
+  }
+);
 
 export default router;

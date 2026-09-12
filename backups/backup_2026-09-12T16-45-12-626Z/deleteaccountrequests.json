@@ -1,0 +1,345 @@
+[
+  {
+    "_id": "69cf6ad75fa30bba81e8befa",
+    "user": "69cf5ab65fa30bba81e8b984",
+    "role": "PARTNER",
+    "reason": "",
+    "status": "REJECTED",
+    "source": "PORTAL",
+    "createdAt": "2026-04-03T07:23:03.725Z",
+    "updatedAt": "2026-04-03T07:24:09.806Z",
+    "__v": 0,
+    "processedAt": "2026-04-03T07:24:09.801Z",
+    "processedBy": "69c71fc40d97c9e575fff734"
+  },
+  {
+    "_id": "69cf6b795fa30bba81e8bf6a",
+    "user": "69cf5ab65fa30bba81e8b984",
+    "role": "PARTNER",
+    "reason": "Chddd",
+    "status": "REJECTED",
+    "source": "PORTAL",
+    "createdAt": "2026-04-03T07:25:45.561Z",
+    "updatedAt": "2026-04-03T07:25:57.575Z",
+    "__v": 0,
+    "processedAt": "2026-04-03T07:25:57.574Z",
+    "processedBy": "69c71fc40d97c9e575fff734"
+  },
+  {
+    "_id": "69cf990ae002fd92723eb9a5",
+    "user": "69cf47a45fa30bba81e8b502",
+    "role": "PARTNER",
+    "reason": "",
+    "status": "COMPLETED",
+    "source": "PORTAL",
+    "createdAt": "2026-04-03T10:40:10.841Z",
+    "updatedAt": "2026-07-27T14:55:57.557Z",
+    "__v": 0,
+    "processedAt": "2026-04-03T10:40:53.970Z",
+    "processedBy": "69c71fc40d97c9e575fff734",
+    "meta": {
+      "deletionOutcome": {
+        "mode": "HARD_DELETE_SCHEDULED",
+        "eligible": true,
+        "blockers": [],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": null,
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-07-27T14:55:57.556Z"
+    }
+  },
+  {
+    "_id": "6a4e4449e39a880fb3f1a1eb",
+    "user": "6a4e01eee39a880fb3f15da0",
+    "role": "PARTNER",
+    "reason": "",
+    "status": "REJECTED",
+    "source": "PORTAL",
+    "createdAt": "2026-07-08T12:36:25.233Z",
+    "updatedAt": "2026-08-03T09:01:41.401Z",
+    "__v": 0,
+    "meta": {
+      "deletionOutcome": {
+        "mode": "HARD_DELETE_SCHEDULED",
+        "eligible": true,
+        "blockers": [],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": null,
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-07-27T14:55:53.578Z"
+    },
+    "processedAt": "2026-07-27T14:55:53.578Z",
+    "processedBy": "6a439c6d815f90506104cb6e"
+  },
+  {
+    "_id": "6a5381af5ea6543d4b8d7d62",
+    "user": "6a4dc609e39a880fb3f143c2",
+    "role": "PARTNER",
+    "reason": "No need more",
+    "status": "REJECTED",
+    "source": "PORTAL",
+    "createdAt": "2026-07-12T11:59:43.826Z",
+    "updatedAt": "2026-08-03T09:01:44.731Z",
+    "__v": 0,
+    "meta": {
+      "deletionOutcome": {
+        "mode": "HARD_DELETE_SCHEDULED",
+        "eligible": true,
+        "blockers": [],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": null,
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-07-27T11:53:54.874Z"
+    },
+    "processedAt": "2026-07-27T11:53:54.874Z",
+    "processedBy": "6a439c6d815f90506104cb6e"
+  },
+  {
+    "_id": "6a57b8f64dd011cd30562862",
+    "user": "6a4d3ec0e39a880fb3f1329e",
+    "role": "PARTNER",
+    "reason": "",
+    "status": "REJECTED",
+    "source": "PORTAL",
+    "createdAt": "2026-07-15T16:44:38.188Z",
+    "updatedAt": "2026-08-03T09:01:47.635Z",
+    "__v": 0,
+    "meta": {
+      "deletionOutcome": {
+        "mode": "SOFT_DELETE_ONLY",
+        "eligible": false,
+        "blockers": [
+          "ACTIVE_APPLICATIONS",
+          "RETENTION_PERIOD_NOT_COMPLETE"
+        ],
+        "activeApplications": 1,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": "2026-07-16T12:57:22.114Z",
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-07-27T14:55:49.255Z"
+    },
+    "processedAt": "2026-07-27T14:55:49.255Z",
+    "processedBy": "6a439c6d815f90506104cb6e"
+  },
+  {
+    "_id": "6a61d56a4dd011cd305828b6",
+    "user": "6a4d454ee39a880fb3f13544",
+    "role": "PARTNER",
+    "reason": "I want discontinued operations with you",
+    "status": "REJECTED",
+    "source": "PORTAL",
+    "createdAt": "2026-07-23T08:48:42.282Z",
+    "updatedAt": "2026-08-03T09:01:57.497Z",
+    "__v": 0,
+    "meta": {
+      "deletionOutcome": {
+        "mode": "SOFT_DELETE_ONLY",
+        "eligible": false,
+        "blockers": [
+          "RETENTION_PERIOD_NOT_COMPLETE"
+        ],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": "2026-07-22T09:56:02.116Z",
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-07-27T14:55:45.993Z"
+    },
+    "processedAt": "2026-07-27T14:55:45.992Z",
+    "processedBy": "6a439c6d815f90506104cb6e"
+  },
+  {
+    "_id": "6a69b1d1975709593969a38d",
+    "user": "6a4f1d2be39a880fb3f1e9ae",
+    "role": "PARTNER",
+    "reason": "Ok",
+    "status": "COMPLETED",
+    "source": "PORTAL",
+    "createdAt": "2026-07-29T07:54:57.495Z",
+    "updatedAt": "2026-08-03T09:02:15.294Z",
+    "__v": 0,
+    "processedAt": "2026-08-03T09:01:31.794Z",
+    "processedBy": "6a439c6d815f90506104cb6e",
+    "meta": {
+      "deletionOutcome": {
+        "mode": "HARD_DELETE_SCHEDULED",
+        "eligible": true,
+        "blockers": [],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": null,
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-08-03T09:02:15.294Z"
+    }
+  },
+  {
+    "_id": "6a6b88c24fc326925bede5bb",
+    "user": "6a6b57654fc326925bedd075",
+    "role": "PARTNER",
+    "reason": "",
+    "status": "COMPLETED",
+    "source": "PORTAL",
+    "createdAt": "2026-07-30T17:24:18.361Z",
+    "updatedAt": "2026-08-03T09:02:12.486Z",
+    "__v": 0,
+    "processedAt": "2026-08-03T09:01:29.191Z",
+    "processedBy": "6a439c6d815f90506104cb6e",
+    "meta": {
+      "deletionOutcome": {
+        "mode": "HARD_DELETE_SCHEDULED",
+        "eligible": true,
+        "blockers": [],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": null,
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-08-03T09:02:12.485Z"
+    }
+  },
+  {
+    "_id": "6a6c178f4fc326925bee056e",
+    "user": "6a6a4960531487c63bf9d651",
+    "role": "PARTNER",
+    "reason": "Not possible",
+    "status": "COMPLETED",
+    "source": "PORTAL",
+    "createdAt": "2026-07-31T03:33:35.444Z",
+    "updatedAt": "2026-08-03T09:02:10.234Z",
+    "__v": 0,
+    "processedAt": "2026-08-03T09:01:25.885Z",
+    "processedBy": "6a439c6d815f90506104cb6e",
+    "meta": {
+      "deletionOutcome": {
+        "mode": "HARD_DELETE_SCHEDULED",
+        "eligible": true,
+        "blockers": [],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": null,
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-08-03T09:02:10.234Z"
+    }
+  },
+  {
+    "_id": "6a6db71ce32b31333091e435",
+    "user": "6a6b67e14fc326925bedd8c6",
+    "role": "PARTNER",
+    "reason": "Personal reason",
+    "status": "COMPLETED",
+    "source": "PORTAL",
+    "createdAt": "2026-08-01T09:06:36.746Z",
+    "updatedAt": "2026-08-03T09:02:07.114Z",
+    "__v": 0,
+    "processedAt": "2026-08-03T09:01:17.498Z",
+    "processedBy": "6a439c6d815f90506104cb6e",
+    "meta": {
+      "deletionOutcome": {
+        "mode": "HARD_DELETE_SCHEDULED",
+        "eligible": true,
+        "blockers": [],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": null,
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-08-03T09:02:07.114Z"
+    }
+  },
+  {
+    "_id": "6a743dffe32b313330939f22",
+    "user": "6a6a058c323709dfaab0ecbf",
+    "role": "PARTNER",
+    "reason": "No need",
+    "status": "COMPLETED",
+    "source": "PORTAL",
+    "createdAt": "2026-08-06T07:55:43.462Z",
+    "updatedAt": "2026-08-06T12:38:07.232Z",
+    "__v": 0,
+    "processedAt": "2026-08-06T12:38:01.164Z",
+    "processedBy": "6a439c6d815f90506104cb6e",
+    "meta": {
+      "deletionOutcome": {
+        "mode": "HARD_DELETE_SCHEDULED",
+        "eligible": true,
+        "blockers": [],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": null,
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-08-06T12:38:07.232Z"
+    }
+  },
+  {
+    "_id": "6a7c9ae80c8a25243598d235",
+    "user": "6a6ba8e24fc326925bedf56a",
+    "role": "PARTNER",
+    "reason": "",
+    "status": "COMPLETED",
+    "source": "PORTAL",
+    "createdAt": "2026-08-12T16:10:16.952Z",
+    "updatedAt": "2026-08-14T09:40:50.614Z",
+    "__v": 0,
+    "meta": {
+      "deletionOutcome": {
+        "mode": "HARD_DELETE_SCHEDULED",
+        "eligible": true,
+        "blockers": [],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": null,
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-08-14T09:40:50.614Z"
+    },
+    "processedAt": "2026-08-14T09:40:50.614Z",
+    "processedBy": "6a439c6d815f90506104cb6e"
+  },
+  {
+    "_id": "6a8fbe1e451952046c95d850",
+    "user": "6a8bb6a2f609166f305b7f03",
+    "role": "PARTNER",
+    "reason": "Not Interested",
+    "status": "COMPLETED",
+    "source": "PORTAL",
+    "createdAt": "2026-08-27T04:33:34.109Z",
+    "updatedAt": "2026-08-30T12:27:41.075Z",
+    "__v": 0,
+    "meta": {
+      "deletionOutcome": {
+        "mode": "HARD_DELETE_SCHEDULED",
+        "eligible": true,
+        "blockers": [],
+        "activeApplications": 0,
+        "pendingPayouts": 0,
+        "pendingIncentives": 0,
+        "latestActivityAt": null,
+        "retentionDays": 90
+      },
+      "updatedByAdminAt": "2026-08-30T12:27:41.074Z"
+    },
+    "processedAt": "2026-08-30T12:27:41.074Z",
+    "processedBy": "6a439c6d815f90506104cb6e"
+  }
+]

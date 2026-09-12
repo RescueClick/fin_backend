@@ -1,6 +1,6 @@
 // models/User.js
 import mongoose from "mongoose";
-import { ALL_ROLES, ROLES, RSM_TYPES } from "../config/roles.js";
+import { ALL_ROLES, ROLES, ASM_TYPES, RSM_TYPES } from "../config/roles.js";
 import { FollowUp } from "../models/followUp.js";
 
 // Document sub-schema for dynamic files
@@ -74,18 +74,29 @@ const userSchema = new mongoose.Schema(
       default: "ACTIVE",
     },
     // Hierarchy links
-    // For ASM: adminId (set in admin.routes)
+    // For RSM (Senior): adminId (set in admin.routes)
     adminId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    // For RSM: parent ASM
-    asmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    // For RM: two bosses max — one PERSONAL-type RSM, one BUSINESS_HOME-type RSM (never the same person twice)
-    personalRsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    businessHomeRsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    // For ASM (Specialized): parent RSM
+    rsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    asmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // legacy alias
+    // For RM: 3 specialized ASM bosses — Personal, Business, Home+LAP (under same RSM)
+    personalAsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    businessAsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    homeLapAsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    personalRsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // legacy alias
+    businessRsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // legacy alias
+    homeLapRsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },  // legacy alias
+    businessHomeRsmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // legacy fallback
     // For Partner / Customer: parent RM / Partner
     rmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     partnerId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 
-    // RSM specific type (what loan types this RSM owns)
+    // ASM specific type (what loan types this specialized ASM owns)
+    asmType: {
+      type: String,
+      enum: Object.values(ASM_TYPES),
+    },
+    // RSM specific type (legacy compatibility)
     rsmType: {
       type: String,
       enum: Object.values(RSM_TYPES),
@@ -93,6 +104,7 @@ const userSchema = new mongoose.Schema(
 
     // Employee identifiers & codes
     employeeId: { type: String, unique: true, sparse: true },
+    rsmCode: { type: String, unique: true, sparse: true },
     asmCode: { type: String, unique: true, sparse: true },
     rmCode: { type: String, unique: true, sparse: true },
     partnerCode: { type: String, unique: true, sparse: true },

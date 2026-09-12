@@ -1,0 +1,16 @@
+[
+  {
+    "_id": "6aa57b92cb33a9f28bbfbffd",
+    "conversationId": "6aa57b8dcb33a9f28bbfbfef",
+    "sender": "6a439c6d815f90506104cb6e",
+    "recipient": "6a8931bdf609166f305adfe2",
+    "text": "hii",
+    "attachments": [],
+    "loanRef": null,
+    "status": "SENT",
+    "deletedFor": [],
+    "createdAt": "2026-09-12T16:19:30.294Z",
+    "updatedAt": "2026-09-12T16:19:30.294Z",
+    "__v": 0
+  }
+]

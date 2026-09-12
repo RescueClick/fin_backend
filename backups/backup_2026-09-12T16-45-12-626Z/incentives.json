@@ -1,0 +1,23 @@
+[
+  {
+    "_id": "6a2f1a3df329aa0f9e7934bb",
+    "partnerId": "6a2e9dbc33910cba009106d0",
+    "asmId": "69cd478a5fa30bba81e88a34",
+    "month": 6,
+    "year": 2026,
+    "fileCountTarget": 2,
+    "achievedFileCount": 1,
+    "disbursementTarget": 4166667,
+    "achievedDisbursement": 60000000,
+    "basis": "FIXED",
+    "fixedValue": 1000,
+    "amount": 1000,
+    "status": "PAID",
+    "notes": "",
+    "createdAt": "2026-06-14T21:16:45.421Z",
+    "updatedAt": "2026-06-14T21:26:43.882Z",
+    "__v": 0,
+    "paidAt": "2026-06-14T21:26:43.874Z",
+    "paidBy": "69c71fc40d97c9e575fff734"
+  }
+]

@@ -369,6 +369,8 @@ router.get("/sidebar-counts", auth, async (req, res) => {
       const rms = await User.find({
         $or: [
           { personalRsmId: { $in: rsmIds } },
+          { businessRsmId: { $in: rsmIds } },
+          { homeLapRsmId: { $in: rsmIds } },
           { businessHomeRsmId: { $in: rsmIds } }
         ],
         role: "rm"

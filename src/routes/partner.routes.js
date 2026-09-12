@@ -47,6 +47,7 @@ import {
 import { createNotification, createNotificationsForUsers } from "../utils/notificationService.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { Config } from "../models/Config.js";
+import { sanitizeHeroConfig, DEFAULT_HERO_CONFIG } from "./admin.routes.js";
 import { findCustomerApplyBlocker } from "../utils/loanReapplyPolicy.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import {
@@ -2028,10 +2029,22 @@ router.post(
       // Resolve RSM and ASM based on RM & loanType
       let assignedRsmId = null;
       if (assignedRmId) {
-        const rmDoc = await User.findById(assignedRmId).select("personalRsmId businessHomeRsmId asmId").lean();
+        const rmDoc = await User.findById(assignedRmId)
+          .select("personalRsmId businessRsmId homeLapRsmId businessHomeRsmId asmId")
+          .lean();
         if (rmDoc) {
           if (loanType === "PERSONAL") {
             assignedRsmId = rmDoc.personalRsmId || null;
+          } else if (loanType === "BUSINESS") {
+            assignedRsmId = rmDoc.businessRsmId || rmDoc.businessHomeRsmId || null;
+          } else if (
+            loanType === "HOME_LOAN_SALARIED" ||
+            loanType === "HOME_LOAN_SELF_EMPLOYED" ||
+            loanType === "LAP_SALARIED" ||
+            loanType === "LAP_SELF_EMPLOYED" ||
+            loanType === "LAP"
+          ) {
+            assignedRsmId = rmDoc.homeLapRsmId || rmDoc.businessHomeRsmId || null;
           } else {
             assignedRsmId = rmDoc.businessHomeRsmId || null;
           }
@@ -3312,7 +3325,7 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       .populate({
         path: "rmId",
         select:
-          "firstName lastName employeeId email phone asmId personalRsmId businessHomeRsmId",
+          "firstName lastName employeeId email phone asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
         populate: [
           {
             path: "asmId",
@@ -3320,6 +3333,22 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
           },
           {
             path: "personalRsmId",
+            select: "firstName lastName employeeId email phone asmId",
+            populate: {
+              path: "asmId",
+              select: "firstName lastName employeeId email phone",
+            },
+          },
+          {
+            path: "businessRsmId",
+            select: "firstName lastName employeeId email phone asmId",
+            populate: {
+              path: "asmId",
+              select: "firstName lastName employeeId email phone",
+            },
+          },
+          {
+            path: "homeLapRsmId",
             select: "firstName lastName employeeId email phone asmId",
             populate: {
               path: "asmId",
@@ -3365,11 +3394,13 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       };
     };
     const personalRsmFmt = formatRsm(pr?.personalRsmId);
-    const businessRsmFmt = formatRsm(pr?.businessHomeRsmId);
+    const businessRsmFmt = formatRsm(pr?.businessRsmId || pr?.businessHomeRsmId);
+    const homeLapRsmFmt = formatRsm(pr?.homeLapRsmId || pr?.businessHomeRsmId);
     const asmDirect = asmFromDoc(pr?.asmId);
     const resolvedAsm =
       personalRsmFmt?.asm ||
       businessRsmFmt?.asm ||
+      homeLapRsmFmt?.asm ||
       asmDirect;
 
     // Do NOT modify URLs — they are already full AWS S3 URLs
@@ -3467,6 +3498,29 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       personalRsmAsmEmail: personalRsmFmt?.asm?.email || null,
       personalRsmAsmPhone: personalRsmFmt?.asm?.phone || null,
 
+      businessRsmId: businessRsmFmt?.id || null,
+      businessRsmName: businessRsmFmt?.name || null,
+      businessRsmEmployeeId: businessRsmFmt?.employeeId || null,
+      businessRsmPhone: businessRsmFmt?.phone || null,
+      businessRsmEmail: businessRsmFmt?.email || null,
+      businessRsmAsmId: businessRsmFmt?.asm?.id || null,
+      businessRsmAsmName: businessRsmFmt?.asm?.name || null,
+      businessRsmAsmEmployeeId: businessRsmFmt?.asm?.employeeId || null,
+      businessRsmAsmEmail: businessRsmFmt?.asm?.email || null,
+      businessRsmAsmPhone: businessRsmFmt?.asm?.phone || null,
+
+      homeLapRsmId: homeLapRsmFmt?.id || null,
+      homeLapRsmName: homeLapRsmFmt?.name || null,
+      homeLapRsmEmployeeId: homeLapRsmFmt?.employeeId || null,
+      homeLapRsmPhone: homeLapRsmFmt?.phone || null,
+      homeLapRsmEmail: homeLapRsmFmt?.email || null,
+      homeLapRsmAsmId: homeLapRsmFmt?.asm?.id || null,
+      homeLapRsmAsmName: homeLapRsmFmt?.asm?.name || null,
+      homeLapRsmAsmEmployeeId: homeLapRsmFmt?.asm?.employeeId || null,
+      homeLapRsmAsmEmail: homeLapRsmFmt?.asm?.email || null,
+      homeLapRsmAsmPhone: homeLapRsmFmt?.asm?.phone || null,
+
+      // Legacy Business & Home Loan RSM details
       businessHomeRsmId: businessRsmFmt?.id || null,
       businessHomeRsmName: businessRsmFmt?.name || null,
       businessHomeRsmEmployeeId: businessRsmFmt?.employeeId || null,
@@ -3501,6 +3555,8 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
           }
           : null,
         personalRsm: personalRsmFmt,
+        businessRsm: businessRsmFmt,
+        homeLapRsm: homeLapRsmFmt,
         businessHomeRsm: businessRsmFmt,
         asm: resolvedAsm,
       },
@@ -5017,16 +5073,12 @@ router.get("/levels-config", async (req, res) => {
   try {
     const cfg = await Config.findOne({ key: "PARTNER_LEVELS_CONFIG" });
     if (cfg && cfg.value && cfg.value.levels) {
-      return res.json({ success: true, ...cfg.value });
+      const mergedHero = sanitizeHeroConfig(cfg.value.hero, DEFAULT_HERO_CONFIG);
+      return res.json({ success: true, ...cfg.value, hero: mergedHero });
     }
     return res.json({
       success: true,
-      hero: {
-        label: "PERFORMANCE & MILESTONE REWARDS",
-        title: "Unlock Milestone Bonuses",
-        subtitle: "Achieve higher monthly disbursement targets to unlock bigger cash bonuses, VIP badges, and priority perks.",
-        bgColor: "#0D9488",
-      },
+      hero: DEFAULT_HERO_CONFIG,
       levels: [
         {
           id: "BRONZE",

@@ -82,6 +82,8 @@ async function enforceHierarchyAccess({ requesterId, requesterRole, targetUser }
     }
     const isUnderRSM =
       (targetUser.personalRsmId && targetUser.personalRsmId.toString() === requesterId) ||
+      (targetUser.businessRsmId && targetUser.businessRsmId.toString() === requesterId) ||
+      (targetUser.homeLapRsmId && targetUser.homeLapRsmId.toString() === requesterId) ||
       (targetUser.businessHomeRsmId && targetUser.businessHomeRsmId.toString() === requesterId);
     if (!isUnderRSM) {
       throw Object.assign(new Error("RM not found or not under this RSM"), { statusCode: 403 });
@@ -144,6 +146,8 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
         ? {
             $or: [
               { personalRsmId: { $in: rsmIds } },
+              { businessRsmId: { $in: rsmIds } },
+              { homeLapRsmId: { $in: rsmIds } },
               { businessHomeRsmId: { $in: rsmIds } },
             ],
           }
@@ -179,7 +183,12 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
   if (targetRole === ROLES.RSM) {
     const rms = await User.find({
       role: ROLES.RM,
-      $or: [{ personalRsmId: id }, { businessHomeRsmId: id }],
+      $or: [
+        { personalRsmId: id },
+        { businessRsmId: id },
+        { homeLapRsmId: id },
+        { businessHomeRsmId: id },
+      ],
       ...userBase,
     }).select("_id").lean();
     const rmIds = rms.map((x) => x._id);
@@ -254,7 +263,7 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
  */
 async function buildReportingChain(targetUser) {
   const select =
-    "firstName lastName employeeId phone email role asmId personalRsmId businessHomeRsmId rsmType adminId";
+    "firstName lastName employeeId phone email role asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId rsmType adminId";
   const chain = [];
 
   const pushNode = (u, segmentLabel, isSelf = false) => {
@@ -282,7 +291,8 @@ async function buildReportingChain(targetUser) {
     const rsmOrdered = [];
     const pairs = [
       [rm?.personalRsmId, "RSM (Personal loans)"],
-      [rm?.businessHomeRsmId, "RSM (Business/Home loans)"],
+      [rm?.businessRsmId || rm?.businessHomeRsmId, "RSM (Business loans)"],
+      [rm?.homeLapRsmId || rm?.businessHomeRsmId, "RSM (Home & LAP loans)"],
     ];
     const seenRsm = new Set();
     for (const [rid, label] of pairs) {
@@ -316,7 +326,8 @@ async function buildReportingChain(targetUser) {
     const rsmOrdered = [];
     const pairs = [
       [targetUser.personalRsmId, "RSM (Personal loans)"],
-      [targetUser.businessHomeRsmId, "RSM (Business/Home loans)"],
+      [targetUser.businessRsmId || targetUser.businessHomeRsmId, "RSM (Business loans)"],
+      [targetUser.homeLapRsmId || targetUser.businessHomeRsmId, "RSM (Home & LAP loans)"],
     ];
     const seenRsm = new Set();
     for (const [rid, label] of pairs) {
@@ -636,6 +647,8 @@ router.get(
           role: ROLES.RM,
           $or: [
             { personalRsmId: id },
+            { businessRsmId: id },
+            { homeLapRsmId: id },
             { businessHomeRsmId: id },
           ],
           status: "ACTIVE",

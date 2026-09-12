@@ -55,7 +55,7 @@ const router = Router();
 router.post(
   "/create-rsm",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const {
@@ -174,26 +174,32 @@ router.post(
   }
 );
 
-// GET /api/asm/get-rsms
-// ASM gets all RSMs under them (excluding deleted)
-router.get("/get-rsms", auth, requireRole(ROLES.ASM), async (req, res) => {
+// GET /api/asm/get-rsms (or subordinate specialized managers)
+router.get(["/get-rsms", "/get-asms"], auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
-    const asmId = req.user.sub;
+    const managerId = req.user.sub;
     const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
 
-    const rsms = await User.find({ asmId, role: ROLES.RSM, ...userBase })
+    const subordinates = await User.find({
+      $or: [{ rsmId: managerId }, { asmId: managerId }],
+      role: { $in: [ROLES.ASM, ROLES.RSM] },
+      ...userBase,
+    })
       .select("-passwordHash -__v")
       .lean();
 
-    const formatted = rsms.map((rsm) => ({
-      ...rsm,
-      asmId: rsm.asmId || null,
+    const formatted = subordinates.map((s) => ({
+      ...s,
+      asmType: s.asmType || s.rsmType || null,
+      rsmType: s.asmType || s.rsmType || null,
+      asmId: s.rsmId || s.asmId || null,
+      rsmId: s.rsmId || s.asmId || null,
     }));
 
     res.json(formatted);
   } catch (err) {
-    console.error("Error fetching RSMs:", err);
-    res.status(500).json({ message: "Error fetching RSMs" });
+    console.error("Error fetching subordinates:", err);
+    res.status(500).json({ message: "Error fetching subordinates" });
   }
 });
 
@@ -201,7 +207,7 @@ router.get("/get-rsms", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.post(
   "/partners/bulk-move-rm",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const { partnerIds, fromRmId, toRmId, dryRun } = req.body || {};
@@ -224,31 +230,66 @@ router.post(
   }
 );
 
-router.get("/get-rm", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get(["/get-rm", "/get-rms"], auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
 
-    // Get RSMs under this ASM first
-    const rsms = await User.find({ role: ROLES.RSM, asmId, ...userBase }).select("_id").lean();
-    const rsmIds = rsms.map(r => r._id);
+    // Get subordinate ASMs/RSMs under this manager first
+    const rsms = await User.find({
+      $or: [{ rsmId: asmId }, { asmId: asmId }],
+      role: { $in: [ROLES.ASM, ROLES.RSM] },
+      ...userBase,
+    }).select("_id").lean();
+    const rsmIds = rsms.map((r) => r._id);
 
-    // Get RMs that are under these RSMs (via personalRsmId OR businessHomeRsmId)
+    // Get RMs that are under these managers
     const list = await User.find({
       role: ROLES.RM,
       ...userBase,
       $or: [
+        { personalAsmId: { $in: rsmIds } },
+        { businessAsmId: { $in: rsmIds } },
+        { homeLapAsmId: { $in: rsmIds } },
         { personalRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } }
-      ]
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
+        { businessHomeRsmId: { $in: rsmIds } },
+        { rsmId: asmId },
+        { asmId: asmId },
+      ],
     })
       .select("-passwordHash -__v")
+      .populate({
+        path: "rsmId",
+        select: "firstName lastName employeeId",
+      })
       .populate({
         path: "asmId",
         select: "firstName lastName employeeId",
       })
       .populate({
+        path: "personalAsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
+        path: "businessAsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
+        path: "homeLapAsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
         path: "personalRsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
+        path: "businessRsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
+        path: "homeLapRsmId",
         select: "firstName lastName employeeId phone email",
       })
       .populate({
@@ -258,14 +299,23 @@ router.get("/get-rm", auth, requireRole(ROLES.ASM), async (req, res) => {
       .lean();
 
     const formatted = list.map((rm) => {
-      const asm = rm.asmId;
-      const personalRsm = rm.personalRsmId;
-      const businessHomeRsm = rm.businessHomeRsmId;
+      const asm = rm.rsmId || rm.asmId;
+      const personalRsm = rm.personalAsmId || rm.personalRsmId;
+      const businessRsm = rm.businessAsmId || rm.businessRsmId;
+      // Accurate: only use actual HL/LAP assignment; do NOT fall back to business manager
+      const homeLapRsm = rm.homeLapAsmId || rm.homeLapRsmId || null;
+      const businessHomeRsm = rm.businessHomeAsmId || rm.businessHomeRsmId || null;
 
       // Store original IDs before destructuring
       const originalPersonalRsmId = typeof rm.personalRsmId === 'object' && rm.personalRsmId?._id
         ? rm.personalRsmId._id
-        : rm.personalRsmId;
+        : (rm.personalAsmId?._id || rm.personalAsmId || rm.personalRsmId || null);
+      const originalBusinessRsmId = typeof rm.businessRsmId === 'object' && rm.businessRsmId?._id
+        ? rm.businessRsmId._id
+        : (rm.businessAsmId?._id || rm.businessAsmId || rm.businessRsmId || null);
+      const originalHomeLapRsmId = typeof rm.homeLapRsmId === 'object' && rm.homeLapRsmId?._id
+        ? rm.homeLapRsmId._id
+        : (rm.homeLapAsmId?._id || rm.homeLapAsmId || rm.homeLapRsmId || null);
       const originalBusinessHomeRsmId = typeof rm.businessHomeRsmId === 'object' && rm.businessHomeRsmId?._id
         ? rm.businessHomeRsmId._id
         : rm.businessHomeRsmId;
@@ -274,24 +324,84 @@ router.get("/get-rm", auth, requireRole(ROLES.ASM), async (req, res) => {
       const {
         asmId: _asmId,
         personalRsmId: _personalRsmId,
+        businessRsmId: _businessRsmId,
+        homeLapRsmId: _homeLapRsmId,
         businessHomeRsmId: _businessHomeRsmId,
         ...rmBase
       } = rm;
 
+      const personalAsmObj = personalRsm && personalRsm._id ? {
+        _id: personalRsm._id,
+        firstName: personalRsm.firstName || "",
+        lastName: personalRsm.lastName || "",
+        employeeId: personalRsm.employeeId || "",
+        phone: personalRsm.phone || "",
+        email: personalRsm.email || "",
+      } : null;
+
+      const businessAsmObj = businessRsm && businessRsm._id ? {
+        _id: businessRsm._id,
+        firstName: businessRsm.firstName || "",
+        lastName: businessRsm.lastName || "",
+        employeeId: businessRsm.employeeId || "",
+        phone: businessRsm.phone || "",
+        email: businessRsm.email || "",
+      } : null;
+
+      const homeLapAsmObj = homeLapRsm && homeLapRsm._id ? {
+        _id: homeLapRsm._id,
+        firstName: homeLapRsm.firstName || "",
+        lastName: homeLapRsm.lastName || "",
+        employeeId: homeLapRsm.employeeId || "",
+        phone: homeLapRsm.phone || "",
+        email: homeLapRsm.email || "",
+      } : null;
+
       return {
         ...rmBase,
+        personalAsm: personalAsmObj,
+        businessAsm: businessAsmObj,
+        homeLapAsm: homeLapAsmObj,
+        personalRsm: personalAsmObj,
+        businessRsm: businessAsmObj,
+        homeLapRsm: homeLapAsmObj,
+
         asmId: asm ? asm._id : null,
         asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
         asmEmployeeId: asm ? asm.employeeId : null,
+        // Personal Loan ASM details
+        personalAsmId: personalAsmObj ? personalAsmObj._id : originalPersonalRsmId || null,
+        personalAsmName: personalAsmObj ? `${personalAsmObj.firstName} ${personalAsmObj.lastName}`.trim() : null,
+        personalAsmEmployeeId: personalAsmObj ? personalAsmObj.employeeId : null,
         // Personal Loan RSM details
-        personalRsmId: personalRsm ? personalRsm._id : originalPersonalRsmId || null,
-        personalRsmName: personalRsm ? `${personalRsm.firstName} ${personalRsm.lastName}` : null,
-        personalRsmEmployeeId: personalRsm ? personalRsm.employeeId : null,
-        personalRsmPhone: personalRsm ? personalRsm.phone : null,
-        personalRsmEmail: personalRsm ? personalRsm.email : null,
-        // Business & Home Loan RSM details
-        businessHomeRsmId: businessHomeRsm ? businessHomeRsm._id : originalBusinessHomeRsmId || null,
-        businessHomeRsmName: businessHomeRsm ? `${businessHomeRsm.firstName} ${businessHomeRsm.lastName}` : null,
+        personalRsmId: personalAsmObj ? personalAsmObj._id : originalPersonalRsmId || null,
+        personalRsmName: personalAsmObj ? `${personalAsmObj.firstName} ${personalAsmObj.lastName}`.trim() : null,
+        personalRsmEmployeeId: personalAsmObj ? personalAsmObj.employeeId : null,
+        personalRsmPhone: personalAsmObj ? personalAsmObj.phone : null,
+        personalRsmEmail: personalAsmObj ? personalAsmObj.email : null,
+        // Business Loan ASM details
+        businessAsmId: businessAsmObj ? businessAsmObj._id : originalBusinessRsmId || originalBusinessHomeRsmId || null,
+        businessAsmName: businessAsmObj ? `${businessAsmObj.firstName} ${businessAsmObj.lastName}`.trim() : null,
+        businessAsmEmployeeId: businessAsmObj ? businessAsmObj.employeeId : null,
+        // Business Loan RSM details
+        businessRsmId: businessAsmObj ? businessAsmObj._id : originalBusinessRsmId || originalBusinessHomeRsmId || null,
+        businessRsmName: businessAsmObj ? `${businessAsmObj.firstName} ${businessAsmObj.lastName}`.trim() : null,
+        businessRsmEmployeeId: businessAsmObj ? businessAsmObj.employeeId : null,
+        businessRsmPhone: businessAsmObj ? businessAsmObj.phone : null,
+        businessRsmEmail: businessAsmObj ? businessAsmObj.email : null,
+        // Home & LAP Loan ASM details
+        homeLapAsmId: homeLapAsmObj ? homeLapAsmObj._id : originalHomeLapRsmId || originalBusinessHomeRsmId || null,
+        homeLapAsmName: homeLapAsmObj ? `${homeLapAsmObj.firstName} ${homeLapAsmObj.lastName}`.trim() : null,
+        homeLapAsmEmployeeId: homeLapAsmObj ? homeLapAsmObj.employeeId : null,
+        // Home & LAP Loan RSM details
+        homeLapRsmId: homeLapAsmObj ? homeLapAsmObj._id : originalHomeLapRsmId || originalBusinessHomeRsmId || null,
+        homeLapRsmName: homeLapAsmObj ? `${homeLapAsmObj.firstName} ${homeLapAsmObj.lastName}`.trim() : null,
+        homeLapRsmEmployeeId: homeLapAsmObj ? homeLapAsmObj.employeeId : null,
+        homeLapRsmPhone: homeLapAsmObj ? homeLapAsmObj.phone : null,
+        homeLapRsmEmail: homeLapAsmObj ? homeLapAsmObj.email : null,
+        // Legacy Business & Home Loan RSM details
+        businessHomeRsmId: businessHomeRsm ? businessHomeRsm._id : originalBusinessHomeRsmId || originalBusinessRsmId || null,
+        businessHomeRsmName: businessHomeRsm ? `${businessHomeRsm.firstName} ${businessHomeRsm.lastName}`.trim() : null,
         businessHomeRsmEmployeeId: businessHomeRsm ? businessHomeRsm.employeeId : null,
         businessHomeRsmPhone: businessHomeRsm ? businessHomeRsm.phone : null,
         businessHomeRsmEmail: businessHomeRsm ? businessHomeRsm.email : null,
@@ -306,7 +416,7 @@ router.get("/get-rm", auth, requireRole(ROLES.ASM), async (req, res) => {
 });
 
 // Get partners (ASM)
-router.get("/get-partners", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/get-partners", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
@@ -328,11 +438,21 @@ router.get("/get-partners", auth, requireRole(ROLES.ASM), async (req, res) => {
       .select("-passwordHash -__v")
       .populate({
         path: "rmId",
-        select: "firstName lastName employeeId asmId personalRsmId businessHomeRsmId",
+        select: "firstName lastName employeeId asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
         populate: [
           { path: "asmId", select: "firstName lastName employeeId" },
           {
             path: "personalRsmId",
+            select: "asmId firstName lastName employeeId",
+            populate: { path: "asmId", select: "firstName lastName employeeId" },
+          },
+          {
+            path: "businessRsmId",
+            select: "asmId firstName lastName employeeId",
+            populate: { path: "asmId", select: "firstName lastName employeeId" },
+          },
+          {
+            path: "homeLapRsmId",
             select: "asmId firstName lastName employeeId",
             populate: { path: "asmId", select: "firstName lastName employeeId" },
           },
@@ -350,6 +470,8 @@ router.get("/get-partners", auth, requireRole(ROLES.ASM), async (req, res) => {
       const asm =
         rm?.asmId ||
         rm?.personalRsmId?.asmId ||
+        rm?.businessRsmId?.asmId ||
+        rm?.homeLapRsmId?.asmId ||
         rm?.businessHomeRsmId?.asmId ||
         null;
       const BASE_URL = process.env.BACKEND_URL || "http://localhost:5000";
@@ -385,7 +507,7 @@ router.get("/get-partners", auth, requireRole(ROLES.ASM), async (req, res) => {
   }
 });
 
-router.get("/get-customers", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/get-customers", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
 
@@ -463,7 +585,7 @@ router.get("/get-customers", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.get(
   "/rm/:rmId/get-partners",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const asmId = req.user.sub;
@@ -521,7 +643,7 @@ router.get(
 router.get(
   "/get-all-partners",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const asmId = req.user.sub;
@@ -561,7 +683,7 @@ router.get(
 router.get(
   "/get-applications",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const asmId = req.user.sub;
@@ -631,23 +753,27 @@ router.get(
   }
 );
 
-router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
 
-    // ASM profile
-    const asm = await User.findOne({ _id: asmId, role: ROLES.ASM }).lean();
-    if (!asm) return res.status(404).json({ message: "ASM not found" });
+    // Manager profile
+    const asm = await User.findOne({ _id: asmId, role: { $in: [ROLES.RSM, ROLES.ASM] } }).lean();
+    if (!asm) return res.status(404).json({ message: "Manager not found" });
 
-    // ✅ HIERARCHY: ASM → RSM → RM → Partner
+    // ✅ HIERARCHY: RSM → ASM → RM → Partner
     const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
-    // Get all RSMs under this ASM (non-deleted)
-    const rsms = await User.find({ asmId, role: ROLES.RSM, ...userBase }).lean();
+    // Get all specialized ASMs/RSMs under this Manager (non-deleted)
+    const rsms = await User.find({
+      $or: [{ rsmId: asmId }, { asmId: asmId }],
+      role: { $in: [ROLES.ASM, ROLES.RSM] },
+      ...userBase,
+    }).lean();
     const rsmIds = rsms.map((rsm) => rsm._id);
     const rsmOids = rsmIds.map((id) => new mongoose.Types.ObjectId(id));
     const asmOid = new mongoose.Types.ObjectId(asmId);
 
-    // Get all RMs under this ASM (direct or via RSMs)
+    // Get all RMs under this Manager
     const rmIds = await getRmIdsUnderAsm(asmId);
     const rmOids = rmIds.map((id) => new mongoose.Types.ObjectId(id));
 
@@ -669,8 +795,9 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
 
     const appAsmMatch = activeApplicationsFilter({
       $or: [
+        { rsmId: asmOid },
         { asmId: asmOid },
-        ...(rsmOids.length ? [{ rsmId: { $in: rsmOids } }] : []),
+        ...(rsmOids.length ? [{ asmId: { $in: rsmOids } }, { rsmId: { $in: rsmOids } }] : []),
         ...(rmOids.length ? [{ rmId: { $in: rmOids } }] : []),
         ...(partnerIds.length ? [{ partnerId: { $in: partnerIds } }] : []),
       ],
@@ -940,7 +1067,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM), async (req, res) => {
 
 // GET /api/asm/rsm/:rsmId/analytics
 // ASM views analytics for a specific RSM
-router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const { rsmId } = req.params;
@@ -1160,7 +1287,7 @@ router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.ASM), async (req, re
 
 // POST /api/asm/rsm/:rsmId/follow-up
 // ASM takes follow-up from RSM
-router.post("/rsm/:rsmId/follow-up", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.post("/rsm/:rsmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const { rsmId } = req.params;
@@ -1201,7 +1328,7 @@ router.post("/rsm/:rsmId/follow-up", auth, requireRole(ROLES.ASM), async (req, r
 });
 
 // GET /api/asm/rsms/follow-ups
-router.get("/rsms/follow-ups", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/rsms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const period = parseFollowUpPeriod(req.query);
@@ -1271,7 +1398,7 @@ router.get("/rsms/follow-ups", auth, requireRole(ROLES.ASM), async (req, res) =>
 });
 
 // POST /api/asm/rm/:rmId/follow-up  (ASM → RM as requested)
-router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const { rmId } = req.params;
@@ -1285,7 +1412,10 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.ASM), async (req, res
       role: ROLES.RM,
       $or: [
         { personalRsmId: { $in: rsmIds } },
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } },
+        { asmId: asmId },
       ],
     });
 
@@ -1323,7 +1453,7 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.ASM), async (req, res
 });
 
 // GET /api/asm/rms/follow-ups
-router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const period = parseFollowUpPeriod(req.query);
@@ -1337,10 +1467,13 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM), async (req, res) => 
       role: ROLES.RM,
       $or: [
         { personalRsmId: { $in: rsmIds } },
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } },
+        { asmId: asmId },
       ],
     })
-      .select("firstName lastName employeeId email phone status personalRsmId businessHomeRsmId")
+      .select("firstName lastName employeeId email phone status personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
       .lean();
     const rmIds = rms.map((rm) => rm._id);
 
@@ -1435,7 +1568,7 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM), async (req, res) => 
 
 // GET /api/asm/disbursed-applications
 // ASM gets all disbursed applications for payout management
-router.get("/disbursed-applications", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/disbursed-applications", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
 
@@ -1448,6 +1581,8 @@ router.get("/disbursed-applications", auth, requireRole(ROLES.ASM), async (req, 
       role: ROLES.RM,
       $or: [
         { personalRsmId: { $in: rsmIds } },
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } }
       ]
     }).lean();
@@ -1531,7 +1666,7 @@ router.get("/disbursed-applications", auth, requireRole(ROLES.ASM), async (req, 
 
 // GET /api/asm/payouts
 // ASM gets all payouts (pending and done)
-router.get("/payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const { status } = req.query; // PENDING or DONE
@@ -1545,6 +1680,8 @@ router.get("/payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
       role: ROLES.RM,
       $or: [
         { personalRsmId: { $in: rsmIds } },
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } }
       ]
     }).lean();
@@ -1612,7 +1749,7 @@ router.get("/payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
 
 // POST /api/asm/payouts/approve
 // ASM approves a payout (changes status from PENDING to DONE)
-router.post("/payouts/approve", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.post("/payouts/approve", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { payoutId } = req.body;
 
@@ -1637,6 +1774,8 @@ router.post("/payouts/approve", auth, requireRole(ROLES.ASM), async (req, res) =
       role: ROLES.RM,
       $or: [
         { personalRsmId: { $in: rsmIds } },
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } }
       ]
     }).lean();
@@ -1666,7 +1805,7 @@ router.post("/payouts/approve", auth, requireRole(ROLES.ASM), async (req, res) =
 
 // POST /api/asm/payouts/create
 // ASM creates or updates a payout for a disbursed application
-router.post("/payouts/create", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.post("/payouts/create", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { applicationId, partnerId, payoutPercentage, note } = req.body;
 
@@ -1683,6 +1822,8 @@ router.post("/payouts/create", auth, requireRole(ROLES.ASM), async (req, res) =>
       role: ROLES.RM,
       $or: [
         { personalRsmId: { $in: rsmIds } },
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } }
       ]
     }).lean();
@@ -1837,7 +1978,7 @@ function formatAsmPayoutApplicationRow(app, payout, isDoneEndpoint = false) {
 
 // GET /api/asm/customers/pending-payouts
 // ASM gets pending payout customers (disbursed loans without DONE payout)
-router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/customers/pending-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(asmId);
@@ -1896,7 +2037,7 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.ASM), async (re
 
 // GET /api/asm/customers/done-payouts
 // ASM gets done payout customers
-router.get("/customers/done-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/customers/done-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(asmId);
@@ -1953,7 +2094,7 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.ASM), async (req, 
 
 // GET /api/asm/customer/:customerId/partners-payout
 // ASM gets partner details for a customer's applications with payout info
-router.get("/customer/:customerId/partners-payout", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/customer/:customerId/partners-payout", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const { customerId } = req.params;
@@ -1967,6 +2108,8 @@ router.get("/customer/:customerId/partners-payout", auth, requireRole(ROLES.ASM)
       role: ROLES.RM,
       $or: [
         { personalRsmId: { $in: rsmIds } },
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } }
       ]
     }).lean();
@@ -2046,7 +2189,7 @@ router.get("/customer/:customerId/partners-payout", auth, requireRole(ROLES.ASM)
 
 // POST /api/asm/set-payouts
 // ASM creates/updates payout for disbursed application
-router.post("/set-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.post("/set-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const {
       applicationId,
@@ -2073,6 +2216,8 @@ router.post("/set-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
       role: ROLES.RM,
       $or: [
         { personalRsmId: { $in: rsmIds } },
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } }
       ]
     }).lean();
@@ -2166,7 +2311,7 @@ router.post("/set-payouts", auth, requireRole(ROLES.ASM), async (req, res) => {
 
 // GET /api/asm/incentives
 // ASM gets milestone incentive data for partners in their hierarchy
-router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/incentives", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const { year, month, status } = req.query;
@@ -2180,6 +2325,8 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
       role: ROLES.RM,
       $or: [
         { personalRsmId: { $in: rsmIds } },
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } }
       ]
     }).lean();
@@ -2346,7 +2493,7 @@ router.get("/incentives", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.post(
   "/incentives/:partnerId/pay",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const asmId = req.user.sub;
@@ -2440,7 +2587,7 @@ router.post(
 router.get(
   "/partner/:partnerId/get-customers",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const asmId = req.user.sub; // ASM ID from token
@@ -2503,7 +2650,7 @@ router.get(
 router.post(
   "/rm-deactivate",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     const session = await mongoose.startSession();
     try {
@@ -2616,7 +2763,7 @@ router.post(
 // router.post(
 //   "/assign-customers-partner",
 //   auth,
-//   requireRole(ROLES.ASM),
+//   requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
 //   async (req, res) => {
 //     try {
 //       const { oldPartnerId, newPartnerId } = req.body;
@@ -2735,7 +2882,7 @@ router.post(
 router.post(
   "/partner-deactivate",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     const session = await mongoose.startSession();
     try {
@@ -2831,7 +2978,7 @@ router.post(
 );
 
 // Activate RM (ASM can activate RMs under their RSMs)
-router.post("/rm-activate", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.post("/rm-activate", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { rmId } = req.body;
 
@@ -2851,6 +2998,8 @@ router.post("/rm-activate", auth, requireRole(ROLES.ASM), async (req, res) => {
       role: ROLES.RM,
       $or: [
         { personalRsmId: { $in: rsmIds } },
+        { businessRsmId: { $in: rsmIds } },
+        { homeLapRsmId: { $in: rsmIds } },
         { businessHomeRsmId: { $in: rsmIds } }
       ]
     });
@@ -2899,7 +3048,7 @@ router.post("/rm-activate", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.post(
   "/partner-activate",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const { partnerId } = req.body;
@@ -2953,7 +3102,7 @@ router.post(
 );
 
 // GET /asm/top-performer-rm-list
-router.get("/top-performer", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/top-performer", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
 
@@ -2993,7 +3142,7 @@ router.get("/top-performer", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.post(
   "/target/assign-partner",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const { partnerId, month, year, fileCountTarget, disbursementTarget } = req.body;
@@ -3028,8 +3177,12 @@ router.post(
       const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
       const rsmIds = rsms.map((r) => r._id);
 
-      const isUnderAsm = rm.personalRsmId && rsmIds.some(id => id.toString() === rm.personalRsmId.toString()) ||
-        rm.businessHomeRsmId && rsmIds.some(id => id.toString() === rm.businessHomeRsmId.toString());
+      const isUnderAsm =
+        (rm.personalRsmId && rsmIds.some(id => id.toString() === rm.personalRsmId.toString())) ||
+        (rm.businessRsmId && rsmIds.some(id => id.toString() === rm.businessRsmId.toString())) ||
+        (rm.homeLapRsmId && rsmIds.some(id => id.toString() === rm.homeLapRsmId.toString())) ||
+        (rm.businessHomeRsmId && rsmIds.some(id => id.toString() === rm.businessHomeRsmId.toString())) ||
+        (rm.asmId && rm.asmId.toString() === asmId.toString());
 
       if (!isUnderAsm) {
         return res.status(403).json({ message: "Partner is not under your ASM hierarchy" });
@@ -3082,7 +3235,7 @@ router.post(
 router.post(
   "/target/assign-partner-bulk",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       let { month, year, fileCountTarget, disbursementTarget } = req.body;
@@ -3128,6 +3281,8 @@ router.post(
         role: ROLES.RM,
         $or: [
           { personalRsmId: { $in: rsmIds } },
+          { businessRsmId: { $in: rsmIds } },
+          { homeLapRsmId: { $in: rsmIds } },
           { businessHomeRsmId: { $in: rsmIds } }
         ]
       }).lean();
@@ -3202,7 +3357,7 @@ router.post(
 router.get(
   "/target/rm/:rmId/:year",
   auth,
-  requireRole(ROLES.ASM), // ASM can check RM targets
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), // ASM can check RM targets
   async (req, res) => {
     try {
       const { rmId, year } = req.params;
@@ -3255,7 +3410,7 @@ router.get(
 
 // ✅ Update RM data (ASM only)
 // PATCH /rm/:rmId
-router.post("/update/:rmId", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.post("/update/:rmId", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { rmId } = req.params;
     const { firstName, lastName, phone, email } = req.body;
@@ -3279,7 +3434,7 @@ router.post("/update/:rmId", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.delete(
   "/delete/:rmId",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const { rmId } = req.params;
@@ -3320,7 +3475,7 @@ router.delete(
 router.delete(
   "/rsm/:rsmId",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const { rsmId } = req.params;
@@ -3343,7 +3498,12 @@ router.delete(
 
       const rmStillLinked = await User.countDocuments({
         role: ROLES.RM,
-        $or: [{ personalRsmId: rsmId }, { businessHomeRsmId: rsmId }],
+        $or: [
+          { personalRsmId: rsmId },
+          { businessRsmId: rsmId },
+          { homeLapRsmId: rsmId },
+          { businessHomeRsmId: rsmId },
+        ],
       });
       if (rmStillLinked > 0) {
         return res.status(400).json({
@@ -3372,8 +3532,112 @@ router.delete(
   }
 );
 
+// Update RSM details and/or RSM type (ASM)
+router.patch(
+  "/rsm/:rsmId",
+  auth,
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { rsmId } = req.params;
+      const asmId = req.user.sub;
+      if (!mongoose.Types.ObjectId.isValid(rsmId)) {
+        return res.status(400).json({ message: "Invalid RSM id" });
+      }
+
+      const rsm = await User.findOne({ _id: rsmId, role: ROLES.RSM, asmId });
+      if (!rsm) {
+        return res.status(404).json({ message: "RSM not found or not under your ASM hierarchy" });
+      }
+
+      const { firstName, lastName, phone, email, rsmType, region } = req.body || {};
+
+      if (rsmType && !Object.values(RSM_TYPES).includes(rsmType)) {
+        return res.status(400).json({
+          message: `Invalid rsmType. Allowed: ${Object.values(RSM_TYPES).join(", ")}`,
+        });
+      }
+
+      if (email && email.trim().toLowerCase() !== (rsm.email || "").toLowerCase()) {
+        const existingEmail = await User.findOne({
+          _id: { $ne: rsm._id },
+          email: email.trim().toLowerCase(),
+        }).lean();
+        if (existingEmail) {
+          return res.status(409).json({ message: "Email already in use", field: "email" });
+        }
+        rsm.email = email.trim().toLowerCase();
+      }
+
+      if (phone && phone.trim() !== (rsm.phone || "")) {
+        const existingPhone = await User.findOne({
+          _id: { $ne: rsm._id },
+          phone: phone.trim(),
+        }).lean();
+        if (existingPhone) {
+          return res.status(409).json({ message: "Phone number already in use", field: "phone" });
+        }
+        rsm.phone = phone.trim();
+      }
+
+      if (firstName !== undefined && firstName.trim() !== "") {
+        rsm.firstName = firstName.trim();
+      }
+      if (lastName !== undefined && lastName.trim() !== "") {
+        rsm.lastName = lastName.trim();
+      }
+      if (region !== undefined) {
+        rsm.region = region;
+      }
+
+      const oldRsmType = rsm.rsmType;
+      if (rsmType && rsmType !== oldRsmType) {
+        rsm.rsmType = rsmType;
+
+        if (rsmType === RSM_TYPES.BUSINESS) {
+          await User.updateMany(
+            { role: ROLES.RM, $or: [{ businessHomeRsmId: rsm._id }, { businessRsmId: rsm._id }] },
+            { $set: { businessRsmId: rsm._id, businessHomeRsmId: rsm._id } }
+          );
+        } else if (rsmType === RSM_TYPES.HOME_LAP) {
+          await User.updateMany(
+            { role: ROLES.RM, $or: [{ businessHomeRsmId: rsm._id }, { homeLapRsmId: rsm._id }] },
+            { $set: { homeLapRsmId: rsm._id } }
+          );
+        } else if (rsmType === RSM_TYPES.PERSONAL) {
+          await User.updateMany(
+            { role: ROLES.RM, personalRsmId: rsm._id },
+            { $set: { personalRsmId: rsm._id } }
+          );
+        }
+      }
+
+      await rsm.save();
+
+      return res.json({
+        message: "RSM updated successfully",
+        rsm: {
+          _id: rsm._id,
+          firstName: rsm.firstName,
+          lastName: rsm.lastName,
+          email: rsm.email,
+          phone: rsm.phone,
+          employeeId: rsm.employeeId,
+          rsmType: rsm.rsmType,
+          asmId: rsm.asmId,
+          region: rsm.region,
+          status: rsm.status,
+        },
+      });
+    } catch (error) {
+      console.error("Error updating RSM:", error);
+      res.status(500).json({ message: error.message || "Failed to update RSM" });
+    }
+  }
+);
+
 // GET /asm/profile
-router.get("/profile", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/profile", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub; // ASM id from token
 
@@ -3387,6 +3651,8 @@ router.get("/profile", auth, requireRole(ROLES.ASM), async (req, res) => {
 
     res.json({
       profile: {
+        _id: asm._id,
+        id: asm._id,
         fullName: `${asm.firstName} ${asm.lastName}`,
         employeeId: asm.employeeId,
         email: asm.email,
@@ -3415,7 +3681,7 @@ router.get("/profile", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.patch(
   "/profile/update",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const asmId = req.user.sub; // ASM id from token
@@ -3521,7 +3787,7 @@ router.patch(
 // ASM views analytics for a specific RSM (Hierarchical Access - ASM can only see RSMs)
 // Note: This endpoint is already defined above at /rsm/:rsmId/analytics, but keeping this for backward compatibility
 // Universal analytics/dashboard API - RESTRICTED TO RSM ONLY
-router.get("/:id/analytics", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/:id/analytics", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
     const { id } = req.params;
@@ -3667,6 +3933,8 @@ router.get("/:id/analytics", auth, requireRole(ROLES.ASM), async (req, res) => {
       role: ROLES.RM,
       $or: [
         { personalRsmId: id },
+        { businessRsmId: id },
+        { homeLapRsmId: id },
         { businessHomeRsmId: id }
       ]
     }).select("_id").lean();
@@ -3729,7 +3997,7 @@ router.get("/:id/analytics", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.get(
   "/customers/:customerId/applications/:applicationId",
   auth,
-  requireRole(ROLES.ASM), // ✅ Only ASM can access
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), // ✅ Only ASM can access
   async (req, res) => {
     try {
       const asmId = req.user.sub; // ASM logged in
@@ -3772,7 +4040,7 @@ router.get(
 router.get(
   "/applications/:id/docs/:docType/download",
   auth,
-  requireRole(ROLES.ASM), // ✅ Only ASM allowed
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), // ✅ Only ASM allowed
   async (req, res) => {
     try {
       const asmId = req.user.sub;
@@ -3852,7 +4120,7 @@ router.get(
 router.get(
   "/applications/:id/docs/download-all",
   auth,
-  requireRole(ROLES.ASM), // ✅ Only ASM
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), // ✅ Only ASM
   async (req, res) => {
     try {
       const { id } = req.params;
@@ -3971,7 +4239,7 @@ router.get(
 
 
 // POST /api/rsm/deactivate (ASM can deactivate RSM)
-router.post("/rsm-deactivate", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.post("/rsm-deactivate", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   const session = await mongoose.startSession();
   try {
     const rsmId = req.body?.rsmId || req.body?.oldRsmId;
@@ -4074,7 +4342,7 @@ router.post("/rsm-deactivate", auth, requireRole(ROLES.ASM), async (req, res) =>
 router.post(
   "/transfer-rsm-workload",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     const session = await mongoose.startSession();
     try {
@@ -4154,7 +4422,7 @@ router.post(
 router.post(
   "/transfer-rm-to-rsm",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     const session = await mongoose.startSession();
     try {
@@ -4199,7 +4467,7 @@ router.post(
 router.get(
   "/get-rms-for-transfer",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const asmId = req.user.sub;
@@ -4208,6 +4476,8 @@ router.get(
       const rms = await User.find({ _id: { $in: rmIds }, role: ROLES.RM })
         .populate("asmId", "firstName lastName employeeId")
         .populate("personalRsmId", "firstName lastName employeeId status")
+        .populate("businessRsmId", "firstName lastName employeeId status")
+        .populate("homeLapRsmId", "firstName lastName employeeId status")
         .populate("businessHomeRsmId", "firstName lastName employeeId status")
         .select("-passwordHash -__v")
         .lean();
@@ -4233,7 +4503,7 @@ router.get(
 );
 
 // POST /api/rsm/activate (ASM can activate RSM)
-router.post("/rsm-activate", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.post("/rsm-activate", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { rsmId } = req.body;
 
@@ -4288,7 +4558,7 @@ router.post("/rsm-activate", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.get(
   "/withdrawals",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const asmId = req.user.sub;
@@ -4315,7 +4585,7 @@ router.get(
 router.post(
   "/withdrawals/:id/approve",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const asmId = req.user.sub;
@@ -4356,7 +4626,7 @@ router.post(
 router.post(
   "/withdrawals/:id/reject",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const asmId = req.user.sub;
@@ -4399,7 +4669,7 @@ router.post(
 router.post(
   "/applications/:id/transition",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const { to, note, approvedLoanAmount } = req.body;
@@ -4499,7 +4769,7 @@ router.post(
 router.post(
   "/rm-deactivate",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     const session = await mongoose.startSession();
     try {
@@ -4577,7 +4847,7 @@ router.post(
 router.post(
   "/rsm-deactivate",
   auth,
-  requireRole(ROLES.ASM),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     const session = await mongoose.startSession();
     try {
@@ -4655,7 +4925,7 @@ router.post(
 );
 
 // PUT /api/asm/partner/:id - ASM update partner details (CRUD)
-router.put("/partner/:id", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.put("/partner/:id", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -4707,7 +4977,7 @@ router.put("/partner/:id", auth, requireRole(ROLES.ASM), async (req, res) => {
 
 // GET /api/asm/incentive-slabs
 // Fetch active milestone disbursement slabs for ASM
-router.get("/incentive-slabs", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.get("/incentive-slabs", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const slabs = await getActiveIncentiveSlabs();
     res.json({ 
@@ -4723,7 +4993,7 @@ router.get("/incentive-slabs", auth, requireRole(ROLES.ASM), async (req, res) =>
 
 // PUT /api/asm/incentive-slabs
 // Update active milestone disbursement slabs by ASM
-router.put("/incentive-slabs", auth, requireRole(ROLES.ASM), async (req, res) => {
+router.put("/incentive-slabs", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { slabs } = req.body;
     if (!Array.isArray(slabs) || slabs.length === 0) {

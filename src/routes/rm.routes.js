@@ -73,42 +73,45 @@ const router = Router();
  * Mutates app.rsmId and app.asmId.
  */
 async function assignRsmForDocComplete(app, rmId) {
-  const rm = await User.findById(rmId).select("personalRsmId businessHomeRsmId");
+  const rm = await User.findById(rmId).select(
+    "personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId"
+  );
   if (!rm) {
     return { ok: false, statusCode: 404, message: "RM not found" };
   }
 
-  let targetRsmId = null;
+  let targetAsmId = null;
   if (app.loanType === "PERSONAL") {
-    targetRsmId = rm.personalRsmId;
+    targetAsmId = rm.personalAsmId || rm.personalRsmId;
+  } else if (app.loanType === "BUSINESS") {
+    targetAsmId = rm.businessAsmId || rm.businessHomeAsmId || rm.businessRsmId || rm.businessHomeRsmId;
   } else if (
-    app.loanType === "BUSINESS" ||
     app.loanType === "HOME_LOAN_SALARIED" ||
     app.loanType === "HOME_LOAN_SELF_EMPLOYED" ||
     app.loanType === "LAP_SALARIED" ||
     app.loanType === "LAP_SELF_EMPLOYED" ||
     app.loanType === "LAP"
   ) {
-    targetRsmId = rm.businessHomeRsmId;
+    targetAsmId = rm.homeLapAsmId || rm.businessHomeAsmId || rm.homeLapRsmId || rm.businessHomeRsmId;
   } else {
     return { ok: false, statusCode: 400, message: `Unknown loan type: ${app.loanType}` };
   }
 
-  if (!targetRsmId) {
+  if (!targetAsmId) {
     return {
       ok: false,
       statusCode: 400,
-      message: `RM is not assigned to an RSM for loan type ${app.loanType}. Please contact admin to assign RSM.`,
+      message: `RM is not assigned to an ASM for loan type ${app.loanType}. Please contact admin to assign ASM.`,
     };
   }
 
-  const rsm = await User.findById(targetRsmId).select("asmId rsmType firstName lastName employeeId");
-  if (!rsm) {
-    return { ok: false, statusCode: 404, message: "Assigned RSM not found" };
+  const asm = await User.findById(targetAsmId).select("rsmId asmId asmType rsmType firstName lastName employeeId");
+  if (!asm) {
+    return { ok: false, statusCode: 404, message: "Assigned ASM not found" };
   }
 
-  app.rsmId = targetRsmId;
-  app.asmId = rsm.asmId;
+  app.asmId = targetAsmId;
+  app.rsmId = asm.rsmId || asm.asmId;
   return { ok: true };
 }
 
@@ -1231,68 +1234,57 @@ router.post(
           });
         }
 
-        // ✅ AUTO-ROUTE TO RSM based on loanType + RM's RSM mapping
-        const rm = await User.findById(req.user.sub).select("personalRsmId businessHomeRsmId");
+        // ✅ AUTO-ROUTE TO SPECIALIZED ASM based on loanType + RM's ASM mapping
+        const rm = await User.findById(req.user.sub).select(
+          "personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId"
+        );
         if (!rm) {
           return res.status(404).json({ message: "RM not found" });
         }
 
-        let targetRsmId = null;
         let targetAsmId = null;
+        let targetRsmId = null;
 
-        // Determine which RSM should handle this loan based on loanType
+        // Determine which specialized ASM should handle this loan based on loanType
         if (app.loanType === "PERSONAL") {
-          targetRsmId = rm.personalRsmId;
-          console.log(`📋 Loan Type: PERSONAL → Routing to Personal Loan RSM: ${targetRsmId}`);
+          targetAsmId = rm.personalAsmId || rm.personalRsmId;
+          console.log(`📋 Loan Type: PERSONAL → Routing to Personal Loan ASM: ${targetAsmId}`);
+        } else if (app.loanType === "BUSINESS") {
+          targetAsmId = rm.businessAsmId || rm.businessHomeAsmId || rm.businessRsmId || rm.businessHomeRsmId;
+          console.log(`📋 Loan Type: BUSINESS → Routing to Business Loan ASM: ${targetAsmId}`);
         } else if (
-          app.loanType === "BUSINESS" ||
           app.loanType === "HOME_LOAN_SALARIED" ||
           app.loanType === "HOME_LOAN_SELF_EMPLOYED" ||
           app.loanType === "LAP_SALARIED" ||
           app.loanType === "LAP_SELF_EMPLOYED" ||
           app.loanType === "LAP"
         ) {
-          targetRsmId = rm.businessHomeRsmId;
-          console.log(`📋 Loan Type: ${app.loanType} → Routing to Business & Home Loan RSM: ${targetRsmId}`);
+          targetAsmId = rm.homeLapAsmId || rm.businessHomeAsmId || rm.homeLapRsmId || rm.businessHomeRsmId;
+          console.log(`📋 Loan Type: ${app.loanType} → Routing to Home & LAP Loan ASM: ${targetAsmId}`);
         } else {
           console.error(`❌ Unknown loan type: ${app.loanType}`);
         }
 
-        if (!targetRsmId) {
+        if (!targetAsmId) {
           return res.status(400).json({
-            message: `RM is not assigned to an RSM for loan type ${app.loanType}. Please contact admin to assign RSM.`
+            message: `RM is not assigned to an ASM for loan type ${app.loanType}. Please contact admin to assign ASM.`
           });
         }
 
-        // Fetch RSM to get ASM link and verify RSM type matches loan type
-        const rsm = await User.findById(targetRsmId).select("asmId rsmType firstName lastName employeeId");
-        if (!rsm) {
-          return res.status(404).json({ message: "Assigned RSM not found" });
+        // Fetch ASM to get parent RSM link
+        const asm = await User.findById(targetAsmId).select("rsmId asmId asmType rsmType firstName lastName employeeId");
+        if (!asm) {
+          return res.status(404).json({ message: "Assigned ASM not found" });
         }
 
-        // ✅ Verify RSM type matches loan type
-        if (app.loanType === "PERSONAL" && rsm.rsmType !== "PERSONAL") {
-          console.error(`⚠️ WARNING: Personal loan routed to RSM with type ${rsm.rsmType}. Expected PERSONAL.`);
-        } else if (
-          (app.loanType === "BUSINESS" || 
-           app.loanType === "HOME_LOAN_SALARIED" || 
-           app.loanType === "HOME_LOAN_SELF_EMPLOYED" ||
-           app.loanType === "LAP_SALARIED" ||
-           app.loanType === "LAP_SELF_EMPLOYED" ||
-           app.loanType === "LAP") &&
-          rsm.rsmType !== "BUSINESS_HOME"
-        ) {
-          console.error(`⚠️ WARNING: ${app.loanType} loan routed to RSM with type ${rsm.rsmType}. Expected BUSINESS_HOME.`);
-        }
+        targetRsmId = asm.rsmId || asm.asmId;
 
-        targetAsmId = rsm.asmId;
-
-        // Assign RSM and ASM to application
-        app.rsmId = targetRsmId;
+        // Assign specialized ASM and parent RSM to application
         app.asmId = targetAsmId;
+        app.rsmId = targetRsmId;
 
-        console.log(`✅ Auto-routed application ${app.appNo} (${app.loanType}) to RSM ${rsm.firstName} ${rsm.lastName} (${rsm.employeeId}, Type: ${rsm.rsmType}) - ASM: ${targetAsmId}`);
-        console.log(`   📝 Setting rsmId: ${targetRsmId} (${typeof targetRsmId}), asmId: ${targetAsmId} (${typeof targetAsmId})`);
+        console.log(`✅ Auto-routed application ${app.appNo} (${app.loanType}) to ASM ${asm.firstName} ${asm.lastName} (${asm.employeeId}) - RSM: ${targetRsmId}`);
+        console.log(`   📝 Setting asmId: ${targetAsmId}, rsmId: ${targetRsmId}`);
       }
 
       // Store old status before transition
@@ -1849,6 +1841,14 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
         select: "firstName lastName employeeId phone email",
       })
       .populate({
+        path: "businessRsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
+        path: "homeLapRsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
         path: "businessHomeRsmId",
         select: "firstName lastName employeeId phone email",
       })
@@ -2239,12 +2239,27 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
         phone: rm.personalRsmId.phone,
         email: rm.personalRsmId.email,
       } : null,
-      businessHomeRsm: rm.businessHomeRsmId ? {
-        id: rm.businessHomeRsmId._id,
-        name: `${rm.businessHomeRsmId.firstName} ${rm.businessHomeRsmId.lastName}`,
-        employeeId: rm.businessHomeRsmId.employeeId,
-        phone: rm.businessHomeRsmId.phone,
-        email: rm.businessHomeRsmId.email,
+      businessRsm: (rm.businessRsmId || rm.businessHomeRsmId) ? {
+        id: (rm.businessRsmId || rm.businessHomeRsmId)._id,
+        name: `${(rm.businessRsmId || rm.businessHomeRsmId).firstName} ${(rm.businessRsmId || rm.businessHomeRsmId).lastName}`,
+        employeeId: (rm.businessRsmId || rm.businessHomeRsmId).employeeId,
+        phone: (rm.businessRsmId || rm.businessHomeRsmId).phone,
+        email: (rm.businessRsmId || rm.businessHomeRsmId).email,
+      } : null,
+      homeLapRsm: (rm.homeLapRsmId || rm.businessHomeRsmId) ? {
+        id: (rm.homeLapRsmId || rm.businessHomeRsmId)._id,
+        name: `${(rm.homeLapRsmId || rm.businessHomeRsmId).firstName} ${(rm.homeLapRsmId || rm.businessHomeRsmId).lastName}`,
+        employeeId: (rm.homeLapRsmId || rm.businessHomeRsmId).employeeId,
+        phone: (rm.homeLapRsmId || rm.businessHomeRsmId).phone,
+        email: (rm.homeLapRsmId || rm.businessHomeRsmId).email,
+      } : null,
+      // Legacy backward-compatibility
+      businessHomeRsm: (rm.businessRsmId || rm.businessHomeRsmId) ? {
+        id: (rm.businessRsmId || rm.businessHomeRsmId)._id,
+        name: `${(rm.businessRsmId || rm.businessHomeRsmId).firstName} ${(rm.businessRsmId || rm.businessHomeRsmId).lastName}`,
+        employeeId: (rm.businessRsmId || rm.businessHomeRsmId).employeeId,
+        phone: (rm.businessRsmId || rm.businessHomeRsmId).phone,
+        email: (rm.businessRsmId || rm.businessHomeRsmId).email,
       } : null,
     });
 
@@ -3508,6 +3523,14 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
         select: "firstName lastName employeeId phone email",
       })
       .populate({
+        path: "businessRsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
+        path: "homeLapRsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
         path: "businessHomeRsmId",
         select: "firstName lastName employeeId phone email",
       })
@@ -3524,7 +3547,12 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
     );
     const partnerRegisterApiPath = `/api/auth/partner/register-by-rmcode?ref=${encodeURIComponent(rm.rmCode || "")}`;
 
+    const bizRsm = rm.businessRsmId || rm.businessHomeRsmId;
+    const hlRsm = rm.homeLapRsmId || rm.businessHomeRsmId;
+
     res.json({
+      _id: rm._id,
+      id: rm._id,
       employeeId: rm.employeeId,
       firstName: rm.firstName,
       lastName: rm.lastName,
@@ -3556,12 +3584,26 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
       personalRsmPhone: rm.personalRsmId?.phone || null,
       personalRsmEmail: rm.personalRsmId?.email || null,
 
-      // Flattened Business & Home Loan RSM details
-      businessHomeRsmId: rm.businessHomeRsmId?._id || null,
-      businessHomeRsmName: rm.businessHomeRsmId ? `${rm.businessHomeRsmId.firstName} ${rm.businessHomeRsmId.lastName}` : null,
-      businessHomeRsmEmployeeId: rm.businessHomeRsmId?.employeeId || null,
-      businessHomeRsmPhone: rm.businessHomeRsmId?.phone || null,
-      businessHomeRsmEmail: rm.businessHomeRsmId?.email || null,
+      // Flattened Business Loan RSM details
+      businessRsmId: bizRsm?._id || null,
+      businessRsmName: bizRsm ? `${bizRsm.firstName} ${bizRsm.lastName}` : null,
+      businessRsmEmployeeId: bizRsm?.employeeId || null,
+      businessRsmPhone: bizRsm?.phone || null,
+      businessRsmEmail: bizRsm?.email || null,
+
+      // Flattened Home & LAP Loan RSM details
+      homeLapRsmId: hlRsm?._id || null,
+      homeLapRsmName: hlRsm ? `${hlRsm.firstName} ${hlRsm.lastName}` : null,
+      homeLapRsmEmployeeId: hlRsm?.employeeId || null,
+      homeLapRsmPhone: hlRsm?.phone || null,
+      homeLapRsmEmail: hlRsm?.email || null,
+
+      // Legacy Business & Home Loan RSM details
+      businessHomeRsmId: bizRsm?._id || null,
+      businessHomeRsmName: bizRsm ? `${bizRsm.firstName} ${bizRsm.lastName}` : null,
+      businessHomeRsmEmployeeId: bizRsm?.employeeId || null,
+      businessHomeRsmPhone: bizRsm?.phone || null,
+      businessHomeRsmEmail: bizRsm?.email || null,
     });
   } catch (err) {
     console.error("Error fetching RM profile:", err);
