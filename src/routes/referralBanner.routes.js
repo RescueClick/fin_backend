@@ -104,6 +104,24 @@ router.get("/admin/:id", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) 
   }
 });
 
+// Helper to broadcast referral banners update across mobile and web apps immediately
+const broadcastReferralBannersUpdated = async () => {
+  try {
+    if (!global.io) return;
+    const banners = await ReferralBanner.find({ isActive: true })
+      .sort({ displayOrder: 1, createdAt: -1 })
+      .lean();
+    global.io.emit("referralBannersUpdated", {
+      banners: banners || [],
+      timestamp: Date.now(),
+    });
+    global.io.emit("referralUpdated", { timestamp: Date.now() });
+    global.io.emit("dashboardUpdate", { type: "referralBanners" });
+  } catch (err) {
+    console.warn("Notice: Failed to broadcast referralBannersUpdated:", err?.message);
+  }
+};
+
 /**
  * POST /api/referral-banners/admin
  * Admin only: create new referral banner
@@ -157,6 +175,9 @@ router.post(
         terms: terms ? terms.trim() : "",
         uploadedBy: req.user?.sub,
       });
+
+      // Instantly sync mobile and web apps
+      await broadcastReferralBannersUpdated();
 
       res.status(201).json({
         message: "Referral benefit banner created successfully",
@@ -225,6 +246,9 @@ router.put(
 
       await banner.save();
 
+      // Instantly sync mobile and web apps
+      await broadcastReferralBannersUpdated();
+
       res.json({
         message: "Referral benefit banner updated successfully",
         banner,
@@ -249,6 +273,9 @@ router.patch("/admin/:id/toggle", auth, requireRole(ROLES.SUPER_ADMIN), async (r
     banner.isActive = !banner.isActive;
     await banner.save();
 
+    // Instantly sync mobile and web apps
+    await broadcastReferralBannersUpdated();
+
     res.json({
       message: `Banner is now ${banner.isActive ? "active" : "inactive"}`,
       banner,
@@ -270,6 +297,8 @@ router.delete("/admin/:id", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
     }
 
     await banner.deleteOne();
+    // Instantly sync mobile and web apps
+    await broadcastReferralBannersUpdated();
     res.json({ message: "Referral banner deleted successfully" });
   } catch (err) {
     console.error("Error deleting referral banner:", err);
@@ -291,6 +320,8 @@ router.post("/admin/seed-defaults", auth, requireRole(ROLES.SUPER_ADMIN), async 
     }
 
     const created = await ReferralBanner.insertMany(DEFAULT_REFERRAL_BENEFITS);
+    // Instantly sync mobile and web apps
+    await broadcastReferralBannersUpdated();
     res.json({
       message: "Default referral benefit banners created successfully",
       count: created.length,

@@ -4405,6 +4405,41 @@ router.patch(
   }
 );
 
+// Helper to broadcast banner updates across mobile and web apps immediately
+const broadcastBannersUpdated = async (req) => {
+  try {
+    if (!global.io) return;
+    const banners = await Banner.find().sort({ createdAt: -1 }).lean();
+    const host = req ? `${req.protocol}://${req.get("host")}` : (process.env.BACKEND_URL || "http://localhost:5000");
+
+    const bannersWithUrl = banners.map((b) => {
+      let imgUrl = (b.imageUrl || "").replace(/\\/g, "/");
+      if (/^https?:\/\//i.test(imgUrl)) {
+        return {
+          _id: b._id,
+          title: b.title,
+          description: b.description,
+          imageUrl: imgUrl,
+        };
+      }
+      if (!imgUrl.startsWith("/uploads")) {
+        imgUrl = "/" + imgUrl;
+      }
+      return {
+        _id: b._id,
+        title: b.title,
+        description: b.description,
+        imageUrl: `${host}${imgUrl}`,
+      };
+    });
+
+    global.io.emit("bannersUpdated", { banners: bannersWithUrl, timestamp: Date.now() });
+    global.io.emit("dashboardUpdate", { type: "banners" });
+  } catch (err) {
+    console.warn("Notice: Failed to broadcast bannersUpdated:", err?.message);
+  }
+};
+
 // Upload banners (single or multiple up to 10)
 router.post(
   "/banners",
@@ -4429,6 +4464,9 @@ router.post(
           });
         })
       );
+
+      // Instantly sync mobile and web apps
+      await broadcastBannersUpdated(req);
 
       res
         .status(201)
@@ -4524,6 +4562,8 @@ router.delete(
         fs.unlinkSync(banner.imageUrl);
       }
       await banner.deleteOne();
+      // Instantly sync mobile and web apps
+      await broadcastBannersUpdated(req);
       res.json({ message: "Banner deleted successfully" });
     } catch (err) {
       res.status(500).json({ message: err.message });
@@ -4546,6 +4586,8 @@ router.patch(
       if (description !== undefined) banner.description = description;
 
       await banner.save();
+      // Instantly sync mobile and web apps
+      await broadcastBannersUpdated(req);
       res.json({ message: "Banner updated successfully", banner });
     } catch (err) {
       res.status(500).json({ message: err.message });
@@ -6132,6 +6174,15 @@ router.put(
         { upsert: true, new: true }
       );
 
+      // Instantly sync partner levels & milestone policy to all mobile & web apps
+      if (global.io) {
+        global.io.emit("partnerLevelsUpdated", {
+          slabs: cleanSlabs,
+          timestamp: Date.now(),
+        });
+        global.io.emit("dashboardUpdate", { type: "partnerLevels" });
+      }
+
       res.json({ message: "Incentive slabs updated successfully", slabs: cleanSlabs });
     } catch (err) {
       console.error("Error updating incentive slabs:", err);
@@ -6367,6 +6418,16 @@ router.put(
         }
       } catch (syncErr) {
         console.warn("Notice: Could not auto-sync INCENTIVE_SLAB_POLICY:", syncErr);
+      }
+
+      // Instantly sync partner levels & milestone policy to all mobile & web apps
+      if (global.io) {
+        global.io.emit("partnerLevelsUpdated", {
+          hero: cleanHero,
+          levels: cleanLevels,
+          timestamp: Date.now(),
+        });
+        global.io.emit("dashboardUpdate", { type: "partnerLevels" });
       }
 
       return res.json({
@@ -7336,6 +7397,17 @@ router.put(
           key: "REFERRAL_REWARD_AMOUNTS",
           value: payload,
         });
+      }
+
+      // Instantly sync referral settings to mobile & web apps
+      if (global.io) {
+        global.io.emit("referralRewardAmountsUpdated", {
+          disbursedReward,
+          signupReward,
+          timestamp: Date.now(),
+        });
+        global.io.emit("referralUpdated", { timestamp: Date.now() });
+        global.io.emit("dashboardUpdate", { type: "referralRewardAmounts" });
       }
 
       res.json({
