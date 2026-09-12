@@ -6,6 +6,7 @@
  */
 import { User } from "../models/User.js";
 import { ROLES } from "../config/roles.js";
+import { activeUsersFilter } from "./activeUsersFilter.js";
 import mongoose from "mongoose";
 
 /** All RM ids that belong under a Senior Regional Sales Manager (RSM). */
@@ -14,30 +15,38 @@ export async function getRmIdsUnderRsm(rsmId, session = null) {
   const rsmOid = new mongoose.Types.ObjectId(rsmId);
 
   // Subordinate ASMs under this RSM
-  let asmQuery = User.find({
-    role: { $in: [ROLES.ASM, ROLES.RSM] },
-    $or: [{ rsmId: rsmOid }, { asmId: rsmOid }],
-    status: { $ne: "DELETED" },
-  }).select("_id");
+  let asmQuery = User.find(
+    activeUsersFilter({
+      role: ROLES.ASM,
+      status: "ACTIVE",
+      $or: [{ rsmId: rsmOid }, { asmId: rsmOid }],
+    })
+  ).select("_id");
   if (session) asmQuery = asmQuery.session(session);
   const asms = await asmQuery.lean();
   const asmIds = asms.map((a) => a._id);
 
-  let rmQuery = User.find({
-    role: ROLES.RM,
-    status: { $ne: "DELETED" },
-    $or: [
-      { rsmId: rsmOid },
-      { asmId: rsmOid },
-      { personalAsmId: { $in: asmIds } },
-      { businessAsmId: { $in: asmIds } },
-      { homeLapAsmId: { $in: asmIds } },
-      { personalRsmId: { $in: asmIds } },
-      { businessRsmId: { $in: asmIds } },
-      { homeLapRsmId: { $in: asmIds } },
-      { businessHomeRsmId: { $in: asmIds } },
-    ],
-  }).select("_id");
+  let rmQuery = User.find(
+    activeUsersFilter({
+      role: ROLES.RM,
+      status: "ACTIVE",
+      $or: [
+        { rsmId: rsmOid },
+        { asmId: rsmOid },
+        ...(asmIds.length
+          ? [
+              { personalAsmId: { $in: asmIds } },
+              { businessAsmId: { $in: asmIds } },
+              { homeLapAsmId: { $in: asmIds } },
+              { personalRsmId: { $in: asmIds } },
+              { businessRsmId: { $in: asmIds } },
+              { homeLapRsmId: { $in: asmIds } },
+              { businessHomeRsmId: { $in: asmIds } },
+            ]
+          : []),
+      ],
+    })
+  ).select("_id");
   if (session) rmQuery = rmQuery.session(session);
   const rms = await rmQuery.lean();
   return rms.map((r) => r._id);
@@ -55,20 +64,22 @@ export async function getRmIdsUnderAsm(managerId, session = null) {
   }
 
   // If manager is specialized ASM
-  let rmQuery = User.find({
-    role: ROLES.RM,
-    status: { $ne: "DELETED" },
-    $or: [
-      { personalAsmId: mOid },
-      { businessAsmId: mOid },
-      { homeLapAsmId: mOid },
-      { personalRsmId: mOid },
-      { businessRsmId: mOid },
-      { homeLapRsmId: mOid },
-      { businessHomeRsmId: mOid },
-      { asmId: mOid },
-    ],
-  }).select("_id");
+  let rmQuery = User.find(
+    activeUsersFilter({
+      role: ROLES.RM,
+      status: "ACTIVE",
+      $or: [
+        { personalAsmId: mOid },
+        { businessAsmId: mOid },
+        { homeLapAsmId: mOid },
+        { personalRsmId: mOid },
+        { businessRsmId: mOid },
+        { homeLapRsmId: mOid },
+        { businessHomeRsmId: mOid },
+        { asmId: mOid },
+      ],
+    })
+  ).select("_id");
   if (session) rmQuery = rmQuery.session(session);
   const rms = await rmQuery.lean();
   return rms.map((r) => r._id);
@@ -97,10 +108,13 @@ export const resolveAsmIdForRm = resolveRsmIdForRm;
 export async function getRsmScopeIds(rsmId) {
   const rsmOid = new mongoose.Types.ObjectId(rsmId);
   const asmIds = (
-    await User.find({
-      role: { $in: [ROLES.ASM, ROLES.RSM] },
-      $or: [{ rsmId: rsmOid }, { asmId: rsmOid }],
-    })
+    await User.find(
+      activeUsersFilter({
+        role: ROLES.ASM,
+        status: "ACTIVE",
+        $or: [{ rsmId: rsmOid }, { asmId: rsmOid }],
+      })
+    )
       .select("_id")
       .lean()
   ).map((a) => a._id);
@@ -108,11 +122,13 @@ export async function getRsmScopeIds(rsmId) {
   const rmIds = await getRmIdsUnderRsm(rsmId);
 
   const partnerIds = (
-    await User.find({
-      role: ROLES.PARTNER,
-      rmId: { $in: rmIds },
-      status: { $ne: "PENDING" },
-    })
+    await User.find(
+      activeUsersFilter({
+        role: ROLES.PARTNER,
+        rmId: { $in: rmIds },
+        status: { $ne: "PENDING" },
+      })
+    )
       .select("_id")
       .lean()
   ).map((p) => p._id);

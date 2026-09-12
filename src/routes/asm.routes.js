@@ -38,6 +38,7 @@ import {
   getDisbursedAt,
   isDateInRange,
 } from "../utils/asmHierarchy.js";
+import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
@@ -178,13 +179,19 @@ router.post(
 router.get(["/get-rsms", "/get-asms"], auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const managerId = req.user.sub;
-    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
+    let filter;
 
-    const subordinates = await User.find({
-      $or: [{ rsmId: managerId }, { asmId: managerId }],
-      role: { $in: [ROLES.ASM, ROLES.RSM] },
-      ...userBase,
-    })
+    if (req.user.role === ROLES.SUPER_ADMIN) {
+      filter = { role: ROLES.ASM, status: "ACTIVE" };
+    } else {
+      filter = {
+        role: ROLES.ASM,
+        status: "ACTIVE",
+        $or: [{ rsmId: managerId }, { asmId: managerId }],
+      };
+    }
+
+    const subordinates = await User.find(activeUsersFilter(filter))
       .select("-passwordHash -__v")
       .lean();
 
@@ -232,33 +239,62 @@ router.post(
 
 router.get(["/get-rm", "/get-rms"], auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
-    const asmId = req.user.sub;
-    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
+    const managerId = req.user.sub;
+    let rmFilter;
 
-    // Get subordinate ASMs/RSMs under this manager first
-    const rsms = await User.find({
-      $or: [{ rsmId: asmId }, { asmId: asmId }],
-      role: { $in: [ROLES.ASM, ROLES.RSM] },
-      ...userBase,
-    }).select("_id").lean();
-    const rsmIds = rsms.map((r) => r._id);
+    if (req.user.role === ROLES.SUPER_ADMIN) {
+      rmFilter = { role: ROLES.RM, status: "ACTIVE" };
+    } else if (req.user.role === ROLES.RSM) {
+      // Get subordinate ASMs under this RSM first
+      const subordinateAsms = await User.find(
+        activeUsersFilter({
+          role: ROLES.ASM,
+          status: "ACTIVE",
+          $or: [{ rsmId: managerId }, { asmId: managerId }],
+        })
+      ).select("_id").lean();
+      const asmIds = subordinateAsms.map((r) => r._id);
 
-    // Get RMs that are under these managers
-    const list = await User.find({
-      role: ROLES.RM,
-      ...userBase,
-      $or: [
-        { personalAsmId: { $in: rsmIds } },
-        { businessAsmId: { $in: rsmIds } },
-        { homeLapAsmId: { $in: rsmIds } },
-        { personalRsmId: { $in: rsmIds } },
-        { businessRsmId: { $in: rsmIds } },
-        { homeLapRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } },
-        { rsmId: asmId },
-        { asmId: asmId },
-      ],
-    })
+      // Get RMs that are under this RSM or these ASMs
+      rmFilter = {
+        role: ROLES.RM,
+        status: "ACTIVE",
+        $or: [
+          { rsmId: managerId },
+          { asmId: managerId },
+          ...(asmIds.length
+            ? [
+                { personalAsmId: { $in: asmIds } },
+                { businessAsmId: { $in: asmIds } },
+                { homeLapAsmId: { $in: asmIds } },
+                { personalRsmId: { $in: asmIds } },
+                { businessRsmId: { $in: asmIds } },
+                { homeLapRsmId: { $in: asmIds } },
+                { businessHomeRsmId: { $in: asmIds } },
+              ]
+            : []),
+        ],
+      };
+    } else {
+      // Manager is ASM: get RMs under this specialized ASM
+      rmFilter = {
+        role: ROLES.RM,
+        status: "ACTIVE",
+        $or: [
+          { personalAsmId: managerId },
+          { businessAsmId: managerId },
+          { homeLapAsmId: managerId },
+          { personalRsmId: managerId },
+          { businessRsmId: managerId },
+          { homeLapRsmId: managerId },
+          { businessHomeRsmId: managerId },
+          { businessHomeAsmId: managerId },
+          { asmId: managerId },
+        ],
+      };
+    }
+
+    const list = await User.find(activeUsersFilter(rmFilter))
       .select("-passwordHash -__v")
       .populate({
         path: "rsmId",
@@ -425,9 +461,14 @@ router.get("/get-partners", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
     const rmIds = await getRmIdsUnderAsm(asmId);
 
     const { status } = req.query || {};
+    const asmOid = new mongoose.Types.ObjectId(asmId);
     const query = {
       role: ROLES.PARTNER,
-      rmId: { $in: rmIds },
+      $or: [
+        ...(rmIds.length ? [{ rmId: { $in: rmIds } }] : []),
+        { asmId: asmOid },
+        { rsmId: asmOid },
+      ],
       ...userBase,
     };
     if (status && status !== "ALL") {
@@ -763,31 +804,56 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
 
     // ✅ HIERARCHY: RSM → ASM → RM → Partner
     const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
-    // Get all specialized ASMs/RSMs under this Manager (non-deleted)
-    const rsms = await User.find({
+    const asmOid = new mongoose.Types.ObjectId(asmId);
+
+    // Subordinates under this Manager (RSM manages ASMs; ASM manages specialized ASMs/RSMs)
+    const managerRole = asm.role;
+    const subordinateRoleQuery = managerRole === ROLES.RSM
+      ? { role: ROLES.ASM }
+      : { role: { $in: [ROLES.ASM, ROLES.RSM] } };
+
+    const rsms = await User.find(
+      activeUsersFilter({
+        $or: [{ rsmId: asmId }, { asmId: asmId }],
+        ...subordinateRoleQuery,
+        _id: { $ne: asmOid },
+        status: "ACTIVE",
+      })
+    ).lean();
+
+    const allSubordinates = await User.find({
       $or: [{ rsmId: asmId }, { asmId: asmId }],
-      role: { $in: [ROLES.ASM, ROLES.RSM] },
+      ...subordinateRoleQuery,
+      _id: { $ne: asmOid },
       ...userBase,
     }).lean();
+
     const rsmIds = rsms.map((rsm) => rsm._id);
     const rsmOids = rsmIds.map((id) => new mongoose.Types.ObjectId(id));
-    const asmOid = new mongoose.Types.ObjectId(asmId);
 
     // Get all RMs under this Manager
     const rmIds = await getRmIdsUnderAsm(asmId);
     const rmOids = rmIds.map((id) => new mongoose.Types.ObjectId(id));
 
-    // All partners under these RMs (approved, non-deleted)
-    const partners = await User.find({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
-      ...userBase,
-    }).lean();
+    // All partners under these RMs or directly assigned (approved, non-deleted)
+    const partners = await User.find(
+      activeUsersFilter({
+        role: ROLES.PARTNER,
+        status: { $ne: "PENDING" },
+        $or: [
+          ...(rmIds.length ? [{ rmId: { $in: rmIds } }] : []),
+          { asmId: asmOid },
+          { rsmId: asmOid },
+        ],
+      })
+    ).lean();
     const partnerIds = partners.map((p) => p._id);
 
     // Totals
     const totalRSMs = rsms.length;
+    const totalASMs = rsms.length;
+    const activeSubordinatesCount = rsms.length;
+    const totalSubordinatesCount = allSubordinates.length;
     const totalRMs = rmIds.length;
     const totalPartners = partners.length;
     const activePartners = partners.filter((p) => p.status === "ACTIVE").length;
@@ -958,35 +1024,37 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
       };
     });
 
-    // Top Performers - RSMs (under this ASM)
-    const topRSMs = await Application.aggregate([
+    // Top Performers - Subordinates (under this Manager)
+    const subOids = rsmIds.map((id) => new mongoose.Types.ObjectId(id));
+    const topRSMs = subOids.length > 0 ? await Application.aggregate([
       {
         $match: {
-          rsmId: { $in: rsmIds.map((id) => new mongoose.Types.ObjectId(id)) },
+          $or: [{ rsmId: { $in: subOids } }, { asmId: { $in: subOids } }],
           status: "DISBURSED",
         },
       },
       {
         $group: {
-          _id: "$rsmId",
+          _id: { $ifNull: ["$asmId", "$rsmId"] },
           totalRevenue: { $sum: { $ifNull: ["$approvedLoanAmount", 0] } },
           totalDisbursedApps: { $sum: 1 },
         },
       },
       { $sort: { totalRevenue: -1 } },
       { $limit: 10 },
-    ]);
+    ]) : [];
 
     const topRSMPerformers = await Promise.all(
       topRSMs.map(async (tr) => {
         const rsm = await User.findById(tr._id).select(
-          "firstName lastName email rsmType"
+          "firstName lastName email rsmType asmType"
         );
         return {
           id: rsm._id,
           name: `${rsm.firstName} ${rsm.lastName}`,
           email: rsm.email,
-          rsmType: rsm.rsmType,
+          rsmType: rsm.asmType || rsm.rsmType,
+          asmType: rsm.asmType || rsm.rsmType,
           totalRevenue: tr.totalRevenue,
           totalDisbursedApps: tr.totalDisbursedApps,
         };
@@ -1032,6 +1100,10 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
     res.json({
       totals: {
         totalRSMs,
+        totalASMs,
+        activeRSMs: activeSubordinatesCount,
+        activeASMs: activeSubordinatesCount,
+        allSubordinatesCount: totalSubordinatesCount,
         totalRMs,
         totalPartners,
         activePartners,
@@ -1056,6 +1128,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
           currentMonthAchievedDisbursement >= (asmTarget?.disbursementTarget || 0),
       },
       targets, // 12-month breakdown
+      topASMPerformers: topRSMPerformers,
       topRSMPerformers,
       topRMPerformers,
     });
@@ -3641,12 +3714,12 @@ router.get("/profile", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN
   try {
     const asmId = req.user.sub; // ASM id from token
 
-    const asm = await User.findOne({ _id: asmId, role: ROLES.ASM })
+    const asm = await User.findOne({ _id: asmId, role: { $in: [ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN] } })
       .select("-passwordHash")
       .lean();
 
     if (!asm) {
-      return res.status(404).json({ message: "ASM not found" });
+      return res.status(404).json({ message: "Manager not found" });
     }
 
     res.json({
@@ -3752,13 +3825,13 @@ router.patch(
       );
 
       const updatedAsm = await User.findOneAndUpdate(
-        { _id: asmId, role: ROLES.ASM },
+        { _id: asmId, role: { $in: [ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN] } },
         { $set: updateData },
         { new: true, runValidators: true, projection: "-passwordHash" }
       );
 
       if (!updatedAsm)
-        return res.status(404).json({ message: "ASM not found" });
+        return res.status(404).json({ message: "Manager not found" });
 
       const profileObj = updatedAsm?.toObject ? updatedAsm.toObject() : updatedAsm;
 

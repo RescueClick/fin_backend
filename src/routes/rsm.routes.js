@@ -45,6 +45,7 @@ import {
   normalizeRsmTypeValue,
   rmReportingLineMatch,
 } from "../utils/rmRsmHierarchy.js";
+import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import {
   parseFollowUpPeriod,
   latestFollowUpsByTargets,
@@ -72,8 +73,11 @@ function toObjectId(id) {
 
 /** RMs on this RSM's reporting line only (personal slot vs business/home slot). */
 async function loadRsmReportingScope(rsmId) {
-  const rsm = await User.findById(rsmId).select("rsmType").lean();
-  return rmReportingLineMatch(rsmId, normalizeRsmTypeValue(rsm?.rsmType));
+  const rsm = await User.findById(rsmId).select("role rsmType asmType").lean();
+  if (rsm?.role === ROLES.RSM) {
+    return { $or: [{ rsmId: toObjectId(rsmId) }, { asmId: toObjectId(rsmId) }] };
+  }
+  return rmReportingLineMatch(rsmId, normalizeRsmTypeValue(rsm?.rsmType || rsm?.asmType));
 }
 
 function loanTypeMatchesRsmRole(loanType, rsmTypeNorm) {
@@ -271,20 +275,39 @@ async function loadApplicationForRsm(applicationId, rsmUserId) {
   return null;
 }
 
-// GET /api/rsm/my-rsms  (ASM only)
-// List RSMs under the logged-in ASM
+// GET /api/rsm/my-rsms  (or /my-asms)
+// List subordinate specialized ASMs under the logged-in Senior RSM
 router.get(["/my-rsms", "/my-asms"], auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
-    const asmId = req.user.sub;
+    const managerId = req.user.sub;
+    let filter;
 
-    const list = await User.find({ role: ROLES.RSM, asmId })
+    if (req.user.role === ROLES.SUPER_ADMIN) {
+      filter = { role: ROLES.ASM, status: "ACTIVE" };
+    } else {
+      filter = {
+        role: ROLES.ASM,
+        status: "ACTIVE",
+        $or: [{ rsmId: managerId }, { asmId: managerId }],
+      };
+    }
+
+    const list = await User.find(activeUsersFilter(filter))
       .select("-passwordHash -__v")
       .lean();
 
-    res.json(list);
+    const formatted = list.map((s) => ({
+      ...s,
+      asmType: s.asmType || s.rsmType || null,
+      rsmType: s.asmType || s.rsmType || null,
+      asmId: s.rsmId || s.asmId || null,
+      rsmId: s.rsmId || s.asmId || null,
+    }));
+
+    res.json(formatted);
   } catch (err) {
-    console.error("Error fetching RSMs for ASM:", err);
-    res.status(500).json({ message: "Error fetching RSMs" });
+    console.error("Error fetching ASMs for RSM:", err);
+    res.status(500).json({ message: "Error fetching ASMs" });
   }
 });
 
@@ -431,17 +454,24 @@ router.post(
 );
 
 // GET /api/rsm/my-rms
-// RMs on this RSM's line only: PERSONAL RSM → personalRsmId; BUSINESS_HOME → businessHomeRsmId
+// RMs reporting to this Senior RSM or specialized ASM
 router.get("/my-rms", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
     const scope = await loadRsmReportingScope(rsmId);
 
-    const rms = await User.find({
-      role: ROLES.RM,
-      ...scope,
-    })
+    const rms = await User.find(
+      activeUsersFilter({
+        role: ROLES.RM,
+        status: "ACTIVE",
+        ...scope,
+      })
+    )
       .select("-passwordHash -__v")
+      .populate("personalAsmId", "firstName lastName employeeId asmType phone email")
+      .populate("businessAsmId", "firstName lastName employeeId asmType phone email")
+      .populate("homeLapAsmId", "firstName lastName employeeId asmType phone email")
+      .populate("rsmId", "firstName lastName employeeId phone email")
       .lean();
 
     res.json(rms);
@@ -1013,34 +1043,35 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
     const ltFilter = loanTypeFilterForRsmType(rsmTypeNorm);
     const rsmObjectId = toObjectId(rsmId);
 
-    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
-    let rmScope = {
-      role: ROLES.RM,
-      $or: [
-        { personalAsmId: rsmObjectId },
-        { businessAsmId: rsmObjectId },
-        { homeLapAsmId: rsmObjectId },
-        { personalRsmId: rsmObjectId },
-        { businessRsmId: rsmObjectId },
-        { homeLapRsmId: rsmObjectId },
-        { businessHomeRsmId: rsmObjectId },
-      ],
-      ...userBase,
-    };
-    if (rsmTypeNorm === RSM_TYPES.PERSONAL) {
-      rmScope = { role: ROLES.RM, $or: [{ personalAsmId: rsmObjectId }, { personalRsmId: rsmObjectId }], ...userBase };
+    let rmScope = {};
+    if (rsm.role === ROLES.RSM) {
+      rmScope = await loadRsmReportingScope(rsmId);
+    } else if (rsmTypeNorm === RSM_TYPES.PERSONAL) {
+      rmScope = { $or: [{ personalAsmId: rsmObjectId }, { personalRsmId: rsmObjectId }] };
     } else if (rsmTypeNorm === RSM_TYPES.BUSINESS) {
-      rmScope = { role: ROLES.RM, $or: [{ businessAsmId: rsmObjectId }, { businessRsmId: rsmObjectId }, { businessHomeRsmId: rsmObjectId }, { businessHomeAsmId: rsmObjectId }], ...userBase };
+      rmScope = { $or: [{ businessAsmId: rsmObjectId }, { businessRsmId: rsmObjectId }, { businessHomeRsmId: rsmObjectId }, { businessHomeAsmId: rsmObjectId }] };
     } else if (rsmTypeNorm === RSM_TYPES.HOME_LAP) {
-      rmScope = { role: ROLES.RM, $or: [{ homeLapAsmId: rsmObjectId }, { homeLapRsmId: rsmObjectId }, { businessHomeRsmId: rsmObjectId }, { businessHomeAsmId: rsmObjectId }], ...userBase };
+      rmScope = { $or: [{ homeLapAsmId: rsmObjectId }, { homeLapRsmId: rsmObjectId }, { businessHomeRsmId: rsmObjectId }, { businessHomeAsmId: rsmObjectId }] };
     } else if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
       rmScope = {
-        role: ROLES.RM,
         $or: [{ businessHomeRsmId: rsmObjectId }, { businessHomeAsmId: rsmObjectId }, { businessRsmId: rsmObjectId }, { homeLapRsmId: rsmObjectId }, { businessAsmId: rsmObjectId }, { homeLapAsmId: rsmObjectId }],
-        ...userBase,
+      };
+    } else {
+      rmScope = {
+        $or: [
+          { rsmId: rsmObjectId },
+          { asmId: rsmObjectId },
+          { personalAsmId: rsmObjectId },
+          { businessAsmId: rsmObjectId },
+          { homeLapAsmId: rsmObjectId },
+          { personalRsmId: rsmObjectId },
+          { businessRsmId: rsmObjectId },
+          { homeLapRsmId: rsmObjectId },
+          { businessHomeRsmId: rsmObjectId },
+        ],
       };
     }
-    const rms = await User.find(rmScope).lean();
+    const rms = await User.find(activeUsersFilter({ role: ROLES.RM, status: "ACTIVE", ...rmScope })).lean();
     const rmIds = rms.map((rm) => rm._id);
 
     const appScope = activeApplicationsFilter({
@@ -1057,14 +1088,29 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
       ],
     });
 
-    // All partners under these RMs (approved, non-deleted)
-    const partners = await User.find({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
-      ...userBase,
-    }).lean();
+    // All partners under these RMs or directly linked (approved, non-deleted)
+    const partners = await User.find(
+      activeUsersFilter({
+        role: ROLES.PARTNER,
+        status: { $ne: "PENDING" },
+        $or: [
+          ...(rmIds.length ? [{ rmId: { $in: rmIds } }] : []),
+          { asmId: rsmObjectId },
+          { rsmId: rsmObjectId },
+        ],
+      })
+    ).lean();
     const partnerIds = partners.map((p) => p._id);
+
+    // Subordinate ASMs under this RSM
+    const asms = await User.find(
+      activeUsersFilter({
+        role: ROLES.ASM,
+        status: "ACTIVE",
+        $or: [{ rsmId: rsmObjectId }, { asmId: rsmObjectId }],
+      })
+    ).lean();
+    const totalASMs = asms.length;
 
     // Totals
     const totalRMs = rms.length;
@@ -1255,6 +1301,42 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
       })
     );
 
+    // Top ASM Performers under this RSM
+    const asmOids = asms.map((a) => a._id);
+    const topASMs = asmOids.length > 0 ? await Application.aggregate([
+      {
+        $match: {
+          $or: [{ asmId: { $in: asmOids } }, { rsmId: { $in: asmOids } }],
+          status: "DISBURSED",
+        },
+      },
+      {
+        $group: {
+          _id: { $ifNull: ["$asmId", "$rsmId"] },
+          totalRevenue: { $sum: { $ifNull: ["$approvedLoanAmount", 0] } },
+          totalDisbursedApps: { $sum: 1 },
+        },
+      },
+      { $sort: { totalRevenue: -1 } },
+      { $limit: 10 },
+    ]) : [];
+
+    const topASMPerformers = await Promise.all(
+      topASMs.map(async (ta) => {
+        const asmUser = await User.findById(ta._id).select(
+          "firstName lastName email asmType rsmType"
+        );
+        return {
+          id: asmUser?._id || ta._id,
+          name: asmUser ? `${asmUser.firstName} ${asmUser.lastName}` : "ASM",
+          email: asmUser?.email || "",
+          asmType: asmUser?.asmType || asmUser?.rsmType || "ASM",
+          totalRevenue: ta.totalRevenue,
+          totalDisbursedApps: ta.totalDisbursedApps,
+        };
+      })
+    );
+
     // Recent Applications for Pipeline (last 10 applications)
     const recentApplications = await Application.find(
       activeApplicationsFilter({
@@ -1283,6 +1365,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
     // Final Response
     res.json({
       totals: {
+        totalASMs,
         totalRMs,
         totalPartners,
         activePartners,
@@ -1309,6 +1392,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
       },
       targets, // 12-month breakdown
       topPerformers,
+      topASMPerformers,
       recentApplications: formattedRecentApplications,
       rsmType: rsm.rsmType,
     });
@@ -1456,19 +1540,15 @@ router.get("/banks", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
     }
 
     const managerType = String(rsm.asmType || rsm.rsmType || "").trim().toUpperCase();
-    if (!managerType) {
-      return res.status(400).json({
-        message: "Manager type is not set for this user. Please contact admin.",
-      });
-    }
-
-    const banks = await BankMaster.find({
-      isActive: true,
-      $or: [
+    const bankFilter = { isActive: true };
+    if (managerType) {
+      bankFilter.$or = [
         { asmTypes: managerType },
         { rsmTypes: managerType },
-      ],
-    })
+      ];
+    }
+
+    const banks = await BankMaster.find(bankFilter)
       .sort({ bankName: 1 })
       .lean();
 
@@ -2061,10 +2141,17 @@ router.get("/get-partners", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_
     const rmIds = rms.map((rm) => rm._id);
     const rmMap = Object.fromEntries(rms.map((rm) => [String(rm._id), rm]));
 
+    const rsmOid = toObjectId(rsmId);
+    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
     const { status } = req.query || {};
     const query = {
       role: ROLES.PARTNER,
-      rmId: { $in: rmIds },
+      $or: [
+        ...(rmIds.length ? [{ rmId: { $in: rmIds } }] : []),
+        { asmId: rsmOid },
+        { rsmId: rsmOid },
+      ],
+      ...userBase,
     };
     if (status && status !== "ALL") {
       query.status = status.toUpperCase();

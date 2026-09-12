@@ -14,6 +14,7 @@ import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
 import { Payout } from "../models/Payout.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
+import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 
 const router = express.Router();
 
@@ -126,49 +127,41 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
   const toObjectIds = (arr) => arr.map((x) => new mongoose.Types.ObjectId(x));
 
   // ASM scope: partners under RMs under RSMs under ASM
-  const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
   if (targetRole === ROLES.ASM) {
-    // 1) RSMs under ASM
-    const rsms = await User.find({
-      asmId: id,
-      role: ROLES.RSM,
-      ...userBase,
-    })
-      .select("_id")
-      .lean();
-    const rsmIds = rsms.map((x) => x._id);
-
-    // 2) RMs under those RSMs (personal + business/home)
-    const rms = await User.find({
-      role: ROLES.RM,
-      ...userBase,
-      ...(rsmIds.length
-        ? {
-            $or: [
-              { personalRsmId: { $in: rsmIds } },
-              { businessRsmId: { $in: rsmIds } },
-              { homeLapRsmId: { $in: rsmIds } },
-              { businessHomeRsmId: { $in: rsmIds } },
-            ],
-          }
-        : { _id: { $in: [] } }),
-    })
+    // 1) RMs under this specialized ASM
+    const rms = await User.find(
+      activeUsersFilter({
+        role: ROLES.RM,
+        status: "ACTIVE",
+        $or: [
+          { personalAsmId: id },
+          { businessAsmId: id },
+          { homeLapAsmId: id },
+          { personalRsmId: id },
+          { businessRsmId: id },
+          { homeLapRsmId: id },
+          { businessHomeRsmId: id },
+          { businessHomeAsmId: id },
+          { asmId: id },
+        ],
+      })
+    )
       .select("_id")
       .lean();
     const rmIds = rms.map((x) => x._id);
 
-    const partners = await User.find({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
-      ...userBase,
-    }).select("_id").lean();
+    const partners = await User.find(
+      activeUsersFilter({
+        rmId: { $in: rmIds },
+        role: ROLES.PARTNER,
+        status: { $ne: "PENDING" },
+      })
+    ).select("_id").lean();
     const partnerIds = partners.map((x) => x._id);
 
     const asmOid = new mongoose.Types.ObjectId(id);
     const or = [
       { asmId: asmOid },
-      ...(rsmIds.length ? [{ rsmId: { $in: toObjectIds(rsmIds) } }] : []),
       ...(rmIds.length ? [{ rmId: { $in: toObjectIds(rmIds) } }] : []),
       ...(partnerIds.length ? [{ partnerId: { $in: toObjectIds(partnerIds) } }] : []),
     ];
@@ -181,24 +174,45 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
 
   // RSM scope: partners under RMs under this RSM
   if (targetRole === ROLES.RSM) {
-    const rms = await User.find({
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: id },
-        { businessRsmId: id },
-        { homeLapRsmId: id },
-        { businessHomeRsmId: id },
-      ],
-      ...userBase,
-    }).select("_id").lean();
+    // Find subordinate specialized ASMs under this RSM
+    const subAsms = await User.find(
+      activeUsersFilter({
+        role: ROLES.ASM,
+        status: "ACTIVE",
+        $or: [{ rsmId: id }, { asmId: id }],
+      })
+    ).select("_id").lean();
+    const subAsmIds = subAsms.map((a) => a._id);
+
+    const rms = await User.find(
+      activeUsersFilter({
+        role: ROLES.RM,
+        status: "ACTIVE",
+        $or: [
+          { rsmId: id },
+          { asmId: id },
+          ...(subAsmIds.length
+            ? [
+                { personalAsmId: { $in: subAsmIds } },
+                { businessAsmId: { $in: subAsmIds } },
+                { homeLapAsmId: { $in: subAsmIds } },
+                { personalRsmId: { $in: subAsmIds } },
+                { businessRsmId: { $in: subAsmIds } },
+                { homeLapRsmId: { $in: subAsmIds } },
+              ]
+            : []),
+        ],
+      })
+    ).select("_id").lean();
     const rmIds = rms.map((x) => x._id);
 
-    const partners = await User.find({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
-      ...userBase,
-    }).select("_id").lean();
+    const partners = await User.find(
+      activeUsersFilter({
+        rmId: { $in: rmIds },
+        role: ROLES.PARTNER,
+        status: { $ne: "PENDING" },
+      })
+    ).select("_id").lean();
     const partnerIds = partners.map((x) => x._id);
 
     const or = [
@@ -215,12 +229,13 @@ async function buildScopeMatch({ targetUserId, targetRole }) {
 
   // RM scope: partners under RM + direct RM applications
   if (targetRole === ROLES.RM) {
-    const partners = await User.find({
-      rmId: id,
-      role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
-      ...userBase,
-    }).select("_id").lean();
+    const partners = await User.find(
+      activeUsersFilter({
+        rmId: id,
+        role: ROLES.PARTNER,
+        status: { $ne: "PENDING" },
+      })
+    ).select("_id").lean();
     const partnerIds = partners.map((x) => x._id);
 
     const rmObjectId = new mongoose.Types.ObjectId(id);

@@ -158,13 +158,13 @@ app.get("/health", (_, res) => res.json({ status: "ok" }));
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 
-// Mount routes for Senior Regional Sales Manager (RSM) and Specialized Area Sales Manager (ASM)
-// Supporting both /api/rsm and /api/asm seamlessly with smart fallthrough
-app.use("/api/rsm", asmRoutes); // Senior manager endpoints priority on /api/rsm
-app.use("/api/rsm", rsmRoutes); // Specialized endpoints fallback on /api/rsm
+// Mount routes for Area Sales Manager (ASM) and Regional Sales Manager (RSM)
+// Supporting both /api/asm and /api/rsm seamlessly with smart fallthrough
+app.use("/api/asm", asmRoutes); // ASM endpoints priority on /api/asm
+app.use("/api/asm", rsmRoutes); // RSM fallback on /api/asm
 
-app.use("/api/asm", rsmRoutes); // Specialized endpoints priority on /api/asm
-app.use("/api/asm", asmRoutes); // Senior manager endpoints fallback on /api/asm
+app.use("/api/rsm", rsmRoutes); // RSM endpoints priority on /api/rsm
+app.use("/api/rsm", asmRoutes); // ASM fallback on /api/rsm
 app.use("/api/rm", rmRoutes);
 app.use("/api/partner", partnerRoutes);
 app.use("/api/customer", customerRoutes);
