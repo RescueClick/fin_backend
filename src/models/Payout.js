@@ -25,10 +25,55 @@ const payoutSchema = new mongoose.Schema(
     amount: { 
       type: Number, 
       required: true 
+    }, // Net amount paid / payable to partner
+    grossAmount: {
+      type: Number,
+      default: 0,
+    }, // Gross commission before TDS
+    payoutPercentage: {
+      type: Number,
+    }, // Commission rate % on loan
+    tdsApplicable: {
+      type: Boolean,
+      default: true,
+    },
+    tdsSection: {
+      type: String,
+      default: "194T", // Section 194T (TDS on payment to partners @ 10%)
+    },
+    tdsPercentage: {
+      type: Number,
+      default: 10,
+    },
+    tdsAmount: {
+      type: Number,
+      default: 0,
+    },
+    netAmount: {
+      type: Number,
+      default: 0,
+    },
+    invoiceNumber: {
+      type: String,
+      trim: true,
+    },
+    invoiceDate: {
+      type: Date,
+    },
+    invoiceSentAt: {
+      type: Date,
+    },
+    invoiceSentTo: {
+      type: String,
+      trim: true,
+    },
+    invoiceNotes: {
+      type: String,
+      trim: true,
     },
     payOutStatus: { 
       type: String, 
-      enum: ["PENDING", "DONE"], 
+      enum: ["PENDING", "DONE", "REJECTED"], 
       default: "PENDING" 
     },
     note: { 

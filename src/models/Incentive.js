@@ -18,11 +18,11 @@ const incentiveSchema = new mongoose.Schema(
     month: { type: Number, required: true }, // 1-12
     year: { type: Number, required: true },
 
-    // Snapshot of performance at the time of incentive creation
-    fileCountTarget: { type: Number, required: true },
-    achievedFileCount: { type: Number, required: true },
-    disbursementTarget: { type: Number, required: true },
-    achievedDisbursement: { type: Number, required: true },
+    // Optional snapshot fields for legacy audit compatibility
+    fileCountTarget: { type: Number, default: 0 },
+    achievedFileCount: { type: Number, default: 0 },
+    disbursementTarget: { type: Number, default: 0 },
+    achievedDisbursement: { type: Number, default: 0 },
 
     // How the incentive was calculated
     basis: {

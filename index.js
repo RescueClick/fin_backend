@@ -16,6 +16,7 @@ import customerRoutes from "./src/routes/customer.routes.js";
 import notificationRoutes from "./src/routes/notification.routes.js";
 import analyticsRoutes from "./src/routes/analytics.routes.js";
 import referralRoutes from "./src/routes/referral.routes.js";
+import referralBannerRoutes from "./src/routes/referralBanner.routes.js";
 import cibilRoutes from "./src/routes/cibil.routes.js";
 import { connectDB } from "./src/db/db.js";
 import path from "path";
@@ -163,6 +164,7 @@ app.use("/api/contact", contactRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/analytics", analyticsRoutes); // Universal Analytics API
 app.use("/api/referral", referralRoutes); // Customer/partner: my referral code, referrals, earnings
+app.use("/api/referral-banners", referralBannerRoutes); // Referral benefit banners: app display + admin CRUD
 app.use("/api/cibil", cibilRoutes); // CIBIL checks and payments
 
 

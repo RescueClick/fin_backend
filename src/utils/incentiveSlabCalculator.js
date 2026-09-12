@@ -1,36 +1,79 @@
 import { Config } from "../models/Config.js";
 
 /**
- * Default Industry Standard Monthly Disbursement Incentive Slabs
+ * Standard Monthly Disbursement Incentive / Bonus Policy
+ * Core Rule: ₹1,000 Cash Bonus for every ₹10,00,000 (10 Lakhs) Disbursed onwards.
  */
+export const INCENTIVE_PLAN_RULE = {
+  unitDisbursement: 1000000, // ₹10,00,000
+  unitReward: 1000,          // ₹1,000
+  ruleText: "Earn ₹1,000 cash bonus for every ₹10 Lakhs disbursed in a calendar month (₹10L = ₹1,000, ₹20L = ₹2,000, ₹30L = ₹3,000 ... onwards).",
+};
+
 export const DEFAULT_INCENTIVE_SLABS = [
   {
     id: "slab_1",
     tier: "Bronze",
-    minDisbursement: 1000000, // ₹10,00,000 (10 Lakhs)
+    minDisbursement: 1000000, // ₹10 Lakhs
     rewardAmount: 1000,       // ₹1,000 Bonus
     rewardType: "FLAT",
+    description: "₹10 Lakhs Disbursed ➔ ₹1,000 Bonus",
   },
   {
     id: "slab_2",
     tier: "Silver",
-    minDisbursement: 2000000, // ₹20,00,000 (20 Lakhs)
-    rewardAmount: 2500,       // ₹2,500 Bonus
+    minDisbursement: 2000000, // ₹20 Lakhs
+    rewardAmount: 2000,       // ₹2,000 Bonus
     rewardType: "FLAT",
+    description: "₹20 Lakhs Disbursed ➔ ₹2,000 Bonus",
   },
   {
     id: "slab_3",
     tier: "Gold",
-    minDisbursement: 5000000, // ₹50,00,000 (50 Lakhs)
-    rewardAmount: 7500,       // ₹7,500 Bonus
+    minDisbursement: 3000000, // ₹30 Lakhs
+    rewardAmount: 3000,       // ₹3,000 Bonus
     rewardType: "FLAT",
+    description: "₹30 Lakhs Disbursed ➔ ₹3,000 Bonus",
   },
   {
     id: "slab_4",
+    tier: "Ruby",
+    minDisbursement: 4000000, // ₹40 Lakhs
+    rewardAmount: 4000,       // ₹4,000 Bonus
+    rewardType: "FLAT",
+    description: "₹40 Lakhs Disbursed ➔ ₹4,000 Bonus",
+  },
+  {
+    id: "slab_5",
+    tier: "Diamond",
+    minDisbursement: 5000000, // ₹50 Lakhs
+    rewardAmount: 5000,       // ₹5,000 Bonus
+    rewardType: "FLAT",
+    description: "₹50 Lakhs Disbursed ➔ ₹5,000 Bonus",
+  },
+  {
+    id: "slab_6",
     tier: "Platinum",
-    minDisbursement: 10000000, // ₹1,00,00,000 (1 Crore)
+    minDisbursement: 10000000, // ₹1 Crore
+    rewardAmount: 10000,       // ₹10,000 Bonus
+    rewardType: "FLAT",
+    description: "₹1 Crore Disbursed ➔ ₹10,000 Bonus",
+  },
+  {
+    id: "slab_7",
+    tier: "Titanium",
+    minDisbursement: 20000000, // ₹2 Crores
     rewardAmount: 20000,       // ₹20,000 Bonus
     rewardType: "FLAT",
+    description: "₹2 Crores Disbursed ➔ ₹20,000 Bonus",
+  },
+  {
+    id: "slab_8",
+    tier: "Crown Elite",
+    minDisbursement: 50000000, // ₹5 Crores
+    rewardAmount: 50000,       // ₹50,000 Bonus
+    rewardType: "FLAT",
+    description: "₹5 Crores Disbursed ➔ ₹50,000 Bonus",
   },
 ];
 
@@ -56,7 +99,8 @@ export const getActiveIncentiveSlabs = async () => {
  */
 export const calculatePartnerMilestone = (disbursedVolume = 0, slabs = DEFAULT_INCENTIVE_SLABS) => {
   const volume = Math.max(0, Number(disbursedVolume || 0));
-  const sorted = [...slabs].sort((a, b) => Number(a.minDisbursement) - Number(b.minDisbursement));
+  const activeSlabs = Array.isArray(slabs) && slabs.length > 0 ? slabs : DEFAULT_INCENTIVE_SLABS;
+  const sorted = [...activeSlabs].sort((a, b) => Number(a.minDisbursement) - Number(b.minDisbursement));
 
   let achievedSlab = null;
   let nextSlab = null;
@@ -78,6 +122,27 @@ export const calculatePartnerMilestone = (disbursedVolume = 0, slabs = DEFAULT_I
     } else {
       incentiveAmount = Number(achievedSlab.rewardAmount);
     }
+  }
+
+  // Progressive onwards: Every complete ₹10 Lakhs yields at least ₹1,000 bonus
+  const perTenLakhBonus = Math.floor(volume / 1000000) * 1000;
+  if (volume >= 1000000 && perTenLakhBonus > incentiveAmount) {
+    incentiveAmount = perTenLakhBonus;
+  }
+
+  // If partner disbursed beyond the highest configured slab, compute progressive onwards bonus
+  const highestSlab = sorted[sorted.length - 1];
+  if (highestSlab && volume >= Number(highestSlab.minDisbursement)) {
+    // Dynamic next slab (e.g. next 10 Lakhs milestone)
+    const nextMilestone = (Math.floor(volume / 1000000) + 1) * 1000000;
+    nextSlab = {
+      id: `dynamic_slab_${nextMilestone}`,
+      tier: "Crown Plus",
+      minDisbursement: nextMilestone,
+      rewardAmount: (nextMilestone / 1000000) * 1000,
+      rewardType: "FLAT",
+      description: `₹${(nextMilestone / 100000).toLocaleString("en-IN")} Lakhs Disbursed ➔ ₹${((nextMilestone / 1000000) * 1000).toLocaleString("en-IN")} Bonus`,
+    };
   }
 
   // Calculate progress towards next slab
@@ -103,5 +168,7 @@ export const calculatePartnerMilestone = (disbursedVolume = 0, slabs = DEFAULT_I
     tier: achievedSlab ? achievedSlab.tier : "Standard",
     remainingToNextMilestone: remainingToNext,
     progressPercent,
+    rule: INCENTIVE_PLAN_RULE,
   };
 };
+

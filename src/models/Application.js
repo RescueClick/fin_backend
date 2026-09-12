@@ -22,7 +22,9 @@ export const LOAN_TYPES = [
   "PERSONAL",
   "BUSINESS",
   "HOME_LOAN_SALARIED",
-  "HOME_LOAN_SELF_EMPLOYED"
+  "HOME_LOAN_SELF_EMPLOYED",
+  "LAP_SALARIED",
+  "LAP_SELF_EMPLOYED",
 ];
 
 
@@ -153,10 +155,10 @@ const BusinessInfoSchema = new mongoose.Schema(
   { _id: false }
 );
 
-// 🏠 Property Info (for Home Loans)
+// 🏠 Property Info (for Home & LAP Loans)
 const PropertyInfoSchema = new mongoose.Schema(
   {
-    propertyType: { type: String, enum: ["NEW_PROPERTY", "RESALE_PROPERTY"] },
+    propertyType: { type: String },
     propertyValue: { type: Number },   // ✅ added
     propertyAddress: { type: String }  // ✅ added
   },
@@ -260,7 +262,7 @@ ApplicationSchema.methods.getRequiredDocTypes = function () {
   const baseDocs = ["PAN", "AADHAR_FRONT", "AADHAR_BACK", "PHOTO", "ADDRESS_PROOF"];
   const key = (this.loanType || "").toUpperCase();
 
-  if (key === "PERSONAL" || key === "HOME_LOAN_SALARIED") {
+  if (key === "PERSONAL" || key === "HOME_LOAN_SALARIED" || key === "LAP_SALARIED") {
     return [
       ...baseDocs,
       "COMPANY_ID_CARD",
@@ -270,7 +272,7 @@ ApplicationSchema.methods.getRequiredDocTypes = function () {
       "BANK_STATEMENT_1",
     ];
   }
-  if (key === "BUSINESS" || key === "HOME_LOAN_SELF_EMPLOYED") {
+  if (key === "BUSINESS" || key === "HOME_LOAN_SELF_EMPLOYED" || key === "LAP_SELF_EMPLOYED") {
     return [
       ...baseDocs,
       "SHOP_ACT",

@@ -80,7 +80,7 @@ function loanTypeMatchesRsmRole(loanType, rsmTypeNorm) {
   if (!rsmTypeNorm) return true;
   if (rsmTypeNorm === RSM_TYPES.PERSONAL) return loanType === "PERSONAL";
   if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
-    return ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType);
+    return ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"].includes(loanType);
   }
   return true;
 }
@@ -89,7 +89,7 @@ function loanTypeFilterForRsmType(rsmTypeNorm) {
   if (rsmTypeNorm === RSM_TYPES.PERSONAL) return { loanType: "PERSONAL" };
   if (rsmTypeNorm === RSM_TYPES.BUSINESS_HOME) {
     return {
-      loanType: { $in: ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"] },
+      loanType: { $in: ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"] },
     };
   }
   return {};
@@ -126,7 +126,7 @@ function expectedRsmIdForApplication(app) {
   if (!rm) return null;
   if (app.loanType === "PERSONAL") return rm.personalRsmId || null;
   if (
-    ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(
+    ["BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"].includes(
       app.loanType
     )
   ) {
@@ -1401,7 +1401,7 @@ router.get("/banks", auth, requireRole(ROLES.RSM), async (req, res) => {
     let filtered = banks.filter((b) => {
       const lt = normalizeLoanType(b.loanType);
       if (rsmType === String(RSM_TYPES.PERSONAL)) return lt === "PERSONAL";
-      if (rsmType === String(RSM_TYPES.BUSINESS_HOME)) return lt === "BUSINESS" || lt.startsWith("HOME_LOAN_");
+      if (rsmType === String(RSM_TYPES.BUSINESS_HOME)) return lt === "BUSINESS" || lt.startsWith("HOME_LOAN_") || lt.startsWith("LAP_") || lt === "LAP";
       return true;
     });
 

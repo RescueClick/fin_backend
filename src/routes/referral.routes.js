@@ -145,7 +145,7 @@ router.get(
         partnerId: { $in: partnerIds },
         deletedAt: null,
       })
-        .select("partnerId status appNo loanType customerId")
+        .select("partnerId status appNo loanType approvedLoanAmount requestedAmount customerId")
         .lean();
 
       const appByPartner = new Map();
@@ -156,6 +156,7 @@ router.get(
           appNo: a.appNo,
           status: a.status,
           loanType: a.loanType,
+          approvedLoanAmount: a.approvedLoanAmount ?? a.requestedAmount ?? 0,
         });
       }
 

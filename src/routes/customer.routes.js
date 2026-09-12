@@ -230,7 +230,7 @@ router.post(
       let businessInfo = null;
       let propertyInfo = null;
 
-      if (["PERSONAL", "HOME_LOAN_SALARIED"].includes(loanType)) {
+      if (["PERSONAL", "HOME_LOAN_SALARIED", "LAP_SALARIED"].includes(loanType)) {
         employmentInfo = {
           companyName: product.companyName,
           designation: product.designation,
@@ -241,7 +241,7 @@ router.post(
         };
       }
 
-      if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType)) {
+      if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(loanType)) {
         businessInfo = {
           shopName: product.shopName,
           gstNumber: product.gstNumber,
@@ -251,10 +251,12 @@ router.post(
       }
 
       if (
-        ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType)
+        ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"].includes(loanType)
       ) {
         propertyInfo = {
           propertyType: product.propertyType,
+          propertyValue: product.propertyValue,
+          propertyAddress: product.propertyAddress,
         };
       }
 

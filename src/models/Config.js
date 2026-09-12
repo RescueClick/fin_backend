@@ -13,6 +13,7 @@ const configSchema = new mongoose.Schema(
         "REFERRAL_REWARD_AMOUNTS",
         "DEFAULT_PAYOUT_POLICY",
         "INCENTIVE_SLAB_POLICY",
+        "INVOICE_AND_TDS_SETTINGS",
       ],
     },
     value: {

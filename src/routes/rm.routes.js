@@ -84,7 +84,10 @@ async function assignRsmForDocComplete(app, rmId) {
   } else if (
     app.loanType === "BUSINESS" ||
     app.loanType === "HOME_LOAN_SALARIED" ||
-    app.loanType === "HOME_LOAN_SELF_EMPLOYED"
+    app.loanType === "HOME_LOAN_SELF_EMPLOYED" ||
+    app.loanType === "LAP_SALARIED" ||
+    app.loanType === "LAP_SELF_EMPLOYED" ||
+    app.loanType === "LAP"
   ) {
     targetRsmId = rm.businessHomeRsmId;
   } else {
@@ -1244,7 +1247,10 @@ router.post(
         } else if (
           app.loanType === "BUSINESS" ||
           app.loanType === "HOME_LOAN_SALARIED" ||
-          app.loanType === "HOME_LOAN_SELF_EMPLOYED"
+          app.loanType === "HOME_LOAN_SELF_EMPLOYED" ||
+          app.loanType === "LAP_SALARIED" ||
+          app.loanType === "LAP_SELF_EMPLOYED" ||
+          app.loanType === "LAP"
         ) {
           targetRsmId = rm.businessHomeRsmId;
           console.log(`📋 Loan Type: ${app.loanType} → Routing to Business & Home Loan RSM: ${targetRsmId}`);
@@ -1270,7 +1276,10 @@ router.post(
         } else if (
           (app.loanType === "BUSINESS" || 
            app.loanType === "HOME_LOAN_SALARIED" || 
-           app.loanType === "HOME_LOAN_SELF_EMPLOYED") &&
+           app.loanType === "HOME_LOAN_SELF_EMPLOYED" ||
+           app.loanType === "LAP_SALARIED" ||
+           app.loanType === "LAP_SELF_EMPLOYED" ||
+           app.loanType === "LAP") &&
           rsm.rsmType !== "BUSINESS_HOME"
         ) {
           console.error(`⚠️ WARNING: ${app.loanType} loan routed to RSM with type ${rsm.rsmType}. Expected BUSINESS_HOME.`);

@@ -52,7 +52,7 @@ export const getMandatoryDocRules = (loanType, customer = {}) => {
     ];
   }
 
-  if (loanType === "HOME_LOAN_SALARIED") {
+  if (loanType === "HOME_LOAN_SALARIED" || loanType === "LAP_SALARIED") {
     return [
       "AADHAR_FRONT",
       "AADHAR_BACK",
@@ -86,7 +86,7 @@ export const getMandatoryDocRules = (loanType, customer = {}) => {
     "BANK_STATEMENT_1",
   ];
 
-  if (isFemale && (loanType === "BUSINESS" || loanType === "HOME_LOAN_SELF_EMPLOYED")) {
+  if (isFemale && (loanType === "BUSINESS" || loanType === "HOME_LOAN_SELF_EMPLOYED" || loanType === "LAP_SELF_EMPLOYED")) {
     rules.push("CO_APPLICANT_AADHAR_FRONT");
     rules.push("CO_APPLICANT_AADHAR_BACK");
     rules.push("CO_APPLICANT_PAN");

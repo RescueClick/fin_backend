@@ -21,6 +21,8 @@ import {
 } from "../utils/loanMandatoryDocRules.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { Banner } from "../models/Banner.js";
+import { ReferralBanner } from "../models/ReferralBanner.js";
+import { DEFAULT_REFERRAL_BENEFITS } from "../utils/referralBannerDefaults.js";
 import { Payout } from "../models/Payout.js";
 import { partnerUpload } from "../middleware/profileUpload.js";
 import mongoose from "mongoose";
@@ -30,9 +32,14 @@ import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendPartnerRegistrationEmail, sendLoanApplicationEmail, sendDeleteAccountRequestEmail } from "../utils/emailService.js";
 import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
-import { getActiveIncentiveSlabs, calculatePartnerMilestone } from "../utils/incentiveSlabCalculator.js";
+import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { ReferralReward } from "../models/ReferralReward.js";
+import {
+  buildPartnerInvoiceHtml,
+  getInvoiceAndTdsPolicy,
+  generateInvoiceNumber,
+} from "../utils/invoiceService.js";
 import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
 import {
   getPartnerWalletBalance,
@@ -126,13 +133,13 @@ const validateApplicationPayload = ({
     errors.push("Loan amount must be greater than zero");
   }
 
-  if (["PERSONAL", "HOME_LOAN_SALARIED"].includes(loanType || "")) {
+  if (["PERSONAL", "HOME_LOAN_SALARIED", "LAP_SALARIED"].includes(loanType || "")) {
     if (!product.companyName) errors.push("Company name is required");
     if (!product.designation) errors.push("Designation is required");
     if (!product.monthlySalary) errors.push("Monthly salary is required");
   }
 
-  if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType || "")) {
+  if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(loanType || "")) {
     if (!product.businessName) errors.push("Business name is required");
     if (!product.businessAddress) errors.push("Business address is required");
     if (!product.businessVintage) errors.push("Business vintage is required");
@@ -157,13 +164,13 @@ const validateApplicationPayload = ({
     }
   });
 
-  // Co-applicant is required for female applicants, but only for BUSINESS and HOME_LOAN_SELF_EMPLOYED loan types
+  // Co-applicant is required for female applicants, but only for BUSINESS, HOME_LOAN_SELF_EMPLOYED, and LAP_SELF_EMPLOYED loan types
   if (
     customer.gender === "Female" &&
-    ["BUSINESS", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType || "") &&
+    ["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(loanType || "") &&
     !coApplicant?.phone
   ) {
-    errors.push("Co-applicant phone is required for female applicants with business or home loan self-employed applications");
+    errors.push("Co-applicant phone is required for female applicants with business, home loan self-employed, or lap self-employed applications");
   }
 
   return errors;
@@ -215,6 +222,9 @@ const normalizeLoanType = (loanType) => {
   const aliases = {
     PERSONAL_LOAN: "PERSONAL",
     BUSINESS_LOAN: "BUSINESS",
+    HOME_LOAN: "HOME_LOAN_SALARIED",
+    LAP_LOAN: "LAP_SALARIED",
+    LAP: "LAP_SALARIED",
   };
   return aliases[key] || key;
 };
@@ -278,6 +288,75 @@ router.get("/public-default-referral-code", async (req, res) => {
     });
   } catch (err) {
     console.error("public-default-referral-code:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// GET /api/partner/public-partner-info/:partnerCode — no auth (for customer loan forms & partner certificate verification)
+router.get("/public-partner-info/:partnerCode", async (req, res) => {
+  try {
+    const rawCode = String(req.params.partnerCode || "").trim();
+    if (!rawCode) {
+      return res.status(400).json({ message: "Partner code is required" });
+    }
+
+    const cleanRegex = new RegExp(`^${escapeRegex(rawCode)}$`, "i");
+    const partner = await User.findOne({
+      $or: [
+        { partnerCode: { $regex: cleanRegex } },
+        { referralCode: { $regex: cleanRegex } },
+        { employeeId: { $regex: cleanRegex } },
+      ],
+      role: ROLES.PARTNER,
+      status: "ACTIVE",
+    })
+      .select("firstName middleName lastName partnerCode employeeId phone email region pincode selfie partnerLevel isPartnerOfTheMonth createdAt status docs")
+      .lean();
+
+    if (!partner) {
+      return res.status(404).json({ message: "Partner not found or inactive" });
+    }
+
+    const fullName = [partner.firstName, partner.middleName, partner.lastName]
+      .filter(Boolean)
+      .join(" ");
+
+    let selfieUrl = partner.selfie || null;
+    if (!selfieUrl && Array.isArray(partner.docs)) {
+      const selfieDoc = partner.docs.find(
+        (d) => String(d.docType || "").toUpperCase() === "SELFIE" || String(d.docType || "").toUpperCase() === "PHOTO"
+      );
+      if (selfieDoc?.url) selfieUrl = selfieDoc.url;
+    }
+
+    const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
+    if (selfieUrl && !selfieUrl.startsWith("http://") && !selfieUrl.startsWith("https://")) {
+      selfieUrl = `${backendUrl.replace(/\/$/, "")}/${selfieUrl.replace(/\\/g, "/").replace(/^\/+/, "")}`;
+    }
+
+    return res.json({
+      success: true,
+      partner: {
+        id: partner._id,
+        fullName: fullName || "Certified Partner",
+        firstName: partner.firstName,
+        middleName: partner.middleName || "",
+        lastName: partner.lastName || "",
+        partnerCode: partner.partnerCode,
+        employeeId: partner.employeeId,
+        phone: partner.phone ? String(partner.phone).replace(/(\d{2})\d{4}(\d{4})/, "$1****$2") : "",
+        rawPhone: partner.phone ? String(partner.phone).replace(/\D/g, "") : "",
+        region: partner.region || "Maharashtra",
+        pincode: partner.pincode || "",
+        selfie: selfieUrl || null,
+        partnerLevel: partner.partnerLevel || "BRONZE",
+        isPartnerOfTheMonth: Boolean(partner.isPartnerOfTheMonth),
+        memberSince: partner.createdAt,
+        isCertified: true,
+      },
+    });
+  } catch (err) {
+    console.error("public-partner-info error:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -914,22 +993,51 @@ router.post(
       let assignedAsmId = null;
       let referralPartner = null;
 
-      if (partnerReferralCode) {
+      if (partnerReferralCode && String(partnerReferralCode).trim()) {
+        const cleanCode = String(partnerReferralCode).trim();
         referralPartner = await User.findOne({
-          partnerCode: partnerReferralCode.trim(),
+          $or: [
+            { partnerCode: cleanCode },
+            { referralCode: cleanCode },
+          ],
           role: ROLES.PARTNER,
           status: "ACTIVE",
         });
 
-        if (!referralPartner) {
-          return res.status(400).json({ message: "Invalid partner referral code" });
+        if (referralPartner) {
+          assignedPartnerId = referralPartner._id;
+          assignedRmId = referralPartner.rmId || null;
+          if (referralPartner.rmId) {
+            const referralRm = await User.findById(referralPartner.rmId).select("asmId").lean();
+            assignedAsmId = referralRm?.asmId || null;
+          }
         }
+      }
 
-        assignedPartnerId = referralPartner._id;
-        assignedRmId = referralPartner.rmId || null;
-        if (referralPartner.rmId) {
-          const referralRm = await User.findById(referralPartner.rmId);
-          assignedAsmId = referralRm?.asmId || null;
+      // If no valid partner code provided, assign to default company partner so public application is processed
+      if (!assignedPartnerId) {
+        try {
+          const doc = await Config.findOne({ key: "PUBLIC_LOAN_DEFAULT_PARTNER_CODE" }).lean();
+          if (doc?.value?.partnerId && mongoose.isValidObjectId(doc.value.partnerId)) {
+            referralPartner = await User.findOne({ _id: doc.value.partnerId, role: ROLES.PARTNER, status: "ACTIVE" });
+          } else if (doc?.value?.partnerCode) {
+            referralPartner = await User.findOne({ partnerCode: doc.value.partnerCode, role: ROLES.PARTNER, status: "ACTIVE" });
+          }
+          if (!referralPartner) {
+            referralPartner =
+              (await User.findOne({ role: ROLES.PARTNER, firstName: /sanjay/i, status: "ACTIVE" })) ||
+              (await User.findOne({ role: ROLES.PARTNER, status: "ACTIVE" }));
+          }
+          if (referralPartner) {
+            assignedPartnerId = referralPartner._id;
+            assignedRmId = referralPartner.rmId || null;
+            if (referralPartner.rmId) {
+              const referralRm = await User.findById(referralPartner.rmId).select("asmId").lean();
+              assignedAsmId = referralRm?.asmId || null;
+            }
+          }
+        } catch (fallbackErr) {
+          console.warn("Public loan default partner fallback error:", fallbackErr);
         }
       }
 
@@ -1037,7 +1145,7 @@ router.post(
       let businessInfo = null;
       let propertyInfo = null;
 
-      if (["PERSONAL", "HOME_LOAN_SALARIED"].includes(loanType)) {
+      if (["PERSONAL", "HOME_LOAN_SALARIED", "LAP_SALARIED"].includes(loanType)) {
         employmentInfo = {
           companyName: product.companyName,
           designation: product.designation,
@@ -1049,7 +1157,7 @@ router.post(
         };
       }
 
-      if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType)) {
+      if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(loanType)) {
         businessInfo = {
           businessName: product.businessName,
           businessAddress: product.businessAddress,
@@ -1062,7 +1170,7 @@ router.post(
       }
 
       if (
-        ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType)
+        ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"].includes(loanType)
       ) {
         propertyInfo = {
           propertyType: product.propertyType,
@@ -1532,7 +1640,7 @@ router.post(
       let businessInfo = null;
       let propertyInfo = null;
 
-      if (["PERSONAL", "HOME_LOAN_SALARIED"].includes(loanType)) {
+      if (["PERSONAL", "HOME_LOAN_SALARIED", "LAP_SALARIED"].includes(loanType)) {
         employmentInfo = {
           companyName: product.companyName,
           designation: product.designation,
@@ -1544,7 +1652,7 @@ router.post(
         };
       }
 
-      if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType)) {
+      if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(loanType)) {
         businessInfo = {
           businessName: product.businessName,
           businessAddress: product.businessAddress,
@@ -1557,7 +1665,7 @@ router.post(
       }
 
       if (
-        ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED"].includes(loanType)
+        ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"].includes(loanType)
       ) {
         propertyInfo = {
           propertyType: product.propertyType,
@@ -2990,16 +3098,17 @@ router.get("/dashboard", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       partnerEarnCount,
       target: targetValue, // Legacy field
       achievedTarget: achievedValue, // Legacy field
-      // Current month target (hybrid model)
+      // Current month Level & Volume
       currentMonthTarget: {
-        fileCountTarget: currentFileCountTarget,
+        fileCountTarget: 0,
         achievedFileCount: currentAchievedFileCount,
         disbursementTarget: currentDisbursementTarget,
         achievedDisbursement: currentAchievedDisbursement,
-        fileTargetMet: currentAchievedFileCount >= currentFileCountTarget,
+        fileTargetMet: true,
         disbursementTargetMet: currentAchievedDisbursement >= currentDisbursementTarget,
-        targetAchieved: currentAchievedFileCount >= currentFileCountTarget &&
-          currentAchievedDisbursement >= currentDisbursementTarget,
+        targetAchieved: currentAchievedDisbursement >= 1000000,
+        level: calculatePartnerMilestone(currentAchievedDisbursement, await getActiveIncentiveSlabs()).tier,
+        unlockedBonus: calculatePartnerMilestone(currentAchievedDisbursement, await getActiveIncentiveSlabs()).incentiveAmount,
       },
       rm: rm
         ? {
@@ -3073,22 +3182,40 @@ router.get(
         .sort({ createdAt: -1 })
         .lean();
 
-      const formatted = payouts.map((p) => ({
-        id: p._id,
-        amount: p.amount || 0,
-        status: p.payOutStatus,
-        notes: p.notes || "",
-        createdAt: p.createdAt,
-        application: p.application
-          ? {
-            appNo: p.application.appNo || "",
-            loanType: p.application.loanType || "",
-            approvedLoanAmount: p.application.approvedLoanAmount || 0,
-            createdAt: p.application.createdAt,
-            customer: p.application.customer,
-          }
-          : null,
-      }));
+      const formatted = payouts.map((p) => {
+        const gross = p.grossAmount != null ? Number(p.grossAmount) : Number(p.amount || 0);
+        const isTds = p.tdsApplicable !== undefined ? p.tdsApplicable : true;
+        const tdsSec = p.tdsSection || "194T";
+        const tdsPct = p.tdsPercentage != null ? Number(p.tdsPercentage) : 10;
+        const tdsAmt = p.tdsAmount != null ? Number(p.tdsAmount) : (isTds ? Number(((gross * tdsPct) / 100).toFixed(2)) : 0);
+        const netAmt = p.netAmount != null ? Number(p.netAmount) : Number((gross - tdsAmt).toFixed(2));
+
+        return {
+          id: p._id,
+          amount: netAmt || p.amount || 0,
+          grossAmount: gross,
+          tdsApplicable: isTds,
+          tdsSection: tdsSec,
+          tdsPercentage: tdsPct,
+          tdsAmount: tdsAmt,
+          netAmount: netAmt,
+          invoiceNumber: p.invoiceNumber || "",
+          invoiceDate: p.invoiceDate || p.createdAt,
+          invoiceSentAt: p.invoiceSentAt || null,
+          status: p.payOutStatus,
+          notes: p.notes || p.note || "",
+          createdAt: p.createdAt,
+          application: p.application
+            ? {
+              appNo: p.application.appNo || "",
+              loanType: p.application.loanType || "",
+              approvedLoanAmount: p.application.approvedLoanAmount || 0,
+              createdAt: p.application.createdAt,
+              customer: p.application.customer,
+            }
+            : null,
+        };
+      });
 
       return res.json({ payouts: formatted });
     } catch (err) {
@@ -3838,7 +3965,11 @@ router.get(
   async (req, res) => {
     try {
       const slabs = await getActiveIncentiveSlabs();
-      return res.json({ slabs });
+      return res.json({ 
+        slabs, 
+        rule: INCENTIVE_PLAN_RULE,
+        planSummary: INCENTIVE_PLAN_RULE.ruleText,
+      });
     } catch (err) {
       console.error("Error fetching partner incentive slabs:", err);
       return res.status(500).json({ message: "Error fetching incentive slabs" });
@@ -3913,6 +4044,7 @@ router.get(
         tier: milestone.tier,
         isEligible: milestone.isEligible,
         incentiveAmount: Math.round(finalAmount),
+        totalIncentiveThisMonth: Math.round(finalAmount),
         remainingToNextMilestone: milestone.remainingToNextMilestone,
         progressPercent: milestone.progressPercent,
         status: currentStatus,
@@ -3921,6 +4053,21 @@ router.get(
         notes: incentiveDoc?.notes || null,
         utrNumber: incentiveDoc?.notes || null,
         slabs: activeSlabs,
+        rule: INCENTIVE_PLAN_RULE,
+        planSummary: INCENTIVE_PLAN_RULE.ruleText,
+        incentives: incentiveDoc
+          ? [incentiveDoc]
+          : milestone.isEligible
+          ? [
+              {
+                amount: Math.round(finalAmount),
+                status: currentStatus,
+                month,
+                year,
+                notes: `Milestone bonus for ${milestone.tier} Tier (₹${(monthlyDisbursed / 100000).toFixed(1)}L disbursed)`,
+              },
+            ]
+          : [],
       });
     } catch (err) {
       console.error("Error fetching current month milestone incentives:", err);
@@ -3961,8 +4108,8 @@ router.get(
         partnerId,
         createdAt: { $gte: monthStart, $lt: monthEnd },
       })
-        .populate("application", "appNo loanType loanAmount status customer")
-        .select("amount payOutStatus note createdAt application")
+        .populate("application", "appNo loanType loanAmount approvedLoanAmount status customer")
+        .select("amount grossAmount payoutPercentage tdsApplicable tdsSection tdsPercentage tdsAmount netAmount invoiceNumber invoiceDate invoiceSentAt payOutStatus note createdAt application")
         .sort({ createdAt: -1 })
         .lean();
 
@@ -3980,6 +4127,89 @@ router.get(
     } catch (err) {
       console.error("Error fetching payout history:", err);
       return res.status(500).json({ message: "Error fetching payout history" });
+    }
+  }
+);
+
+// GET /api/partner/payouts/:payoutId/invoice
+// Partner views / downloads tax invoice with Section 194T TDS details
+router.get(
+  "/payouts/:payoutId/invoice",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const partnerId = req.user.sub;
+      const { payoutId } = req.params;
+
+      if (!mongoose.Types.ObjectId.isValid(payoutId)) {
+        return res.status(400).json({ message: "Invalid payout ID" });
+      }
+
+      const payout = await Payout.findOne({ _id: payoutId, partnerId }).lean();
+      if (!payout) {
+        return res.status(404).json({ message: "Payout record not found" });
+      }
+
+      const [fullApp, partner, policy] = await Promise.all([
+        Application.findById(payout.application)
+          .populate("customerId", "firstName lastName name phone email")
+          .lean(),
+        User.findById(partnerId)
+          .select("firstName lastName email phone bankName accountNumber ifscCode accountHolderName employeeId partnerCode panNumber panCard")
+          .lean(),
+        getInvoiceAndTdsPolicy(),
+      ]);
+
+      const custFirst = (fullApp?.customerId?.firstName || fullApp?.customer?.firstName || "").trim();
+      const custLast = (fullApp?.customerId?.lastName || fullApp?.customer?.lastName || "").trim();
+      const customerName = `${custFirst} ${custLast}`.trim() || fullApp?.customer?.name || "Customer";
+      const appNo = fullApp?.appNo || (fullApp?._id ? `TLF${fullApp._id.toString().slice(-4).toUpperCase()}` : "APP");
+      const approvedAmount = Number(fullApp?.approvedLoanAmount || fullApp?.customer?.loanAmount || 0);
+
+      const grossAmount = payout.grossAmount != null ? Number(payout.grossAmount) : Number(payout.amount || 0);
+      const netAmount = payout.netAmount != null ? Number(payout.netAmount) : Number(payout.amount || 0);
+      const tdsApplicable = payout.tdsApplicable !== undefined ? payout.tdsApplicable : true;
+      const tdsSection = payout.tdsSection || policy.tdsSection || "194T";
+      const tdsPercentage = payout.tdsPercentage != null ? payout.tdsPercentage : 10;
+      const tdsAmount = payout.tdsAmount != null ? payout.tdsAmount : (tdsApplicable ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2)) : 0);
+      const invoiceNumber = payout.invoiceNumber || generateInvoiceNumber(appNo, payout._id);
+
+      const invoicePayload = {
+        invoiceNumber,
+        invoiceDate: payout.invoiceDate || payout.updatedAt || new Date(),
+        partner: partner || { name: "Channel Partner", panNumber: "—" },
+        customerName,
+        appNo,
+        loanType: fullApp?.loanType || "Personal Loan",
+        approvedAmount,
+        grossAmount,
+        payoutAmount: netAmount,
+        payoutPercentage: payout.payoutPercentage || (approvedAmount > 0 ? Number(((grossAmount / approvedAmount) * 100).toFixed(2)) : 0),
+        tdsApplicable,
+        tdsSection,
+        tdsPercentage,
+        tdsAmount,
+        netAmount,
+        utrNumber: payout.note || "",
+        note: payout.note || "",
+        bankName: partner?.bankName || "",
+        accountNumber: partner?.accountNumber || "",
+        ifscCode: partner?.ifscCode || "",
+        companyDetails: policy.companyDetails,
+        invoiceNotes: payout.invoiceNotes || policy.invoiceNotes,
+      };
+
+      const invoiceHtml = buildPartnerInvoiceHtml(invoicePayload);
+
+      return res.json({
+        success: true,
+        invoice: invoicePayload,
+        html: invoiceHtml,
+      });
+    } catch (err) {
+      console.error("Error fetching partner invoice:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
     }
   }
 );
@@ -4015,10 +4245,12 @@ router.get(
       }).lean();
 
       let monthlyDisbursed = 0;
+      let disbursedCount = 0;
       disbursedApps.forEach((app) => {
         const dDate = getDisbursedAt(app);
         if (isDateInRange(dDate, startDate, endDate)) {
           monthlyDisbursed += parseFloat(app.approvedLoanAmount) || 0;
+          disbursedCount += 1;
         }
       });
 
@@ -4045,9 +4277,15 @@ router.get(
         year,
         totalIncentive: totalIncentive > 0 ? totalIncentive : (milestone.isEligible ? milestone.incentiveAmount : 0),
         disbursedVolume: monthlyDisbursed,
+        disbursedCount,
         tier: milestone.tier,
         isEligible: milestone.isEligible,
         incentiveAmount: milestone.incentiveAmount,
+        remainingToNextMilestone: milestone.remainingToNextMilestone,
+        nextSlab: milestone.nextSlab,
+        achievedSlab: milestone.achievedSlab,
+        progressPercent: milestone.progressPercent,
+        status: incentives.length > 0 ? incentives[0].status : (milestone.isEligible ? "PENDING" : "IN_PROGRESS"),
         incentives,
       });
     } catch (err) {
@@ -4133,6 +4371,35 @@ router.get(
     }
   }
 );
+
+// GET /api/partner/referral-banners - Active referral benefit banners for partner app
+router.get("/referral-banners", async (req, res) => {
+  try {
+    let banners = await ReferralBanner.find({ isActive: true })
+      .sort({ displayOrder: 1, createdAt: -1 })
+      .lean();
+
+    if (!banners || banners.length === 0) {
+      const totalCount = await ReferralBanner.countDocuments();
+      if (totalCount === 0) {
+        try {
+          await ReferralBanner.insertMany(DEFAULT_REFERRAL_BENEFITS);
+          banners = await ReferralBanner.find({ isActive: true })
+            .sort({ displayOrder: 1, createdAt: -1 })
+            .lean();
+        } catch {
+          return res.json({ banners: DEFAULT_REFERRAL_BENEFITS });
+        }
+      } else {
+        return res.json({ banners: [] });
+      }
+    }
+    return res.json({ banners: banners || [] });
+  } catch (err) {
+    console.error("Error fetching partner referral banners:", err);
+    return res.json({ banners: DEFAULT_REFERRAL_BENEFITS });
+  }
+});
 
 // ✅ Upload document for an application
 router.post(
@@ -4594,18 +4861,20 @@ router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     const achievedDisbursement = disbursedApps
       .reduce((sum, app) => sum + (parseFloat(app.approvedLoanAmount) || 0), 0);
 
+    // Calculate milestone achievement purely from disbursed volume (No file count restriction)
+    const activeSlabs = await getActiveIncentiveSlabs();
+    const milestone = calculatePartnerMilestone(achievedDisbursement, activeSlabs);
+
     // Check if targets are met and exceeded
-    const fileTargetMet = achievedFileCount >= fileCountTarget;
+    const fileTargetMet = true; // No file count penalty
     const disbursementTargetMet = achievedDisbursement >= disbursementTarget;
-    const targetAchieved = fileTargetMet && disbursementTargetMet;
-    const fileTargetExceeded = achievedFileCount > fileCountTarget;
+    const targetAchieved = milestone.isEligible;
+    const fileTargetExceeded = false;
     const disbursementTargetExceeded = achievedDisbursement > disbursementTarget;
-    const targetExceeded = fileTargetExceeded || disbursementTargetExceeded;
+    const targetExceeded = disbursementTargetExceeded;
 
     // Calculate percentages
-    const fileAchievementPercentage = fileCountTarget > 0
-      ? (achievedFileCount / fileCountTarget) * 100
-      : 0;
+    const fileAchievementPercentage = 100;
     const disbursementAchievementPercentage = disbursementTarget > 0
       ? (achievedDisbursement / disbursementTarget) * 100
       : 0;
@@ -4614,19 +4883,29 @@ router.get("/my-target", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       partnerId,
       month: targetMonth,
       year: targetYear,
-      fileCountTarget,
+      fileCountTarget: 0,
       achievedFileCount,
       disbursementTarget,
       achievedDisbursement,
-      fileTargetMet,
+      fileTargetMet: true,
       disbursementTargetMet,
       targetAchieved,
       fileTargetExceeded,
       disbursementTargetExceeded,
       targetExceeded,
-      fileAchievementPercentage: fileAchievementPercentage.toFixed(2),
+      fileAchievementPercentage: "100.00",
       disbursementAchievementPercentage: disbursementAchievementPercentage.toFixed(2),
       hasTarget: !!target,
+      // Milestone Levels & Incentive
+      tier: milestone.tier,
+      level: milestone.tier,
+      incentiveAmount: milestone.incentiveAmount,
+      isEligible: milestone.isEligible,
+      achievedSlab: milestone.achievedSlab,
+      nextSlab: milestone.nextSlab,
+      remainingToNextMilestone: milestone.remainingToNextMilestone,
+      progressPercent: milestone.progressPercent,
+      slabs: activeSlabs,
     });
   } catch (err) {
     console.error("Error fetching partner target:", err);
@@ -4756,12 +5035,12 @@ router.get("/levels-config", async (req, res) => {
           color: "#B45309",
           bgColor: "#FFFBEB",
           accentColor: "#FEF3C7",
-          criteria: "Default level for all new partners (Up to ₹10L volume)",
-          minDisbursement: 0,
-          rewardAmount: 0,
+          criteria: "Achieve ₹10L+ monthly disbursement volume",
+          minDisbursement: 1000000,
+          rewardAmount: 1000,
           benefits: [
+            "Earn ₹1,000 monthly milestone cash bonus",
             "Standard commission payouts on every loan",
-            "Basic partner support channels",
             "Access to all standard loan products & banks",
             "Eligible for monthly milestone incentives",
           ],
@@ -4775,9 +5054,9 @@ router.get("/levels-config", async (req, res) => {
           accentColor: "#F1F5F9",
           criteria: "Achieve ₹20L+ monthly disbursement volume",
           minDisbursement: 2000000,
-          rewardAmount: 2500,
+          rewardAmount: 2000,
           benefits: [
-            "Earn ₹2,500+ monthly milestone cash bonus",
+            "Earn ₹2,000 monthly milestone cash bonus",
             "Priority file processing & fast-track approval",
             "Exclusive Silver dashboard badge",
             "Dedicated email & support helpline",
@@ -4790,13 +5069,47 @@ router.get("/levels-config", async (req, res) => {
           color: "#CA8A04",
           bgColor: "#FEFCE8",
           accentColor: "#FEF9C3",
+          criteria: "Achieve ₹30L+ monthly disbursement volume",
+          minDisbursement: 3000000,
+          rewardAmount: 3000,
+          benefits: [
+            "Earn ₹3,000 monthly milestone cash bonus",
+            "Dedicated Relationship Manager (RM)",
+            "Faster loan logins & desk clearance",
+            "Special festive campaigns & booster incentives",
+          ],
+        },
+        {
+          id: "RUBY",
+          name: "Ruby",
+          iconName: "Gem",
+          color: "#E11D48",
+          bgColor: "#FFF1F2",
+          accentColor: "#FFE4E6",
+          criteria: "Achieve ₹40L+ monthly disbursement volume",
+          minDisbursement: 4000000,
+          rewardAmount: 4000,
+          benefits: [
+            "Earn ₹4,000 monthly milestone cash bonus",
+            "Priority underwriting & fast turnaround",
+            "Exclusive Ruby tier dashboard badge",
+            "Direct credit coordinator support",
+          ],
+        },
+        {
+          id: "DIAMOND",
+          name: "Diamond",
+          iconName: "Sparkles",
+          color: "#0D9488",
+          bgColor: "#F0FDF4",
+          accentColor: "#CCFBF1",
           criteria: "Achieve ₹50L+ monthly disbursement volume",
           minDisbursement: 5000000,
-          rewardAmount: 7500,
+          rewardAmount: 5000,
           benefits: [
-            "Earn ₹7,500+ monthly milestone cash bonus",
-            "Dedicated Relationship Manager (RM)",
-            "Priority payout settlement & fast-track clearance",
+            "Earn ₹5,000 monthly milestone cash bonus",
+            "Senior Relationship Manager (RM) assigned",
+            "Priority payout clearance & same-day validation",
             "Early access to exclusive high-ticket loan products",
           ],
         },
@@ -4809,12 +5122,46 @@ router.get("/levels-config", async (req, res) => {
           accentColor: "#E2E8F0",
           criteria: "Achieve ₹1Cr+ monthly disbursement volume",
           minDisbursement: 10000000,
+          rewardAmount: 10000,
+          benefits: [
+            "Earn ₹10,000 monthly milestone cash bonus",
+            "24/7 VIP desk support & relationship priority",
+            "Fast-track instant payout settlement",
+            "Executive partner certificates & VIP recognition",
+          ],
+        },
+        {
+          id: "TITANIUM",
+          name: "Titanium",
+          iconName: "Crown",
+          color: "#7C3AED",
+          bgColor: "#FAF5FF",
+          accentColor: "#F3E8FF",
+          criteria: "Achieve ₹2Cr+ monthly disbursement volume",
+          minDisbursement: 20000000,
           rewardAmount: 20000,
           benefits: [
-            "Earn ₹20,000+ monthly milestone cash bonus",
-            "24/7 VIP desk support & relationship priority",
-            "Eligible for 'Partner of the Month' cash rewards",
-            "Executive certificates & festival bonus perks",
+            "Earn ₹20,000 monthly milestone cash bonus",
+            "VIP partner status across all lender banks",
+            "Direct escalation line to DhanSource credit heads",
+            "Quarterly awards & luxury networking invitations",
+          ],
+        },
+        {
+          id: "CROWN_ELITE",
+          name: "Crown Elite",
+          iconName: "Crown",
+          color: "#2563EB",
+          bgColor: "#EFF6FF",
+          accentColor: "#DBEAFE",
+          criteria: "Achieve ₹5Cr+ monthly disbursement volume",
+          minDisbursement: 50000000,
+          rewardAmount: 50000,
+          benefits: [
+            "Earn ₹50,000 monthly milestone cash bonus (+unlimited scaling)",
+            "Highest commission tier & top revenue share",
+            "DhanSource Elite Council membership",
+            "All-inclusive Annual Gala VIP invitation",
           ],
         },
       ],

@@ -86,8 +86,10 @@ export async function createSignupReferralReward({ referrerId, referredUserId })
 }
 
 /**
- * Partner→partner program: when a loan disburses, credit the **upline partner**
- * (referredBy on the **originating** partner `application.partnerId`), not the customer.
+ * Partner→partner program:
+ * A partner gets a referral reward when their referred partner joins and successfully
+ * disburses any loan file (awarded on every disbursed loan file).
+ * No loan amount limit — every successfully disbursed loan file qualifies.
  */
 export async function createDisbursedReferralReward({ application }) {
   const partnerId = application.partnerId;
@@ -110,15 +112,25 @@ export async function createDisbursedReferralReward({ application }) {
     return null;
   }
 
-  const duplicate = await ReferralReward.findOne({
+  // Reward on every disbursed file: deduplicate per application ID so each unique loan is rewarded
+  const alreadyRewarded = await ReferralReward.findOne({
     referredUserId: originatingPartner._id,
     applicationId: application._id,
     eventType: "DISBURSED",
+    status: { $ne: "CANCELLED" },
   }).lean();
-  if (duplicate) return duplicate;
+  if (alreadyRewarded) return alreadyRewarded;
 
   const { disbursedReward } = await getReferralRewardAmounts();
 
+  const loanAmount = Number(
+    application.approvedLoanAmount ??
+    application.requestedAmount ??
+    application.customer?.loanAmount ??
+    0
+  );
+
+  const formattedLoanAmount = loanAmount > 0 ? ` (Disbursed: ₹${loanAmount.toLocaleString("en-IN")})` : "";
   const reward = await ReferralReward.create({
     referrerId: upline._id,
     referredUserId: originatingPartner._id,
@@ -126,7 +138,13 @@ export async function createDisbursedReferralReward({ application }) {
     eventType: "DISBURSED",
     amount: disbursedReward,
     status: "PENDING",
-    note: `Partner referral (disbursal) for ${application.appNo}`,
+    note: `Partner referral reward for ${application.appNo}${formattedLoanAmount}`,
+  });
+
+  // Update referred partner's status to reflect reward earned
+  await User.findByIdAndUpdate(originatingPartner._id, {
+    referralRewardStatus: "EARNED",
+    referralRewardAt: new Date(),
   });
 
   return reward;

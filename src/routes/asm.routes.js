@@ -12,7 +12,7 @@ import { Incentive } from "../models/Incentive.js";
 import { Config } from "../models/Config.js";
 import mongoose from "mongoose";
 import { Application } from "../models/Application.js";
-import { getActiveIncentiveSlabs, calculatePartnerMilestone } from "../utils/incentiveSlabCalculator.js";
+import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
 import { sendMail } from "../utils/sendMail.js";
 import { sendUserAccountEmail } from "../utils/emailService.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
@@ -2409,8 +2409,8 @@ router.post(
         year: payYear,
       }).lean();
 
-      const fileCountTarget = target?.fileCountTarget || 4;
-      const disbursementTarget = target?.disbursementTarget || target?.targetValue || 2000000;
+      const fileCountTarget = target?.fileCountTarget || 0;
+      const disbursementTarget = target?.disbursementTarget || target?.targetValue || 0;
 
       const incentiveDoc = await Incentive.create({
         partnerId,
@@ -4710,7 +4710,11 @@ router.put("/partner/:id", auth, requireRole(ROLES.ASM), async (req, res) => {
 router.get("/incentive-slabs", auth, requireRole(ROLES.ASM), async (req, res) => {
   try {
     const slabs = await getActiveIncentiveSlabs();
-    res.json({ slabs });
+    res.json({ 
+      slabs, 
+      rule: INCENTIVE_PLAN_RULE,
+      planSummary: INCENTIVE_PLAN_RULE.ruleText,
+    });
   } catch (err) {
     console.error("Error fetching ASM incentive slabs:", err);
     res.status(500).json({ message: "Failed to fetch incentive slabs", error: err.message });

@@ -118,7 +118,6 @@ const userSchema = new mongoose.Schema(
     // Partner Performance
     partnerLevel: {
       type: String,
-      enum: ["BRONZE", "SILVER", "GOLD", "PLATINUM"],
       default: "BRONZE",
     },
     isPartnerOfTheMonth: { type: Boolean, default: false },
