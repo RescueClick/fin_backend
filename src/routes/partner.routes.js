@@ -3351,43 +3351,43 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       .populate({
         path: "rmId",
         select:
-          "firstName lastName employeeId email phone asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
+          "firstName lastName employeeId email phone rsmId asmId personalAsmId businessAsmId homeLapAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
         populate: [
+          {
+            path: "rsmId",
+            select: "firstName lastName employeeId email phone",
+          },
           {
             path: "asmId",
             select: "firstName lastName employeeId email phone",
           },
           {
+            path: "personalAsmId",
+            select: "firstName lastName employeeId email phone",
+          },
+          {
+            path: "businessAsmId",
+            select: "firstName lastName employeeId email phone",
+          },
+          {
+            path: "homeLapAsmId",
+            select: "firstName lastName employeeId email phone",
+          },
+          {
             path: "personalRsmId",
-            select: "firstName lastName employeeId email phone asmId",
-            populate: {
-              path: "asmId",
-              select: "firstName lastName employeeId email phone",
-            },
+            select: "firstName lastName employeeId email phone",
           },
           {
             path: "businessRsmId",
-            select: "firstName lastName employeeId email phone asmId",
-            populate: {
-              path: "asmId",
-              select: "firstName lastName employeeId email phone",
-            },
+            select: "firstName lastName employeeId email phone",
           },
           {
             path: "homeLapRsmId",
-            select: "firstName lastName employeeId email phone asmId",
-            populate: {
-              path: "asmId",
-              select: "firstName lastName employeeId email phone",
-            },
+            select: "firstName lastName employeeId email phone",
           },
           {
             path: "businessHomeRsmId",
-            select: "firstName lastName employeeId email phone asmId",
-            populate: {
-              path: "asmId",
-              select: "firstName lastName employeeId email phone",
-            },
+            select: "firstName lastName employeeId email phone",
           },
         ],
       })
@@ -3398,36 +3398,21 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     }
 
     const pr = partner.rmId;
-    const asmFromDoc = (a) => {
-      if (!a) return null;
+    const formatUser = (u) => {
+      if (!u) return null;
       return {
-        id: a._id,
-        employeeId: a.employeeId || null,
-        name: `${a.firstName} ${a.lastName}`.trim(),
-        email: a.email || null,
-        phone: a.phone || null,
+        id: u._id,
+        employeeId: u.employeeId || null,
+        name: `${u.firstName || ""} ${u.lastName || ""}`.trim(),
+        email: u.email || null,
+        phone: u.phone || null,
       };
     };
-    const formatRsm = (rsm) => {
-      if (!rsm) return null;
-      return {
-        id: rsm._id,
-        employeeId: rsm.employeeId || null,
-        name: `${rsm.firstName} ${rsm.lastName}`.trim(),
-        email: rsm.email || null,
-        phone: rsm.phone || null,
-        asm: asmFromDoc(rsm.asmId),
-      };
-    };
-    const personalRsmFmt = formatRsm(pr?.personalRsmId);
-    const businessRsmFmt = formatRsm(pr?.businessRsmId || pr?.businessHomeRsmId);
-    const homeLapRsmFmt = formatRsm(pr?.homeLapRsmId || pr?.businessHomeRsmId);
-    const asmDirect = asmFromDoc(pr?.asmId);
-    const resolvedAsm =
-      personalRsmFmt?.asm ||
-      businessRsmFmt?.asm ||
-      homeLapRsmFmt?.asm ||
-      asmDirect;
+
+    const pAsmFmt = formatUser(pr?.personalAsmId || pr?.personalRsmId);
+    const bAsmFmt = formatUser(pr?.businessAsmId || pr?.businessHomeRsmId || pr?.businessRsmId);
+    const hlAsmFmt = formatUser(pr?.homeLapAsmId || pr?.businessHomeRsmId || pr?.homeLapRsmId);
+    const rsmFmt = formatUser(pr?.rsmId || pr?.asmId);
 
     // Do NOT modify URLs — they are already full AWS S3 URLs
     const docs = (partner.docs || []).map((doc) => ({
@@ -3512,58 +3497,62 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       rmEmail: pr?.email || null,
       rmPhone: pr?.phone || null,
 
-      // RSM lines (same shape as /rm/profile) — RSM is RM’s manager; ASM is RSM’s manager
-      personalRsmId: personalRsmFmt?.id || null,
-      personalRsmName: personalRsmFmt?.name || null,
-      personalRsmEmployeeId: personalRsmFmt?.employeeId || null,
-      personalRsmPhone: personalRsmFmt?.phone || null,
-      personalRsmEmail: personalRsmFmt?.email || null,
-      personalRsmAsmId: personalRsmFmt?.asm?.id || null,
-      personalRsmAsmName: personalRsmFmt?.asm?.name || null,
-      personalRsmAsmEmployeeId: personalRsmFmt?.asm?.employeeId || null,
-      personalRsmAsmEmail: personalRsmFmt?.asm?.email || null,
-      personalRsmAsmPhone: personalRsmFmt?.asm?.phone || null,
+      // Specialized ASMs
+      personalAsmId: pAsmFmt?.id || null,
+      personalAsmName: pAsmFmt?.name || null,
+      personalAsmEmployeeId: pAsmFmt?.employeeId || null,
+      personalAsmPhone: pAsmFmt?.phone || null,
+      personalAsmEmail: pAsmFmt?.email || null,
 
-      businessRsmId: businessRsmFmt?.id || null,
-      businessRsmName: businessRsmFmt?.name || null,
-      businessRsmEmployeeId: businessRsmFmt?.employeeId || null,
-      businessRsmPhone: businessRsmFmt?.phone || null,
-      businessRsmEmail: businessRsmFmt?.email || null,
-      businessRsmAsmId: businessRsmFmt?.asm?.id || null,
-      businessRsmAsmName: businessRsmFmt?.asm?.name || null,
-      businessRsmAsmEmployeeId: businessRsmFmt?.asm?.employeeId || null,
-      businessRsmAsmEmail: businessRsmFmt?.asm?.email || null,
-      businessRsmAsmPhone: businessRsmFmt?.asm?.phone || null,
+      businessAsmId: bAsmFmt?.id || null,
+      businessAsmName: bAsmFmt?.name || null,
+      businessAsmEmployeeId: bAsmFmt?.employeeId || null,
+      businessAsmPhone: bAsmFmt?.phone || null,
+      businessAsmEmail: bAsmFmt?.email || null,
 
-      homeLapRsmId: homeLapRsmFmt?.id || null,
-      homeLapRsmName: homeLapRsmFmt?.name || null,
-      homeLapRsmEmployeeId: homeLapRsmFmt?.employeeId || null,
-      homeLapRsmPhone: homeLapRsmFmt?.phone || null,
-      homeLapRsmEmail: homeLapRsmFmt?.email || null,
-      homeLapRsmAsmId: homeLapRsmFmt?.asm?.id || null,
-      homeLapRsmAsmName: homeLapRsmFmt?.asm?.name || null,
-      homeLapRsmAsmEmployeeId: homeLapRsmFmt?.asm?.employeeId || null,
-      homeLapRsmAsmEmail: homeLapRsmFmt?.asm?.email || null,
-      homeLapRsmAsmPhone: homeLapRsmFmt?.asm?.phone || null,
+      homeLapAsmId: hlAsmFmt?.id || null,
+      homeLapAsmName: hlAsmFmt?.name || null,
+      homeLapAsmEmployeeId: hlAsmFmt?.employeeId || null,
+      homeLapAsmPhone: hlAsmFmt?.phone || null,
+      homeLapAsmEmail: hlAsmFmt?.email || null,
 
-      // Legacy Business & Home Loan RSM details
-      businessHomeRsmId: businessRsmFmt?.id || null,
-      businessHomeRsmName: businessRsmFmt?.name || null,
-      businessHomeRsmEmployeeId: businessRsmFmt?.employeeId || null,
-      businessHomeRsmPhone: businessRsmFmt?.phone || null,
-      businessHomeRsmEmail: businessRsmFmt?.email || null,
-      businessHomeRsmAsmId: businessRsmFmt?.asm?.id || null,
-      businessHomeRsmAsmName: businessRsmFmt?.asm?.name || null,
-      businessHomeRsmAsmEmployeeId: businessRsmFmt?.asm?.employeeId || null,
-      businessHomeRsmAsmEmail: businessRsmFmt?.asm?.email || null,
-      businessHomeRsmAsmPhone: businessRsmFmt?.asm?.phone || null,
+      // Senior Regional Sales Manager (RSM)
+      rsmId: rsmFmt?.id || null,
+      rsmName: rsmFmt?.name || null,
+      rsmEmployeeId: rsmFmt?.employeeId || null,
+      rsmPhone: rsmFmt?.phone || null,
+      rsmEmail: rsmFmt?.email || null,
 
-      // Canonical ASM (first available from RSM chain, else RM’s asmId)
-      asmId: resolvedAsm?.id || null,
-      asmName: resolvedAsm?.name || null,
-      asmEmployeeId: resolvedAsm?.employeeId || null,
-      asmEmail: resolvedAsm?.email || null,
-      asmPhone: resolvedAsm?.phone || null,
+      // Legacy aliases for backward compatibility
+      personalRsmId: pAsmFmt?.id || null,
+      personalRsmName: pAsmFmt?.name || null,
+      personalRsmEmployeeId: pAsmFmt?.employeeId || null,
+      personalRsmPhone: pAsmFmt?.phone || null,
+      personalRsmEmail: pAsmFmt?.email || null,
+
+      businessRsmId: bAsmFmt?.id || null,
+      businessRsmName: bAsmFmt?.name || null,
+      businessRsmEmployeeId: bAsmFmt?.employeeId || null,
+      businessRsmPhone: bAsmFmt?.phone || null,
+      businessRsmEmail: bAsmFmt?.email || null,
+
+      homeLapRsmId: hlAsmFmt?.id || null,
+      homeLapRsmName: hlAsmFmt?.name || null,
+      homeLapRsmEmployeeId: hlAsmFmt?.employeeId || null,
+      homeLapRsmPhone: hlAsmFmt?.phone || null,
+      homeLapRsmEmail: hlAsmFmt?.email || null,
+
+      businessHomeRsmId: bAsmFmt?.id || null,
+      businessHomeRsmName: bAsmFmt?.name || null,
+      businessHomeRsmEmployeeId: bAsmFmt?.employeeId || null,
+      businessHomeRsmPhone: bAsmFmt?.phone || null,
+      businessHomeRsmEmail: bAsmFmt?.email || null,
+
+      asmId: rsmFmt?.id || null,
+      asmName: rsmFmt?.name || null,
+      asmEmployeeId: rsmFmt?.employeeId || null,
+      asmEmail: rsmFmt?.email || null,
+      asmPhone: rsmFmt?.phone || null,
 
       reportingHierarchy: {
         partner: {
