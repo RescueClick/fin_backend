@@ -39,16 +39,18 @@ import {
   sendDocumentStatusEmail,
   sendPayoutEmail,
   sendPartnerPayoutInvoiceEmail,
+  sendPartnerIncentiveInvoiceEmail,
+  sendIncentiveEmail,
 } from "../utils/emailService.js";
 import {
   calculateTdsAndNet,
   generateInvoiceNumber,
+  generateIncentiveInvoiceNumber,
   buildPartnerInvoiceHtml,
   getInvoiceAndTdsPolicy,
   DEFAULT_TDS_SECTION,
   DEFAULT_TDS_PERCENTAGE,
 } from "../utils/invoiceService.js";
-import { sendIncentiveEmail } from "../utils/emailService.js";
 import { emitPayoutStatusChanged, emitIncentiveStatusChanged } from "../utils/socketEmitter.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
@@ -5555,16 +5557,26 @@ function formatPayoutApplicationRow(app, payout, isDoneEndpoint = false) {
   const approvedAmount = app.approvedLoanAmount != null ? Number(app.approvedLoanAmount) : null;
 
   // Financial & TDS Section 194T breakdown
-  const grossAmount = payout?.grossAmount != null ? Number(payout.grossAmount) : payoutAmount;
+  // Treat schema default 0 on gross/net/tds as "missing" when amount was actually paid
+  const rawGross = payout?.grossAmount != null ? Number(payout.grossAmount) : null;
+  const grossAmount = rawGross != null && rawGross > 0 ? rawGross : payoutAmount;
   const tdsApplicable = payout?.tdsApplicable !== undefined ? Boolean(payout.tdsApplicable) : true;
   const tdsSection = payout?.tdsSection || "194T";
   const tdsPercentage = payout?.tdsPercentage != null ? Number(payout.tdsPercentage) : 10;
-  const tdsAmount = payout?.tdsAmount != null
-    ? Number(payout.tdsAmount)
-    : (tdsApplicable ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2)) : 0);
-  const netAmount = payout?.netAmount != null
-    ? Number(payout.netAmount)
-    : (payoutAmount > 0 && payout?.grossAmount == null ? payoutAmount : Number(Math.max(0, grossAmount - tdsAmount).toFixed(2)));
+  const rawTds = payout?.tdsAmount != null ? Number(payout.tdsAmount) : null;
+  const tdsAmount =
+    rawTds != null && rawTds > 0
+      ? rawTds
+      : tdsApplicable && grossAmount > 0
+      ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2))
+      : 0;
+  const rawNet = payout?.netAmount != null ? Number(payout.netAmount) : null;
+  const netAmount =
+    rawNet != null && rawNet > 0
+      ? rawNet
+      : payoutAmount > 0
+      ? payoutAmount
+      : Number(Math.max(0, grossAmount - tdsAmount).toFixed(2));
 
   const payoutPercentage =
     payout?.payoutPercentage != null
@@ -6070,12 +6082,21 @@ router.post("/payouts/:payoutId/send-invoice", auth, requireRole(ROLES.SUPER_ADM
     const appNo = fullApp?.appNo || (fullApp?._id ? `TLF${fullApp._id.toString().slice(-4).toUpperCase()}` : "APP");
     const approvedAmount = Number(fullApp?.approvedLoanAmount || fullApp?.customer?.loanAmount || 0);
 
-    const grossAmount = payout.grossAmount != null ? Number(payout.grossAmount) : Number(payout.amount || 0);
-    const netAmount = payout.netAmount != null ? Number(payout.netAmount) : Number(payout.amount || 0);
+    const paidAmount = Number(payout.amount || 0);
+    const rawGross = payout.grossAmount != null ? Number(payout.grossAmount) : null;
+    const grossAmount = rawGross != null && rawGross > 0 ? rawGross : paidAmount;
+    const rawNet = payout.netAmount != null ? Number(payout.netAmount) : null;
+    const netAmount = rawNet != null && rawNet > 0 ? rawNet : paidAmount;
     const tdsApplicable = payout.tdsApplicable !== undefined ? payout.tdsApplicable : true;
     const tdsSection = payout.tdsSection || policy.tdsSection || DEFAULT_TDS_SECTION;
     const tdsPercentage = payout.tdsPercentage != null ? payout.tdsPercentage : (policy.tdsPercentage ?? DEFAULT_TDS_PERCENTAGE);
-    const tdsAmount = payout.tdsAmount != null ? payout.tdsAmount : (tdsApplicable ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2)) : 0);
+    const rawTds = payout.tdsAmount != null ? Number(payout.tdsAmount) : null;
+    const tdsAmount =
+      rawTds != null && rawTds > 0
+        ? rawTds
+        : tdsApplicable && grossAmount > 0
+        ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2))
+        : 0;
     const invoiceNumber = payout.invoiceNumber || generateInvoiceNumber(appNo, payout._id);
 
     const emailResult = await sendPartnerPayoutInvoiceEmail({
@@ -6122,6 +6143,64 @@ router.post("/payouts/:payoutId/send-invoice", auth, requireRole(ROLES.SUPER_ADM
   }
 });
 
+// PUT /api/admin/payouts/:payoutId/invoice
+// Admin edits invoice number / date / notes / TDS amounts (without re-settling status)
+router.put("/payouts/:payoutId/invoice", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const { payoutId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(payoutId)) {
+      return res.status(400).json({ message: "Invalid payout ID" });
+    }
+
+    const payout = await Payout.findById(payoutId);
+    if (!payout) {
+      return res.status(404).json({ message: "Payout not found" });
+    }
+
+    const {
+      invoiceNumber,
+      invoiceDate,
+      invoiceNotes,
+      grossAmount,
+      tdsApplicable,
+      tdsSection,
+      tdsPercentage,
+      tdsAmount,
+      netAmount,
+      note,
+      utrNumber,
+    } = req.body;
+
+    if (invoiceNumber !== undefined) payout.invoiceNumber = String(invoiceNumber || "").trim();
+    if (invoiceDate !== undefined) {
+      payout.invoiceDate = invoiceDate ? new Date(invoiceDate) : payout.invoiceDate;
+    }
+    if (invoiceNotes !== undefined) payout.invoiceNotes = invoiceNotes;
+    if (grossAmount != null && Number(grossAmount) >= 0) payout.grossAmount = Number(grossAmount);
+    if (tdsApplicable !== undefined) payout.tdsApplicable = Boolean(tdsApplicable);
+    if (tdsSection !== undefined) payout.tdsSection = tdsSection || "194T";
+    if (tdsPercentage != null) payout.tdsPercentage = Number(tdsPercentage);
+    if (tdsAmount != null) payout.tdsAmount = Number(tdsAmount);
+    if (netAmount != null && Number(netAmount) >= 0) {
+      payout.netAmount = Number(netAmount);
+      payout.amount = Number(netAmount);
+    }
+    if (utrNumber !== undefined || note !== undefined) {
+      payout.note = utrNumber || note || payout.note || "";
+    }
+
+    await payout.save();
+
+    return res.json({
+      message: "Payout invoice updated successfully",
+      payout,
+    });
+  } catch (err) {
+    console.error("Error updating payout invoice:", err);
+    return res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
+
 // GET /api/admin/payouts/:payoutId/invoice
 // Admin fetches complete invoice details & rendered HTML preview
 router.get("/payouts/:payoutId/invoice", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
@@ -6152,12 +6231,21 @@ router.get("/payouts/:payoutId/invoice", auth, requireRole(ROLES.SUPER_ADMIN), a
     const appNo = fullApp?.appNo || (fullApp?._id ? `TLF${fullApp._id.toString().slice(-4).toUpperCase()}` : "APP");
     const approvedAmount = Number(fullApp?.approvedLoanAmount || fullApp?.customer?.loanAmount || 0);
 
-    const grossAmount = payout.grossAmount != null ? Number(payout.grossAmount) : Number(payout.amount || 0);
-    const netAmount = payout.netAmount != null ? Number(payout.netAmount) : Number(payout.amount || 0);
+    const paidAmount = Number(payout.amount || 0);
+    const rawGross = payout.grossAmount != null ? Number(payout.grossAmount) : null;
+    const grossAmount = rawGross != null && rawGross > 0 ? rawGross : paidAmount;
+    const rawNet = payout.netAmount != null ? Number(payout.netAmount) : null;
+    const netAmount = rawNet != null && rawNet > 0 ? rawNet : paidAmount;
     const tdsApplicable = payout.tdsApplicable !== undefined ? payout.tdsApplicable : true;
     const tdsSection = payout.tdsSection || policy.tdsSection || DEFAULT_TDS_SECTION;
     const tdsPercentage = payout.tdsPercentage != null ? payout.tdsPercentage : (policy.tdsPercentage ?? DEFAULT_TDS_PERCENTAGE);
-    const tdsAmount = payout.tdsAmount != null ? payout.tdsAmount : (tdsApplicable ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2)) : 0);
+    const rawTds = payout.tdsAmount != null ? Number(payout.tdsAmount) : null;
+    const tdsAmount =
+      rawTds != null && rawTds > 0
+        ? rawTds
+        : tdsApplicable && grossAmount > 0
+        ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2))
+        : 0;
     const invoiceNumber = payout.invoiceNumber || generateInvoiceNumber(appNo, payout._id);
     const invoiceDate = payout.invoiceDate || payout.updatedAt || new Date();
 
@@ -6227,7 +6315,7 @@ router.get("/payout-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, r
       // Invoice configuration
       invoicePrefix: "INV-PO",
       companyName: "DhanSource Capital Pvt Ltd",
-      companyAddress: "Corporate Office: 402, Trade Avenue, Andheri East, Mumbai, Maharashtra - 400069",
+      companyAddress: "Office No -31, C Wing, Ashoka Nagar, Kharadi, Pune, Maharashtra 411014",
       companyGstin: "27AAACD1234F1Z5",
       companyPan: "AAACD1234F",
       companyTan: "MUMA12345E",
@@ -6255,7 +6343,7 @@ router.get("/payout-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, r
 });
 
 // PUT /api/admin/payout-policy
-// Admin updates default payout percentages & TDS configuration
+// Admin updates payout policy — merges with existing so invoice vs commission saves don't wipe each other
 router.put("/payout-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const { policy } = req.body;
@@ -6264,15 +6352,21 @@ router.put("/payout-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, r
     }
 
     const { Config } = await import("../models/Config.js");
+    const existing = await Config.findOne({ key: "DEFAULT_PAYOUT_POLICY" }).lean();
+    const merged = {
+      ...(existing?.value || {}),
+      ...policy,
+    };
+
     const updated = await Config.findOneAndUpdate(
       { key: "DEFAULT_PAYOUT_POLICY" },
-      { value: policy },
+      { value: merged },
       { upsert: true, new: true }
     );
 
     return res.json({
       success: true,
-      message: "Payout policy & TDS settings updated successfully",
+      message: "Settings updated successfully",
       policy: updated.value,
     });
   } catch (err) {
@@ -7341,6 +7435,22 @@ router.get(
           paidAt: doc?.paidAt || null,
           notes: doc?.notes || null,
           utrNumber: doc?.notes || null,
+          // Invoice / TDS (Section 194T) — same shape as payout invoices
+          grossAmount: doc?.grossAmount != null && Number(doc.grossAmount) > 0
+            ? Number(doc.grossAmount)
+            : Math.round(finalIncentiveAmount),
+          tdsApplicable: doc?.tdsApplicable !== undefined ? Boolean(doc.tdsApplicable) : true,
+          tdsSection: doc?.tdsSection || "194T",
+          tdsPercentage: doc?.tdsPercentage != null ? Number(doc.tdsPercentage) : 10,
+          tdsAmount: doc?.tdsAmount != null ? Number(doc.tdsAmount) : 0,
+          netAmount: doc?.netAmount != null && Number(doc.netAmount) > 0
+            ? Number(doc.netAmount)
+            : (doc?.amount != null ? Number(doc.amount) : Math.round(finalIncentiveAmount)),
+          invoiceNumber: doc?.invoiceNumber || "",
+          invoiceDate: doc?.invoiceDate || null,
+          invoiceSentAt: doc?.invoiceSentAt || null,
+          invoiceSentTo: doc?.invoiceSentTo || "",
+          invoiceNotes: doc?.invoiceNotes || "",
         };
       });
 
@@ -7359,8 +7469,134 @@ router.get(
   }
 );
 
+// Helper: apply Sec 194T invoice fields on incentive + optionally email formal invoice
+async function settleIncentiveInvoiceFields(incentive, partner, body = {}, opts = {}) {
+  const policy = await getInvoiceAndTdsPolicy();
+  const {
+    amount,
+    grossAmount: inputGross,
+    tdsApplicable: inputTdsApplicable,
+    tdsSection: inputTdsSection,
+    tdsPercentage: inputTdsPercentage,
+    tdsAmount: inputTdsAmount,
+    netAmount: inputNetAmount,
+    invoiceNumber: inputInvoiceNumber,
+    invoiceDate: inputInvoiceDate,
+    invoiceNotes: inputInvoiceNotes,
+    sendInvoiceEmail: inputSendInvoiceEmail,
+    note,
+    utrNumber,
+  } = body;
+
+  const isTds =
+    inputTdsApplicable !== undefined
+      ? Boolean(inputTdsApplicable)
+      : incentive.tdsApplicable !== undefined
+      ? Boolean(incentive.tdsApplicable)
+      : policy.tdsApplicable !== false;
+  const tdsSection = inputTdsSection || incentive.tdsSection || policy.tdsSection || DEFAULT_TDS_SECTION;
+  const tdsPercentage =
+    inputTdsPercentage != null
+      ? Number(inputTdsPercentage)
+      : incentive.tdsPercentage != null
+      ? Number(incentive.tdsPercentage)
+      : policy.tdsPercentage ?? DEFAULT_TDS_PERCENTAGE;
+
+  const grossBase =
+    inputGross != null && Number(inputGross) > 0
+      ? Number(inputGross)
+      : amount != null && Number(amount) > 0
+      ? Number(amount)
+      : Number(incentive.grossAmount || incentive.amount || 0);
+
+  const calc = calculateTdsAndNet({
+    approvedAmount: Number(opts.disbursedVolume || 0),
+    grossAmount: grossBase,
+    directAmount: grossBase,
+    tdsApplicable: isTds,
+    tdsSection,
+    tdsPercentage,
+  });
+
+  const finalGross = inputGross != null ? Number(inputGross) : calc.grossAmount;
+  const finalTdsAmt = inputTdsAmount != null ? Number(inputTdsAmount) : calc.tdsAmount;
+  const finalNetAmt =
+    inputNetAmount != null
+      ? Number(inputNetAmount)
+      : calc.netAmount || finalGross;
+
+  const partnerCode =
+    partner?.employeeId || partner?.partnerCode || String(incentive.partnerId || "PARTNER");
+  const periodRef = `${incentive.year || ""}-${String(incentive.month || "").padStart(2, "0")}`;
+  const invoiceNum =
+    inputInvoiceNumber ||
+    incentive.invoiceNumber ||
+    generateIncentiveInvoiceNumber(`${partnerCode}-${periodRef}`, incentive._id);
+
+  incentive.grossAmount = finalGross;
+  incentive.tdsApplicable = isTds;
+  incentive.tdsSection = tdsSection;
+  incentive.tdsPercentage = tdsPercentage;
+  incentive.tdsAmount = finalTdsAmt;
+  incentive.netAmount = finalNetAmt;
+  incentive.amount = Math.round(finalNetAmt > 0 ? finalNetAmt : finalGross);
+  incentive.invoiceNumber = invoiceNum;
+  incentive.invoiceDate = inputInvoiceDate
+    ? new Date(inputInvoiceDate)
+    : incentive.invoiceDate || new Date();
+  if (inputInvoiceNotes !== undefined) {
+    incentive.invoiceNotes = inputInvoiceNotes;
+  } else if (!incentive.invoiceNotes) {
+    incentive.invoiceNotes = policy.invoiceNotes || "";
+  }
+  incentive.notes = utrNumber || note || incentive.notes || "";
+
+  const shouldEmail = inputSendInvoiceEmail !== false;
+  let emailed = false;
+
+  if (shouldEmail && partner?.email) {
+    const monthNames = [
+      "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const periodLabel = `${monthNames[incentive.month] || incentive.month} ${incentive.year}`;
+    emailed = await sendPartnerIncentiveInvoiceEmail({
+      partner,
+      customerName: opts.tierLabel || "Milestone Bonus",
+      appNo: `INC-${periodRef}-${partnerCode}`.toUpperCase(),
+      loanType: "Milestone Incentive Bonus",
+      approvedAmount: Number(opts.disbursedVolume || 0),
+      grossAmount: finalGross,
+      payoutAmount: finalNetAmt,
+      payoutPercentage: 0,
+      tdsApplicable: isTds,
+      tdsSection,
+      tdsPercentage,
+      tdsAmount: finalTdsAmt,
+      netAmount: finalNetAmt,
+      invoiceNumber: invoiceNum,
+      invoiceDate: incentive.invoiceDate,
+      utrNumber: incentive.notes || "",
+      note: incentive.notes || "",
+      bankName: partner.bankName || "",
+      accountNumber: partner.accountNumber || "",
+      ifscCode: partner.ifscCode || "",
+      companyDetails: policy.companyDetails,
+      invoiceNotes: incentive.invoiceNotes,
+      periodLabel,
+      tierLabel: opts.tierLabel || "Milestone",
+    });
+    if (emailed) {
+      incentive.invoiceSentAt = new Date();
+      incentive.invoiceSentTo = partner.email;
+    }
+  }
+
+  return { emailed, finalNetAmt, finalGross };
+}
+
 // POST /api/admin/incentives/:id/pay
-// Admin marks an existing incentive record as PAID
+// Admin marks an existing incentive record as PAID (+ formal Sec 194T invoice email like payouts)
 router.post(
   "/incentives/:id/pay",
   auth,
@@ -7368,7 +7604,6 @@ router.post(
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { amount, note, utrNumber } = req.body;
 
       if (!mongoose.Types.ObjectId.isValid(id)) {
         return res.status(400).json({ message: "Invalid incentive ID" });
@@ -7379,30 +7614,31 @@ router.post(
         return res.status(404).json({ message: "Incentive record not found" });
       }
 
-      if (amount && Number(amount) > 0) {
-        incentive.amount = Math.round(Number(amount));
-      }
+      const partner = await User.findById(incentive.partnerId)
+        .select(
+          "firstName lastName email phone bankName accountNumber ifscCode accountHolderName employeeId partnerCode panNumber panCard"
+        )
+        .lean();
 
       incentive.status = "PAID";
-      incentive.notes = utrNumber || note || incentive.notes || "";
       incentive.paidAt = new Date();
       incentive.paidBy = req.user.sub;
+
+      const { emailed } = await settleIncentiveInvoiceFields(incentive, partner, req.body, {
+        tierLabel: "Milestone Bonus",
+        disbursedVolume: incentive.achievedDisbursement || 0,
+      });
       await incentive.save();
 
-      // Emit socket notification
       try {
         const io = global.io;
         if (io) {
           await emitIncentiveStatusChanged(io, incentive, incentive.partnerId);
         }
-
-        // Send email receipt to partner (non-blocking)
-        setImmediate(async () => {
-          try {
-            const partner = await User.findById(incentive.partnerId)
-              .select("firstName lastName email phone bankName accountNumber ifscCode")
-              .lean();
-            if (partner && partner.email) {
+        // Fallback simple status email only if formal invoice was not sent
+        if (!emailed && partner?.email && req.body?.sendInvoiceEmail === false) {
+          setImmediate(async () => {
+            try {
               await sendIncentiveEmail(partner, {
                 _id: incentive._id,
                 amount: incentive.amount,
@@ -7412,18 +7648,21 @@ router.post(
                 paidAt: incentive.paidAt,
                 note: incentive.notes,
               });
+            } catch (mailErr) {
+              console.error("❌ Failed to send incentive email:", mailErr.message);
             }
-          } catch (mailErr) {
-            console.error("❌ Failed to send incentive email:", mailErr.message);
-          }
-        });
+          });
+        }
       } catch (notifyErr) {
         console.error("❌ Error emitting incentive notifications:", notifyErr);
       }
 
       res.json({
-        message: "Incentive paid successfully",
+        message: emailed
+          ? "Incentive paid successfully. Section 194T tax invoice emailed to partner."
+          : "Incentive paid successfully",
         incentive,
+        invoiceEmailed: emailed,
       });
     } catch (err) {
       console.error("Error paying admin incentive:", err);
@@ -7450,7 +7689,11 @@ router.post(
       const targetYear = Number(year) || new Date().getFullYear();
       const payAmount = Math.max(1, Math.round(Number(amount) || 1000));
 
-      const partner = await User.findById(partnerId).lean();
+      const partner = await User.findById(partnerId)
+        .select(
+          "firstName lastName email phone bankName accountNumber ifscCode accountHolderName employeeId partnerCode panNumber panCard asmId"
+        )
+        .lean();
       if (!partner) {
         return res.status(404).json({ message: "Partner not found" });
       }
@@ -7462,14 +7705,11 @@ router.post(
       });
 
       if (incentive) {
-        incentive.amount = payAmount;
         incentive.status = "PAID";
-        incentive.notes = utrNumber || note || incentive.notes || "";
         incentive.paidAt = new Date();
         incentive.paidBy = req.user.sub;
-        await incentive.save();
       } else {
-        incentive = await Incentive.create({
+        incentive = new Incentive({
           partnerId,
           asmId: partner.asmId || req.user.sub,
           month: targetMonth,
@@ -7488,17 +7728,51 @@ router.post(
         });
       }
 
-      // Emit socket notification
+      // Resolve milestone tier label for invoice
+      let tierLabel = "Milestone Bonus";
+      let disbursedVolume = Number(incentive.achievedDisbursement || 0);
+      try {
+        const activeSlabs = await getActiveIncentiveSlabs();
+        const startDate = new Date(targetYear, targetMonth - 1, 1, 0, 0, 0, 0);
+        const endDate = new Date(targetYear, targetMonth, 1, 0, 0, 0, 0);
+        const apps = await Application.find(
+          activeApplicationsFilter({
+            partnerId,
+            status: "DISBURSED",
+          })
+        )
+          .select("approvedLoanAmount disbursedAt disbursedDate stageHistory createdAt updatedAt")
+          .lean();
+        disbursedVolume = apps.reduce((sum, app) => {
+          const dDate = getDisbursedAt(app);
+          if (isDateInRange(dDate, startDate, endDate)) {
+            return sum + (parseFloat(app.approvedLoanAmount) || 0);
+          }
+          return sum;
+        }, 0);
+        incentive.achievedDisbursement = disbursedVolume;
+        const milestone = calculatePartnerMilestone(disbursedVolume, activeSlabs);
+        tierLabel = milestone.tier || tierLabel;
+      } catch (e) {
+        console.warn("Could not resolve incentive milestone for invoice:", e.message);
+      }
+
+      const { emailed } = await settleIncentiveInvoiceFields(
+        incentive,
+        partner,
+        { ...req.body, amount: payAmount },
+        { tierLabel, disbursedVolume }
+      );
+      await incentive.save();
+
       try {
         const io = global.io;
         if (io) {
           await emitIncentiveStatusChanged(io, incentive, partnerId);
         }
-
-        // Send email receipt to partner (non-blocking)
-        setImmediate(async () => {
-          try {
-            if (partner.email) {
+        if (!emailed && partner.email && req.body?.sendInvoiceEmail === false) {
+          setImmediate(async () => {
+            try {
               await sendIncentiveEmail(partner, {
                 _id: incentive._id,
                 amount: incentive.amount,
@@ -7508,22 +7782,203 @@ router.post(
                 paidAt: incentive.paidAt,
                 note: incentive.notes,
               });
+            } catch (mailErr) {
+              console.error("❌ Failed to send incentive email:", mailErr.message);
             }
-          } catch (mailErr) {
-            console.error("❌ Failed to send incentive email:", mailErr.message);
-          }
-        });
+          });
+        }
       } catch (notifyErr) {
         console.error("❌ Error emitting incentive notifications:", notifyErr);
       }
 
       res.json({
-        message: "Incentive settled and marked as paid successfully",
+        message: emailed
+          ? "Incentive settled. Section 194T tax invoice emailed to partner."
+          : "Incentive settled and marked as paid successfully",
         incentive,
+        invoiceEmailed: emailed,
       });
     } catch (err) {
       console.error("Error paying partner incentive:", err);
       res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// POST /api/admin/incentives/:id/send-invoice
+// Admin sends or resends formal Section 194T incentive invoice email (same as payouts)
+router.post(
+  "/incentives/:id/send-invoice",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid incentive ID" });
+      }
+
+      const incentive = await Incentive.findById(id);
+      if (!incentive) {
+        return res.status(404).json({ message: "Incentive record not found" });
+      }
+
+      const [partner, policy] = await Promise.all([
+        User.findById(incentive.partnerId)
+          .select(
+            "firstName lastName email phone bankName accountNumber ifscCode accountHolderName employeeId partnerCode panNumber panCard"
+          )
+          .lean(),
+        getInvoiceAndTdsPolicy(),
+      ]);
+
+      if (!partner || !partner.email) {
+        return res.status(400).json({ message: "Partner has no registered email address" });
+      }
+
+      const paidAmount = Number(incentive.amount || 0);
+      const rawGross = incentive.grossAmount != null ? Number(incentive.grossAmount) : null;
+      const grossAmount = rawGross != null && rawGross > 0 ? rawGross : paidAmount;
+      const rawNet = incentive.netAmount != null ? Number(incentive.netAmount) : null;
+      const netAmount = rawNet != null && rawNet > 0 ? rawNet : paidAmount;
+      const tdsApplicable =
+        incentive.tdsApplicable !== undefined ? incentive.tdsApplicable : true;
+      const tdsSection = incentive.tdsSection || policy.tdsSection || DEFAULT_TDS_SECTION;
+      const tdsPercentage =
+        incentive.tdsPercentage != null
+          ? incentive.tdsPercentage
+          : policy.tdsPercentage ?? DEFAULT_TDS_PERCENTAGE;
+      const rawTds = incentive.tdsAmount != null ? Number(incentive.tdsAmount) : null;
+      const tdsAmount =
+        rawTds != null && rawTds > 0
+          ? rawTds
+          : tdsApplicable && grossAmount > 0
+          ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2))
+          : 0;
+
+      const partnerCode = partner.employeeId || partner.partnerCode || "PARTNER";
+      const periodRef = `${incentive.year}-${String(incentive.month).padStart(2, "0")}`;
+      const invoiceNumber =
+        incentive.invoiceNumber ||
+        generateIncentiveInvoiceNumber(`${partnerCode}-${periodRef}`, incentive._id);
+      const monthNames = [
+        "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+      ];
+      const periodLabel = `${monthNames[incentive.month] || incentive.month} ${incentive.year}`;
+
+      const emailed = await sendPartnerIncentiveInvoiceEmail({
+        partner,
+        customerName: "Milestone Bonus",
+        appNo: `INC-${periodRef}-${partnerCode}`.toUpperCase(),
+        loanType: "Milestone Incentive Bonus",
+        approvedAmount: Number(incentive.achievedDisbursement || 0),
+        grossAmount,
+        payoutAmount: netAmount,
+        payoutPercentage: 0,
+        tdsApplicable,
+        tdsSection,
+        tdsPercentage,
+        tdsAmount,
+        netAmount,
+        invoiceNumber,
+        invoiceDate: incentive.invoiceDate || incentive.paidAt || new Date(),
+        utrNumber: incentive.notes || "",
+        note: incentive.notes || "",
+        bankName: partner.bankName || "",
+        accountNumber: partner.accountNumber || "",
+        ifscCode: partner.ifscCode || "",
+        companyDetails: policy.companyDetails,
+        invoiceNotes: incentive.invoiceNotes || policy.invoiceNotes,
+        periodLabel,
+        tierLabel: "Milestone",
+      });
+
+      if (emailed) {
+        if (!incentive.invoiceNumber) incentive.invoiceNumber = invoiceNumber;
+        if (!incentive.invoiceDate) incentive.invoiceDate = new Date();
+        incentive.invoiceSentAt = new Date();
+        incentive.invoiceSentTo = partner.email;
+        await incentive.save();
+        return res.json({
+          message: `Incentive tax invoice emailed to ${partner.email}`,
+          invoiceSentAt: incentive.invoiceSentAt,
+          invoiceSentTo: incentive.invoiceSentTo,
+          invoiceNumber: incentive.invoiceNumber,
+        });
+      }
+
+      return res.status(500).json({ message: "Failed to send invoice email via mail server" });
+    } catch (err) {
+      console.error("Error sending incentive invoice email:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// PUT /api/admin/incentives/:id/invoice
+// Admin edits incentive invoice number / date / notes / TDS amounts
+router.put(
+  "/incentives/:id/invoice",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid incentive ID" });
+      }
+
+      const incentive = await Incentive.findById(id);
+      if (!incentive) {
+        return res.status(404).json({ message: "Incentive record not found" });
+      }
+
+      const {
+        invoiceNumber,
+        invoiceDate,
+        invoiceNotes,
+        grossAmount,
+        tdsApplicable,
+        tdsSection,
+        tdsPercentage,
+        tdsAmount,
+        netAmount,
+        note,
+        utrNumber,
+      } = req.body;
+
+      if (invoiceNumber !== undefined) {
+        incentive.invoiceNumber = String(invoiceNumber || "").trim();
+      }
+      if (invoiceDate !== undefined) {
+        incentive.invoiceDate = invoiceDate ? new Date(invoiceDate) : incentive.invoiceDate;
+      }
+      if (invoiceNotes !== undefined) incentive.invoiceNotes = invoiceNotes;
+      if (grossAmount != null && Number(grossAmount) >= 0) {
+        incentive.grossAmount = Number(grossAmount);
+      }
+      if (tdsApplicable !== undefined) incentive.tdsApplicable = Boolean(tdsApplicable);
+      if (tdsSection !== undefined) incentive.tdsSection = tdsSection || "194T";
+      if (tdsPercentage != null) incentive.tdsPercentage = Number(tdsPercentage);
+      if (tdsAmount != null) incentive.tdsAmount = Number(tdsAmount);
+      if (netAmount != null && Number(netAmount) >= 0) {
+        incentive.netAmount = Number(netAmount);
+        incentive.amount = Math.round(Number(netAmount));
+      }
+      if (utrNumber !== undefined || note !== undefined) {
+        incentive.notes = utrNumber || note || incentive.notes || "";
+      }
+
+      await incentive.save();
+
+      return res.json({
+        message: "Incentive invoice updated successfully",
+        incentive,
+      });
+    } catch (err) {
+      console.error("Error updating incentive invoice:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
     }
   }
 );

@@ -8,7 +8,7 @@ export const DEFAULT_TDS_PERCENTAGE = 10; // Section 194T default rate is 10%
 export const DEFAULT_COMPANY_DETAILS = {
   companyName: COMPANY_NAME_LEGAL || "DhanSource Capital Pvt Ltd",
   brandName: COMPANY_NAME || "DhanSource Capital",
-  address: "Corporate Office: 402, Trade Avenue, Andheri East, Mumbai, Maharashtra - 400069",
+  address: "Office No -31, C Wing, Ashoka Nagar, Kharadi, Pune, Maharashtra 411014",
   cin: "U65999MH2023PTC123456",
   gstin: "27AAACD1234F1Z5",
   pan: "AAACD1234F",
@@ -112,13 +112,18 @@ export function calculateTdsAndNet({
  * Generate standardized tax invoice number
  * Format: INV-PO-YYYY-APPNUMBER-XXXX
  */
-export function generateInvoiceNumber(appNo = "APP", uniqueSuffix = "") {
+export function generateInvoiceNumber(appNo = "APP", uniqueSuffix = "", prefix = "INV-PO") {
   const year = new Date().getFullYear();
   const cleanApp = String(appNo || "APP").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
   const rand = uniqueSuffix
     ? String(uniqueSuffix).slice(-4).toUpperCase()
     : Math.floor(1000 + Math.random() * 9000);
-  return `INV-PO-${year}-${cleanApp}-${rand}`;
+  return `${prefix}-${year}-${cleanApp}-${rand}`;
+}
+
+/** Incentive / milestone bonus invoice numbers */
+export function generateIncentiveInvoiceNumber(partnerCode = "PARTNER", uniqueSuffix = "") {
+  return generateInvoiceNumber(partnerCode, uniqueSuffix, "INV-IN");
 }
 
 /**
@@ -155,8 +160,40 @@ export function buildPartnerInvoiceHtml({
   ifscCode = "",
   companyDetails = {},
   invoiceNotes = "",
+  invoiceType = "PAYOUT", // PAYOUT | INCENTIVE
+  periodLabel = "",
+  tierLabel = "",
 }) {
+  const isIncentive = String(invoiceType).toUpperCase() === "INCENTIVE";
   const company = { ...DEFAULT_COMPANY_DETAILS, ...(companyDetails || {}) };
+  const adviceLabel = isIncentive
+    ? "Tax Invoice / Incentive Advice"
+    : "Tax Invoice / Payout Advice";
+  const refCol1 = isIncentive ? "Period / Ref #" : "Application #";
+  const refCol2 = isIncentive ? "Milestone / Tier" : "Borrower Name";
+  const refCol3 = isIncentive ? "Incentive Type" : "Loan Product";
+  const refCol4 = isIncentive ? "Disbursed Volume" : "Disbursed Amount";
+  const refCol5 = isIncentive ? "Bonus Basis" : "Commission Rate";
+  const grossLabel = isIncentive
+    ? "1. Gross Incentive Bonus (Before Tax)"
+    : "1. Gross Commission Amount (Before Tax)";
+  const netLabel = isIncentive
+    ? "NET INCENTIVE TRANSFERRED TO BANK"
+    : "NET COMMISSION TRANSFERRED TO BANK";
+  const breakdownTitle = isIncentive
+    ? "INCENTIVE BONUS & TAX DEDUCTION BREAKDOWN"
+    : "COMMISSION & TAX DEDUCTION BREAKDOWN";
+  const rateDisplay = isIncentive
+    ? tierLabel || payoutPercentage || "Flat Bonus"
+    : payoutPercentage
+    ? `${payoutPercentage}%`
+    : "Flat";
+  const nameDisplay = isIncentive
+    ? tierLabel || customerName || "Milestone Bonus"
+    : customerName;
+  const productDisplay = isIncentive
+    ? periodLabel || loanType || "Monthly Milestone"
+    : loanType;
   const dateFormatted = invoiceDate
     ? new Date(invoiceDate).toLocaleDateString("en-IN", {
         day: "2-digit",
@@ -205,7 +242,7 @@ export function buildPartnerInvoiceHtml({
             </td>
             <td style="vertical-align: top; text-align: right;">
               <span style="display: inline-block; background: #0f766e; color: #ffffff; font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px;">
-                Tax Invoice / Payout Advice
+                ${adviceLabel}
               </span>
               <div style="margin-top: 8px;">
                 <span style="font-size: 10px; text-transform: uppercase; color: #64748b; display: block;">Invoice Number</span>
@@ -274,34 +311,34 @@ export function buildPartnerInvoiceHtml({
       <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; font-size: 12px;">
         <thead style="background: #f1f5f9; color: #475569; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px;">
           <tr>
-            <th style="padding: 8px 12px; text-align: left;">Application #</th>
-            <th style="padding: 8px 12px; text-align: left;">Borrower Name</th>
-            <th style="padding: 8px 12px; text-align: left;">Loan Product</th>
-            <th style="padding: 8px 12px; text-align: right;">Disbursed Amount</th>
-            <th style="padding: 8px 12px; text-align: right;">Commission Rate</th>
+            <th style="padding: 8px 12px; text-align: left;">${refCol1}</th>
+            <th style="padding: 8px 12px; text-align: left;">${refCol2}</th>
+            <th style="padding: 8px 12px; text-align: left;">${refCol3}</th>
+            <th style="padding: 8px 12px; text-align: right;">${refCol4}</th>
+            <th style="padding: 8px 12px; text-align: right;">${refCol5}</th>
           </tr>
         </thead>
         <tbody>
           <tr style="border-top: 1px solid #e2e8f0; background: #ffffff;">
             <td style="padding: 10px 12px; font-family: monospace; font-weight: 700; color: #0f172a;">#${appNo}</td>
-            <td style="padding: 10px 12px; font-weight: 600; color: #0f172a;">${customerName}</td>
-            <td style="padding: 10px 12px; color: #475569;">${loanType}</td>
+            <td style="padding: 10px 12px; font-weight: 600; color: #0f172a;">${nameDisplay}</td>
+            <td style="padding: 10px 12px; color: #475569;">${productDisplay}</td>
             <td style="padding: 10px 12px; text-align: right; font-weight: 600; color: #0f172a;">${formatINR(approvedAmount)}</td>
-            <td style="padding: 10px 12px; text-align: right; font-weight: 700; color: #0d9488;">${payoutPercentage ? `${payoutPercentage}%` : "Flat"}</td>
+            <td style="padding: 10px 12px; text-align: right; font-weight: 700; color: #0d9488;">${rateDisplay}</td>
           </tr>
         </tbody>
       </table>
 
-      <!-- COMMISSION & TDS 194T CALCULATION SUMMARY TABLE -->
+      <!-- COMMISSION / INCENTIVE & TDS 194T CALCULATION SUMMARY TABLE -->
       <div style="border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; margin-bottom: 20px;">
         <div style="background: #0f172a; color: #ffffff; padding: 10px 14px; font-size: 12px; font-weight: 700; display: flex; justify-content: space-between;">
-          <span>COMMISSION &amp; TAX DEDUCTION BREAKDOWN</span>
+          <span>${breakdownTitle}</span>
           <span style="font-family: monospace; color: #5eead4;">SECTION 194T TDS</span>
         </div>
         
         <table style="width: 100%; border-collapse: collapse; font-size: 12px;">
           <tr style="border-bottom: 1px solid #f1f5f9; background: #ffffff;">
-            <td style="padding: 10px 14px; color: #475569;">1. Gross Commission Amount (Before Tax)</td>
+            <td style="padding: 10px 14px; color: #475569;">${grossLabel}</td>
             <td style="padding: 10px 14px; text-align: right; font-weight: 700; color: #0f172a; font-size: 13px;">${formatINR(grossAmount)}</td>
           </tr>
           
@@ -324,7 +361,7 @@ export function buildPartnerInvoiceHtml({
 
           <tr style="background: #f0fdf4;">
             <td style="padding: 12px 14px; font-weight: 800; font-size: 14px; color: #166534;">
-              NET COMMISSION TRANSFERRED TO BANK
+              ${netLabel}
               <span style="display: block; font-size: 10px; font-weight: normal; color: #15803d; margin-top: 2px;">
                 Transferred via NEFT / IMPS / Bank Settlement
               </span>

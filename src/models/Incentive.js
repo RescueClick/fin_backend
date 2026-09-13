@@ -38,8 +38,21 @@ const incentiveSchema = new mongoose.Schema(
     percentValue: { type: Number }, // when basis === PERCENT
     fixedValue: { type: Number }, // when basis === FIXED
 
-    // Final incentive amount actually paid / approved
+    // Final incentive amount actually paid / approved (net after TDS when TDS applied)
     amount: { type: Number, required: true },
+
+    // Invoice & Section 194T TDS (parity with loan commission payouts)
+    grossAmount: { type: Number, default: 0 },
+    tdsApplicable: { type: Boolean, default: true },
+    tdsSection: { type: String, default: "194T" },
+    tdsPercentage: { type: Number, default: 10 },
+    tdsAmount: { type: Number, default: 0 },
+    netAmount: { type: Number, default: 0 },
+    invoiceNumber: { type: String, trim: true },
+    invoiceDate: { type: Date },
+    invoiceSentAt: { type: Date },
+    invoiceSentTo: { type: String, trim: true },
+    invoiceNotes: { type: String, trim: true },
 
     // Status & audit
     status: {

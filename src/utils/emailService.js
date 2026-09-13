@@ -937,6 +937,7 @@ import {
   buildPartnerInvoiceHtml,
   calculateTdsAndNet,
   generateInvoiceNumber,
+  generateIncentiveInvoiceNumber,
   formatINR,
   DEFAULT_TDS_SECTION,
   DEFAULT_TDS_PERCENTAGE,
@@ -968,11 +969,16 @@ export const sendPartnerPayoutInvoiceEmail = async ({
   ifscCode = "",
   companyDetails = {},
   invoiceNotes = "",
+  invoiceType = "PAYOUT",
+  periodLabel = "",
+  tierLabel = "",
 }) => {
   if (!partner?.email) {
     console.warn("⚠️ sendPartnerPayoutInvoiceEmail: Partner has no email address.");
     return false;
   }
+
+  const isIncentive = String(invoiceType).toUpperCase() === "INCENTIVE";
 
   // Calculate or reconcile financial and TDS breakdown
   const calc = calculateTdsAndNet({
@@ -990,13 +996,12 @@ export const sendPartnerPayoutInvoiceEmail = async ({
   const finalNetAmt = netAmount != null ? Number(netAmount) : (payoutAmount > 0 && grossAmount == null ? payoutAmount : calc.netAmount);
   const finalTdsSection = tdsSection || calc.tdsSection || "194T";
   const finalTdsRate = tdsPercentage != null ? Number(tdsPercentage) : calc.tdsPercentage;
-  const finalInvoiceNo = invoiceNumber || generateInvoiceNumber(appNo);
+  const finalInvoiceNo =
+    invoiceNumber ||
+    (isIncentive
+      ? generateIncentiveInvoiceNumber(partner.employeeId || partner.partnerCode || appNo)
+      : generateInvoiceNumber(appNo));
   const finalDate = invoiceDate || new Date();
-
-  const partnerFullName =
-    `${partner.firstName || ""} ${partner.lastName || ""}`.trim() ||
-    partner.name ||
-    "Channel Partner";
 
   const invoiceHtml = buildPartnerInvoiceHtml({
     invoiceNumber: finalInvoiceNo,
@@ -1020,20 +1025,35 @@ export const sendPartnerPayoutInvoiceEmail = async ({
     ifscCode: ifscCode || partner.ifscCode || "",
     companyDetails,
     invoiceNotes,
+    invoiceType: isIncentive ? "INCENTIVE" : "PAYOUT",
+    periodLabel,
+    tierLabel,
   });
 
-  const emailSubject = `Commission Payout Invoice - #${appNo} (${formatINR(finalNetAmt)}) [Sec 194T TDS Applied] | ${COMPANY_NAME}`;
+  const emailSubject = isIncentive
+    ? `Incentive Bonus Invoice - ${periodLabel || appNo} (${formatINR(finalNetAmt)}) [Sec 194T] | ${COMPANY_NAME}`
+    : `Commission Payout Invoice - #${appNo} (${formatINR(finalNetAmt)}) [Sec 194T TDS Applied] | ${COMPANY_NAME}`;
+
+  const emailTitle = isIncentive
+    ? "Incentive Settlement & Tax Invoice"
+    : "Commission Settlement & Tax Invoice";
 
   try {
     await sendMail({
       to: partner.email,
       subject: emailSubject,
-      html: getEmailTemplate("Commission Settlement & Tax Invoice", invoiceHtml),
+      html: getEmailTemplate(emailTitle, invoiceHtml),
     });
-    console.log(`✅ Commission payout invoice email with Section 194T TDS successfully sent to partner ${partner.email} for app #${appNo}`);
+    console.log(
+      `✅ ${isIncentive ? "Incentive" : "Commission"} invoice email with Section 194T TDS sent to partner ${partner.email} for ${appNo}`
+    );
     return true;
   } catch (error) {
-    console.error("❌ Failed to send commission payout invoice email:", error);
+    console.error(`❌ Failed to send ${isIncentive ? "incentive" : "commission"} invoice email:`, error);
     return false;
   }
 };
+
+/** Alias for incentive invoice emails (same formal Sec 194T template as payouts) */
+export const sendPartnerIncentiveInvoiceEmail = (args) =>
+  sendPartnerPayoutInvoiceEmail({ ...args, invoiceType: "INCENTIVE" });

@@ -4,6 +4,7 @@ const contactFields = {
   name: { type: String, trim: true, default: "" },
   phone: { type: String, trim: true, default: "" },
   email: { type: String, trim: true, lowercase: true, default: "" },
+  product: { type: String, trim: true, default: "" }, // product this person works on
 };
 
 const bankRmSchema = new mongoose.Schema(
