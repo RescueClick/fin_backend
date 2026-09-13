@@ -759,8 +759,10 @@ export const initializeSocket = (io) => {
       };
       if (conversationId) {
         socket.to(`chat_conv_${conversationId}`).emit("chat:user_typing", payload);
-      } else if (recipientId) {
-        io.to(`user_${recipientId}`).emit("chat:user_typing", payload);
+      }
+      // Always notify recipient's personal room so typing works even if they haven't joined the conv room yet
+      if (recipientId) {
+        io.to(`user_${String(recipientId)}`).emit("chat:user_typing", payload);
       }
     });
 
@@ -771,8 +773,9 @@ export const initializeSocket = (io) => {
       };
       if (conversationId) {
         socket.to(`chat_conv_${conversationId}`).emit("chat:user_stop_typing", payload);
-      } else if (recipientId) {
-        io.to(`user_${recipientId}`).emit("chat:user_stop_typing", payload);
+      }
+      if (recipientId) {
+        io.to(`user_${String(recipientId)}`).emit("chat:user_stop_typing", payload);
       }
     });
 

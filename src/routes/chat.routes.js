@@ -498,6 +498,25 @@ router.post("/conversations/:id/messages", async (req, res) => {
     await newMessage.populate("sender", "_id firstName lastName role rsmType employeeId");
     await newMessage.populate("recipient", "_id firstName lastName role rsmType employeeId");
 
+    // Plain JSON so Socket.IO clients always receive a serializable payload
+    const messagePayload = newMessage.toObject ? newMessage.toObject() : newMessage;
+    if (messagePayload._id) messagePayload._id = String(messagePayload._id);
+    if (messagePayload.conversationId) {
+      messagePayload.conversationId = String(messagePayload.conversationId);
+    }
+    if (messagePayload.sender?._id) {
+      messagePayload.sender = {
+        ...messagePayload.sender,
+        _id: String(messagePayload.sender._id),
+      };
+    }
+    if (messagePayload.recipient?._id) {
+      messagePayload.recipient = {
+        ...messagePayload.recipient,
+        _id: String(messagePayload.recipient._id),
+      };
+    }
+
     // Update conversation state
     const previewText =
       (text || "").trim() ||
@@ -520,41 +539,42 @@ router.post("/conversations/:id/messages", async (req, res) => {
     }
 
     const recipientIdStr = recipient._id.toString();
+    const conversationIdStr = String(id);
     const currentCount = conversation.unreadCounts?.get?.(recipientIdStr) || 0;
     if (conversation.unreadCounts) {
       conversation.unreadCounts.set(recipientIdStr, currentCount + 1);
     }
     await conversation.save();
 
-    // Real-time distribution via Socket.io
+    // Real-time distribution via Socket.io — emit to room AND both user rooms
     if (global.io) {
-      // 1. Emit to active conversation room
-      global.io.to(`chat_conv_${id}`).emit("chat:new_message", {
-        message: newMessage,
-        conversationId: id,
-      });
+      const eventBody = {
+        message: messagePayload,
+        conversationId: conversationIdStr,
+      };
 
-      // 2. Emit to recipient's private user room (triggers notification & badge updates)
+      // Conversation room (anyone currently viewing this chat)
+      global.io.to(`chat_conv_${conversationIdStr}`).emit("chat:new_message", eventBody);
+
+      // Recipient personal room (always — even if not in conversation room)
+      global.io.to(`user_${recipientIdStr}`).emit("chat:new_message", eventBody);
       global.io.to(`user_${recipientIdStr}`).emit("chat:incoming_message", {
-        message: newMessage,
-        conversationId: id,
+        ...eventBody,
         conversation: {
-          _id: conversation._id,
+          _id: conversationIdStr,
           lastMessage: conversation.lastMessage,
           unreadCount: currentCount + 1,
         },
       });
 
-      // 3. Confirm to sender's private user room
-      global.io.to(`user_${currentUserIdStr}`).emit("chat:message_sent", {
-        message: newMessage,
-        conversationId: id,
-      });
+      // Sender confirmation (other tabs / devices)
+      global.io.to(`user_${currentUserIdStr}`).emit("chat:message_sent", eventBody);
+      global.io.to(`user_${currentUserIdStr}`).emit("chat:new_message", eventBody);
     }
 
     res.status(201).json({
       success: true,
-      message: newMessage,
+      message: messagePayload,
       conversationLastMessage: conversation.lastMessage,
     });
   } catch (error) {
