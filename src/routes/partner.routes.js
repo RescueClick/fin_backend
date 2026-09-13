@@ -1623,7 +1623,7 @@ router.post(
         }
       }
 
-      const newDocs = req.files.map((file, index) => {
+      const newDocs = (req.files || []).map((file, index) => {
         if (!file.location) {
           throw new Error("S3 upload failed: missing file location");
         }
@@ -1912,6 +1912,14 @@ router.post(
       });
     } catch (err) {
       console.error(err);
+      if (err?.name === "ValidationError") {
+        const errors = Object.values(err.errors || {}).map((e) => e.message);
+        return res.status(400).json({
+          message: "Validation failed",
+          errors,
+          error: err.message,
+        });
+      }
       res.status(500).json({ message: "Server error", error: err.message });
     }
   }

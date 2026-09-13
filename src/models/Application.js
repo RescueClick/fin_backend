@@ -84,12 +84,23 @@ const CustomerSchema = new mongoose.Schema(
     gender: {
       type: String,
       enum: ["Male", "Female", "Other"],
-      set: (v) => v.charAt(0).toUpperCase() + v.slice(1).toLowerCase()
+      set: (v) => {
+        if (v == null || v === "") return v;
+        const s = String(v).trim();
+        if (!s) return s;
+        return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+      },
     },
     maritalStatus: {
       type: String,
       enum: ["Single", "Married", "Divorced", "Widowed"],
-      set: (v) => v.charAt(0).toUpperCase() + v.slice(1).toLowerCase()
+      set: (v) => {
+        if (v == null || v === "") return v;
+        const s = String(v).trim().toLowerCase();
+        if (s === "widow" || s === "widowed") return "Widowed";
+        if (!s) return s;
+        return s.charAt(0).toUpperCase() + s.slice(1);
+      },
     },
     spouseName: { type: String, trim: true }, // ✅ added from payload
 
