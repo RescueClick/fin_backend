@@ -1268,7 +1268,9 @@ router.post(
         existingApp.asmId = assignedAsmId;
         // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to SUBMITTED
         // (Option A: new applications should not start in DRAFT)
-        if (existingApp.status !== "DOC_INCOMPLETE") {
+        if (applicationStatus === "DRAFT") {
+          existingApp.status = existingApp.status === "DOC_INCOMPLETE" ? "DOC_INCOMPLETE" : "DRAFT";
+        } else if (existingApp.status !== "DOC_INCOMPLETE") {
           existingApp.status = "SUBMITTED";
         }
 
@@ -1330,7 +1332,7 @@ router.post(
             businessInfo,
             propertyInfo,
             coApplicant,
-            status: "SUBMITTED",
+            status: applicationStatus === "DRAFT" ? "DRAFT" : "SUBMITTED",
             stageHistory: [],
           });
           appCreated = true;
@@ -1764,7 +1766,9 @@ router.post(
         existingApp.asmId = assignedAsmId;
         // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to SUBMITTED
         // (Option A: new applications should not start in DRAFT)
-        if (existingApp.status !== "DOC_INCOMPLETE") {
+        if (applicationStatus === "DRAFT") {
+          existingApp.status = existingApp.status === "DOC_INCOMPLETE" ? "DOC_INCOMPLETE" : "DRAFT";
+        } else if (existingApp.status !== "DOC_INCOMPLETE") {
           existingApp.status = "SUBMITTED";
         }
 
@@ -1826,7 +1830,7 @@ router.post(
             businessInfo,
             propertyInfo,
             coApplicant,
-            status: "SUBMITTED",
+            status: applicationStatus === "DRAFT" ? "DRAFT" : "SUBMITTED",
             stageHistory: [],
           });
           appCreated = true;
