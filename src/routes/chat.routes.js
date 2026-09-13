@@ -16,6 +16,141 @@ const router = express.Router();
 // Only internal staff (SUPER_ADMIN, ASM, RSM, RM) can access the chat system
 const ALLOWED_CHAT_ROLES = [ROLES.SUPER_ADMIN, ROLES.ASM, ROLES.RSM, ROLES.RM];
 
+function sid(v) {
+  return v == null ? "" : String(v);
+}
+
+/**
+ * Who this staff member may start/continue chats with.
+ * - SUPER_ADMIN / ADMIN → everyone (returns null)
+ * - Others → reporting-line only (parents + subordinates)
+ */
+async function getAllowedChatPeerIds(currentUser) {
+  if (!currentUser?._id) return new Set();
+
+  const me = currentUser._id;
+  const meStr = sid(me);
+  const role = currentUser.role;
+
+  if (role === ROLES.SUPER_ADMIN || role === ROLES.ADMIN) {
+    return null; // unrestricted
+  }
+
+  const allowed = new Set();
+  const staffBase = {
+    deletedAt: null,
+    status: { $ne: "SUSPENDED" },
+    role: { $in: ALLOWED_CHAT_ROLES },
+  };
+
+  // Everyone may chat Admin
+  const admins = await User.find({
+    ...staffBase,
+    role: { $in: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+  })
+    .select("_id")
+    .lean();
+  for (const u of admins) allowed.add(sid(u._id));
+
+  // Direct parent links on my profile
+  [
+    currentUser.adminId,
+    currentUser.rsmId,
+    currentUser.asmId,
+    currentUser.personalAsmId,
+    currentUser.businessAsmId,
+    currentUser.homeLapAsmId,
+    currentUser.personalRsmId,
+    currentUser.businessRsmId,
+    currentUser.homeLapRsmId,
+    currentUser.businessHomeRsmId,
+  ]
+    .filter(Boolean)
+    .forEach((id) => allowed.add(sid(id)));
+
+  if (role === ROLES.RSM) {
+    // Specialized ASMs under this Senior RSM
+    const asms = await User.find({
+      ...staffBase,
+      role: ROLES.ASM,
+      $or: [{ rsmId: me }, { asmId: me }],
+    })
+      .select("_id")
+      .lean();
+    const asmIds = asms.map((a) => a._id);
+    for (const a of asms) allowed.add(sid(a._id));
+
+    // RMs under those ASMs or directly linked to this RSM
+    const rmOr = [
+      { personalRsmId: me },
+      { businessRsmId: me },
+      { homeLapRsmId: me },
+      { businessHomeRsmId: me },
+      { rsmId: me },
+      { asmId: me },
+    ];
+    if (asmIds.length) {
+      rmOr.push(
+        { personalAsmId: { $in: asmIds } },
+        { businessAsmId: { $in: asmIds } },
+        { homeLapAsmId: { $in: asmIds } },
+        { asmId: { $in: asmIds } },
+        { rsmId: { $in: asmIds } }
+      );
+    }
+    const rms = await User.find({ ...staffBase, role: ROLES.RM, $or: rmOr })
+      .select("_id")
+      .lean();
+    for (const r of rms) allowed.add(sid(r._id));
+
+    // Mid-level RSM/ASM children that only store asmId → me (legacy)
+    const kids = await User.find({
+      ...staffBase,
+      role: { $in: [ROLES.ASM, ROLES.RSM, ROLES.RM] },
+      $or: [{ asmId: me }, { rsmId: me }],
+    })
+      .select("_id")
+      .lean();
+    for (const k of kids) allowed.add(sid(k._id));
+  }
+
+  if (role === ROLES.ASM) {
+    // RMs / RSMs reporting to this ASM
+    const reports = await User.find({
+      ...staffBase,
+      role: { $in: [ROLES.RM, ROLES.RSM] },
+      $or: [
+        { personalAsmId: me },
+        { businessAsmId: me },
+        { homeLapAsmId: me },
+        { personalRsmId: me },
+        { businessRsmId: me },
+        { homeLapRsmId: me },
+        { businessHomeRsmId: me },
+        { asmId: me },
+        { rsmId: me },
+      ],
+    })
+      .select("_id")
+      .lean();
+    for (const r of reports) allowed.add(sid(r._id));
+  }
+
+  if (role === ROLES.RM) {
+    // Parents already added from profile fields — nothing else
+  }
+
+  allowed.delete(meStr);
+  return allowed;
+}
+
+async function assertCanChatWith(currentUser, targetUser) {
+  if (!targetUser) return false;
+  const allowed = await getAllowedChatPeerIds(currentUser);
+  if (allowed === null) return true;
+  return allowed.has(sid(targetUser._id));
+}
+
 router.use(auth);
 router.use(requireRole(ALLOWED_CHAT_ROLES));
 
@@ -96,7 +231,7 @@ async function enrichLoanRef(loanRefInput) {
 
 // ============================================================================
 // 1. GET /api/chat/contacts
-// Fetch list of internal staff colleagues for starting or continuing chats
+// Admin → all staff. Others → reporting-line only.
 // ============================================================================
 router.get("/contacts", async (req, res) => {
   try {
@@ -106,7 +241,8 @@ router.get("/contacts", async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const { search, scope } = req.query;
+    const { search } = req.query;
+    const allowedIds = await getAllowedChatPeerIds(currentUser);
 
     const query = {
       _id: { $ne: currentUser._id },
@@ -115,9 +251,18 @@ router.get("/contacts", async (req, res) => {
       status: { $ne: "SUSPENDED" },
     };
 
+    // Non-admin: hard-filter to hierarchy peers only
+    if (allowedIds !== null) {
+      const idList = Array.from(allowedIds).filter((id) => mongoose.Types.ObjectId.isValid(id));
+      query._id = { $ne: currentUser._id, $in: idList };
+      if (idList.length === 0) {
+        return res.json({ success: true, contacts: [], total: 0, hierarchyOnly: true });
+      }
+    }
+
     if (search && search.trim()) {
       const term = search.trim();
-      const regex = new RegExp(term, "i");
+      const regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
       query.$or = [
         { firstName: regex },
         { lastName: regex },
@@ -126,83 +271,35 @@ router.get("/contacts", async (req, res) => {
         { employeeId: regex },
         { asmCode: regex },
         { rmCode: regex },
+        { rsmCode: regex },
       ];
     }
 
     const users = await User.find(query)
       .select(
-        "_id firstName lastName email phone role rsmType employeeId asmCode rmCode asmId personalRsmId businessHomeRsmId businessRsmId homeLapRsmId status createdAt"
+        "_id firstName lastName email phone role rsmType asmType employeeId asmCode rmCode rsmCode status"
       )
       .sort({ firstName: 1 })
       .lean();
 
-    // Map hierarchy relationship flags relative to the logged-in user
-    const curRole = currentUser.role;
-    const curIdStr = currentUser._id.toString();
-    const curAsmStr = currentUser.asmId?.toString();
-
-    const formattedContacts = users.map((u) => {
-      let isMyTeam = false;
-      const uIdStr = u._id.toString();
-
-      if (curRole === ROLES.SUPER_ADMIN) {
-        isMyTeam = true;
-      } else if (curRole === ROLES.ASM) {
-        // ASM's direct team: RSMs reporting to this ASM, RMs under this ASM, and Admin
-        if (u.role === ROLES.SUPER_ADMIN) isMyTeam = true;
-        if (u.asmId && u.asmId.toString() === curIdStr) isMyTeam = true;
-      } else if (curRole === ROLES.RSM) {
-        // RSM's team: parent ASM, Admin, and RMs assigned to this RSM
-        if (u.role === ROLES.SUPER_ADMIN) isMyTeam = true;
-        if (curAsmStr && uIdStr === curAsmStr) isMyTeam = true;
-        if (
-          u.role === ROLES.RM &&
-          (u.personalRsmId?.toString() === curIdStr ||
-            u.businessHomeRsmId?.toString() === curIdStr ||
-            u.businessRsmId?.toString() === curIdStr ||
-            u.homeLapRsmId?.toString() === curIdStr)
-        ) {
-          isMyTeam = true;
-        }
-      } else if (curRole === ROLES.RM) {
-        // RM's supervisors: their parent ASM, their assigned RSMs, and Admin
-        if (u.role === ROLES.SUPER_ADMIN) isMyTeam = true;
-        if (curAsmStr && uIdStr === curAsmStr) isMyTeam = true;
-        if (
-          [
-            currentUser.personalRsmId?.toString(),
-            currentUser.businessHomeRsmId?.toString(),
-            currentUser.businessRsmId?.toString(),
-            currentUser.homeLapRsmId?.toString(),
-          ].includes(uIdStr)
-        ) {
-          isMyTeam = true;
-        }
-      }
-
-      return {
-        _id: u._id,
-        firstName: u.firstName || "",
-        lastName: u.lastName || "",
-        fullName: `${u.firstName || ""} ${u.lastName || ""}`.trim() || "Staff Member",
-        email: u.email || "",
-        phone: u.phone || "",
-        role: u.role,
-        rsmType: u.rsmType || null,
-        employeeId: u.employeeId || u.asmCode || u.rmCode || "",
-        isMyTeam,
-      };
-    });
-
-    const finalContacts =
-      scope === "team"
-        ? formattedContacts.filter((c) => c.isMyTeam)
-        : formattedContacts;
+    const contacts = users.map((u) => ({
+      _id: u._id,
+      firstName: u.firstName || "",
+      lastName: u.lastName || "",
+      fullName: `${u.firstName || ""} ${u.lastName || ""}`.trim() || "Staff Member",
+      email: u.email || "",
+      phone: u.phone || "",
+      role: u.role,
+      rsmType: u.rsmType || u.asmType || null,
+      employeeId: u.employeeId || u.asmCode || u.rmCode || u.rsmCode || "",
+      isMyTeam: true,
+    }));
 
     res.json({
       success: true,
-      contacts: finalContacts,
-      total: finalContacts.length,
+      contacts,
+      total: contacts.length,
+      hierarchyOnly: allowedIds !== null,
     });
   } catch (error) {
     console.error("Error fetching chat contacts:", error);
@@ -353,10 +450,24 @@ router.post("/conversations", async (req, res) => {
       _id: participantId,
       role: { $in: ALLOWED_CHAT_ROLES },
       deletedAt: null,
-    }).select("_id firstName lastName email phone role rsmType employeeId asmCode rmCode");
+    }).select(
+      "_id firstName lastName email phone role rsmType employeeId asmCode rmCode adminId rsmId asmId personalAsmId businessAsmId homeLapAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId"
+    );
 
     if (!targetUser) {
       return res.status(404).json({ message: "Colleague not found or ineligible for chat" });
+    }
+
+    const currentUser = await User.findById(currentUserId).lean();
+    if (!currentUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const allowed = await assertCanChatWith(currentUser, targetUser);
+    if (!allowed) {
+      return res.status(403).json({
+        message: "You can only chat with Admin or staff in your reporting line",
+      });
     }
 
     // Check if conversation already exists between the two participants
@@ -798,22 +909,65 @@ router.post("/upload", upload.array("files", 5), async (req, res) => {
 
 // ============================================================================
 // 9. GET /api/chat/search-loans
-// Search applications by appNo, applicant name, mobile, PAN, email
+// Search applications under the staff member we are chatting with only
+// Query: q (optional search), forUserId (required — chat peer)
 // ============================================================================
+function loanFilterForStaffUser(user) {
+  if (!user?._id) return null;
+  const id = user._id;
+  switch (user.role) {
+    case ROLES.RM:
+      return { rmId: id };
+    case ROLES.ASM:
+      return { asmId: id };
+    case ROLES.RSM:
+      return { rsmId: id };
+    case ROLES.SUPER_ADMIN:
+    case ROLES.ADMIN:
+      // Admin does not own a loan book — caller should fall back to the other party
+      return null;
+    default:
+      return { _id: { $in: [] } };
+  }
+}
+
 router.get("/search-loans", async (req, res) => {
   try {
-    const { q } = req.query;
-    if (!q || !q.trim() || q.trim().length < 2) {
-      return res.json({ success: true, loans: [] });
+    const { q, forUserId } = req.query;
+    const currentUserId = req.user.sub;
+
+    if (!forUserId) {
+      return res.status(400).json({
+        message: "forUserId is required — only loans under the chat peer are listed",
+      });
     }
 
-    const term = q.trim();
-    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(escaped, "i");
+    const peer = await User.findById(forUserId).select("_id role firstName lastName").lean();
+    if (!peer) {
+      return res.status(404).json({ message: "Chat peer not found" });
+    }
 
-    const applications = await Application.find({
+    // Scope to the person we are chatting with. If they are Admin, scope to me instead.
+    let ownerFilter = loanFilterForStaffUser(peer);
+    if (!ownerFilter) {
+      const me = await User.findById(currentUserId).select("_id role").lean();
+      ownerFilter = loanFilterForStaffUser(me);
+    }
+    if (!ownerFilter) {
+      // Admin ↔ Admin: still require a search term, no unrestricted dump
+      ownerFilter = {};
+    }
+
+    const term = (q || "").trim();
+    const filter = {
       deletedAt: null,
-      $or: [
+      ...ownerFilter,
+    };
+
+    if (term.length >= 2) {
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const regex = new RegExp(escaped, "i");
+      filter.$or = [
         { appNo: regex },
         { "customer.firstName": regex },
         { "customer.middleName": regex },
@@ -822,7 +976,6 @@ router.get("/search-loans", async (req, res) => {
         { "customer.alternatePhone": regex },
         { "customer.panNumber": regex },
         { "customer.email": regex },
-        // Full name contains search term (e.g. "Anil Bagad")
         {
           $expr: {
             $regexMatch: {
@@ -844,13 +997,18 @@ router.get("/search-loans", async (req, res) => {
             },
           },
         },
-      ],
-    })
+      ];
+    } else if (!ownerFilter.rmId && !ownerFilter.asmId && !ownerFilter.rsmId) {
+      // No peer book + no search → empty (never dump all loans)
+      return res.json({ success: true, loans: [], peerName: `${peer.firstName || ""} ${peer.lastName || ""}`.trim() });
+    }
+
+    const applications = await Application.find(filter)
       .select(
         "appNo loanType status requestedAmount approvedLoanAmount customerId customer.firstName customer.middleName customer.lastName customer.phone customer.panNumber customer.email customer.loanAmount createdAt"
       )
       .sort({ createdAt: -1 })
-      .limit(20)
+      .limit(30)
       .lean();
 
     const formattedLoans = applications.map((app) => {
@@ -874,7 +1032,12 @@ router.get("/search-loans", async (req, res) => {
       };
     });
 
-    res.json({ success: true, loans: formattedLoans });
+    res.json({
+      success: true,
+      loans: formattedLoans,
+      peerName: `${peer.firstName || ""} ${peer.lastName || ""}`.trim(),
+      peerRole: peer.role,
+    });
   } catch (error) {
     console.error("Error searching loans for chat:", error);
     res.status(500).json({ message: "Failed to search loans", error: error.message });
