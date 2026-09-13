@@ -19,8 +19,8 @@ import { pipeline } from "stream/promises";
 
 const router = express.Router();
 
-// Only internal staff (SUPER_ADMIN, ASM, RSM, RM) can access the chat system
-const ALLOWED_CHAT_ROLES = [ROLES.SUPER_ADMIN, ROLES.ASM, ROLES.RSM, ROLES.RM];
+// Only internal staff (SUPER_ADMIN, ADMIN, ASM, RSM, RM) can access the chat system
+const ALLOWED_CHAT_ROLES = [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.ASM, ROLES.RSM, ROLES.RM];
 
 function sid(v) {
   return v == null ? "" : String(v);
