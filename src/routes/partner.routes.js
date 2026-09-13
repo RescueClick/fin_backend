@@ -1454,7 +1454,21 @@ router.post(
         }
       }
 
-      // Parse input JSON
+      // Parse input JSON (support string from FormData/JSON or direct parsed object)
+      let parsedPayload = {};
+      try {
+        if (typeof req.body?.data === "string") {
+          parsedPayload = JSON.parse(req.body.data || "{}");
+        } else if (req.body?.data && typeof req.body.data === "object") {
+          parsedPayload = req.body.data;
+        } else if (req.body && typeof req.body === "object") {
+          parsedPayload = req.body;
+        }
+      } catch (parseErr) {
+        console.warn("Failed to parse request body data:", parseErr.message);
+        parsedPayload = {};
+      }
+
       const {
         customer,
         product,
@@ -1463,7 +1477,7 @@ router.post(
         coApplicant,
         partnerReferralCode,
         status: applicationStatus,
-      } = JSON.parse(req.body.data || "{}");
+      } = parsedPayload;
 
       const validationErrors = validateApplicationPayload({
         customer,
@@ -4490,7 +4504,7 @@ router.post(
     try {
       const partnerId = req.user.sub;
       const { id } = req.params;
-      const { docType } = req.query;
+      const docType = req.query.docType || req.body?.docType;
 
       console.log('Document upload request:', {
         partnerId,
