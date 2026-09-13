@@ -7,6 +7,7 @@ import { ROLES, RSM_TYPES } from "../config/roles.js";
 import { User } from "../models/User.js";
 import { Application, APP_STATUSES } from "../models/Application.js";
 import { BankMaster } from "../models/BankMaster.js";
+import { BankRm } from "../models/BankRm.js";
 import { Payout } from "../models/Payout.js";
 import { Incentive } from "../models/Incentive.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
@@ -282,7 +283,7 @@ router.get(["/my-rsms", "/my-asms"], auth, requireRole(ROLES.RSM, ROLES.ASM, ROL
     const managerId = req.user.sub;
     let filter;
 
-    if (req.user.role === ROLES.SUPER_ADMIN) {
+    if (req.user.role === ROLES.SUPER_ADMIN || req.user.role === ROLES.ADMIN) {
       filter = { role: ROLES.ASM, status: "ACTIVE" };
     } else {
       filter = {
@@ -1597,6 +1598,293 @@ router.get("/banks", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
     return res.status(500).json({ message: "Error fetching banks" });
   }
 });
+
+// ==================== BANK RM DIRECTORY (RSM / ASM) ====================
+
+const pickContact = (body = {}, prefix) => {
+  const nested = body?.[prefix] && typeof body[prefix] === "object" ? body[prefix] : {};
+  const name = String(nested.name ?? body[`${prefix}Name`] ?? "").trim();
+  const phone = String(nested.phone ?? body[`${prefix}Phone`] ?? "").trim();
+  const email = String(nested.email ?? body[`${prefix}Email`] ?? "")
+    .trim()
+    .toLowerCase();
+  return { name, phone, email };
+};
+
+const normalizeBankRmPayload = (body = {}) => {
+  const pick = (key) => String(body[key] ?? "").trim();
+  const rm = pickContact(body, "rm");
+  const asm = pickContact(body, "asm");
+  const rsm = pickContact(body, "rsm");
+  return {
+    bankNbfcName: pick("bankNbfcName"),
+    loginCode: pick("loginCode"),
+    product: pick("product"),
+    marketType: pick("marketType"),
+    city: pick("city"),
+    state: pick("state"),
+    company: pick("company"),
+    rm,
+    asm,
+    rsm,
+    rmName: rm.name,
+    rmPhone: rm.phone,
+    rmEmail: rm.email,
+  };
+};
+
+const validateOptionalEmail = (email, label) => {
+  if (!email) return null;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return `${label} email must be a valid email address`;
+  }
+  return null;
+};
+
+const validateOptionalPhone = (phone, label) => {
+  if (!phone) return null;
+  const digits = String(phone).replace(/\D/g, "");
+  if (digits.length < 10) {
+    return `${label} phone must be at least 10 digits`;
+  }
+  return null;
+};
+
+const validateBankRmPayload = (payload) => {
+  const required = [
+    "bankNbfcName",
+    "loginCode",
+    "product",
+    "marketType",
+    "city",
+    "state",
+    "company",
+  ];
+  const missing = required.filter((key) => !payload[key]);
+  if (missing.length) {
+    return `Missing required fields: ${missing.join(", ")}`;
+  }
+
+  for (const [key, label] of [
+    ["rm", "RM"],
+    ["asm", "ASM"],
+    ["rsm", "RSM"],
+  ]) {
+    const contact = payload[key] || {};
+    const phoneErr = validateOptionalPhone(contact.phone, label);
+    if (phoneErr) return phoneErr;
+    const emailErr = validateOptionalEmail(contact.email, label);
+    if (emailErr) return emailErr;
+  }
+  return null;
+};
+
+const buildBankRmActiveFilter = (query = {}) => {
+  const filter = { isActive: true };
+  if (query.bank) filter.bankNbfcName = String(query.bank).trim();
+  if (query.product) filter.product = String(query.product).trim();
+  if (query.marketType) filter.marketType = String(query.marketType).trim();
+  if (query.state) filter.state = String(query.state).trim();
+  if (query.city) filter.city = String(query.city).trim();
+  return filter;
+};
+
+// GET /api/rsm/bank-rms/filter-options
+// Cascading distinct values for ASM/RSM search dropdowns
+router.get(
+  "/bank-rms/filter-options",
+  auth,
+  requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { bank, product, marketType, state } = req.query || {};
+      const base = { isActive: true };
+
+      const banks = await BankRm.distinct("bankNbfcName", base);
+
+      const productFilter = { ...base };
+      if (bank) productFilter.bankNbfcName = String(bank).trim();
+      const products = await BankRm.distinct("product", productFilter);
+
+      const marketFilter = { ...productFilter };
+      if (product) marketFilter.product = String(product).trim();
+      const marketTypes = await BankRm.distinct("marketType", marketFilter);
+
+      const stateFilter = { ...marketFilter };
+      if (marketType) stateFilter.marketType = String(marketType).trim();
+      const states = await BankRm.distinct("state", stateFilter);
+
+      const cityFilter = { ...stateFilter };
+      if (state) cityFilter.state = String(state).trim();
+      const cities = await BankRm.distinct("city", cityFilter);
+
+      const sortAlpha = (arr) =>
+        (arr || [])
+          .map((v) => String(v || "").trim())
+          .filter(Boolean)
+          .sort((a, b) => a.localeCompare(b));
+
+      return res.json({
+        banks: sortAlpha(banks),
+        products: sortAlpha(products),
+        marketTypes: sortAlpha(marketTypes),
+        states: sortAlpha(states),
+        cities: sortAlpha(cities),
+      });
+    } catch (err) {
+      console.error("Error fetching bank RM filter options:", err);
+      return res.status(500).json({ message: "Error fetching filter options" });
+    }
+  }
+);
+
+// GET /api/rsm/bank-rms
+router.get(
+  "/bank-rms",
+  auth,
+  requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const filter = buildBankRmActiveFilter(req.query || {});
+      const bankRms = await BankRm.find(filter)
+        .populate("createdBy", "firstName lastName role email")
+        .populate("updatedBy", "firstName lastName role email")
+        .sort({ updatedAt: -1, bankNbfcName: 1, city: 1 })
+        .lean();
+      return res.json({ bankRms });
+    } catch (err) {
+      console.error("Error fetching bank RMs:", err);
+      return res.status(500).json({ message: "Error fetching bank RMs" });
+    }
+  }
+);
+
+// POST /api/rsm/bank-rms (RSM + admin only)
+router.post(
+  "/bank-rms",
+  auth,
+  requireRole(ROLES.RSM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const payload = normalizeBankRmPayload(req.body);
+      const validationError = validateBankRmPayload(payload);
+      if (validationError) {
+        return res.status(400).json({ message: validationError });
+      }
+
+      const bankRm = await BankRm.create({
+        ...payload,
+        createdBy: req.user.sub,
+      });
+
+      return res.status(201).json({
+        message: "Bank RM created successfully",
+        bankRm,
+      });
+    } catch (err) {
+      console.error("Error creating bank RM (rsm):", err);
+      return res.status(500).json({ message: "Internal Server Error" });
+    }
+  }
+);
+
+// PUT /api/rsm/bank-rms/:id
+router.put(
+  "/bank-rms/:id",
+  auth,
+  requireRole(ROLES.RSM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params || {};
+      const existing = await BankRm.findById(id);
+      if (!existing) {
+        return res.status(404).json({ message: "Bank RM not found" });
+      }
+
+      const existingObj = existing.toObject();
+      const mergeBody = {
+        bankNbfcName: req.body?.bankNbfcName ?? existingObj.bankNbfcName,
+        loginCode: req.body?.loginCode ?? existingObj.loginCode,
+        product: req.body?.product ?? existingObj.product,
+        marketType: req.body?.marketType ?? existingObj.marketType,
+        city: req.body?.city ?? existingObj.city,
+        state: req.body?.state ?? existingObj.state,
+        company: req.body?.company ?? existingObj.company,
+        rm: {
+          name: req.body?.rmName ?? req.body?.rm?.name ?? existingObj.rm?.name ?? existingObj.rmName,
+          phone: req.body?.rmPhone ?? req.body?.rm?.phone ?? existingObj.rm?.phone ?? existingObj.rmPhone,
+          email: req.body?.rmEmail ?? req.body?.rm?.email ?? existingObj.rm?.email ?? existingObj.rmEmail,
+        },
+        asm: {
+          name: req.body?.asmName ?? req.body?.asm?.name ?? existingObj.asm?.name,
+          phone: req.body?.asmPhone ?? req.body?.asm?.phone ?? existingObj.asm?.phone,
+          email: req.body?.asmEmail ?? req.body?.asm?.email ?? existingObj.asm?.email,
+        },
+        rsm: {
+          name: req.body?.rsmName ?? req.body?.rsm?.name ?? existingObj.rsm?.name,
+          phone: req.body?.rsmPhone ?? req.body?.rsm?.phone ?? existingObj.rsm?.phone,
+          email: req.body?.rsmEmail ?? req.body?.rsm?.email ?? existingObj.rsm?.email,
+        },
+      };
+
+      const payload = normalizeBankRmPayload(mergeBody);
+      const validationError = validateBankRmPayload(payload);
+      if (validationError) {
+        return res.status(400).json({ message: validationError });
+      }
+
+      Object.assign(existing, payload);
+      existing.updatedBy = req.user.sub;
+
+      if (req.body?.isActive !== undefined) {
+        const activeVal =
+          req.body.isActive === true ||
+          req.body.isActive === "true" ||
+          req.body.isActive === 1 ||
+          req.body.isActive === "1";
+        existing.isActive = Boolean(activeVal);
+      }
+
+      await existing.save();
+      return res.json({
+        message: "Bank RM updated successfully",
+        bankRm: existing,
+      });
+    } catch (err) {
+      console.error("Error updating bank RM (rsm):", err);
+      return res.status(500).json({ message: "Internal Server Error" });
+    }
+  }
+);
+
+// DELETE /api/rsm/bank-rms/:id (soft delete)
+router.delete(
+  "/bank-rms/:id",
+  auth,
+  requireRole(ROLES.RSM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params || {};
+      const updated = await BankRm.findByIdAndUpdate(
+        id,
+        { $set: { isActive: false, updatedBy: req.user.sub } },
+        { new: true }
+      ).lean();
+
+      if (!updated) {
+        return res.status(404).json({ message: "Bank RM not found" });
+      }
+
+      return res.json({
+        message: "Bank RM deleted successfully",
+        bankRm: updated,
+      });
+    } catch (err) {
+      console.error("Error deleting bank RM (rsm):", err);
+      return res.status(500).json({ message: "Error deleting bank RM" });
+    }
+  }
+);
 
 // GET /api/rsm/rm/:rmId/analytics
 // RSM views analytics for a specific RM

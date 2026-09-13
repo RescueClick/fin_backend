@@ -176,12 +176,15 @@ router.post(
 );
 
 // GET /api/asm/get-rsms (or subordinate specialized managers)
+// Senior RSM: lists ASMs under them. Admin: lists all active ASMs.
 router.get(["/get-rsms", "/get-asms"], auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const managerId = req.user.sub;
+    const isAdmin =
+      req.user.role === ROLES.SUPER_ADMIN || req.user.role === ROLES.ADMIN;
     let filter;
 
-    if (req.user.role === ROLES.SUPER_ADMIN) {
+    if (isAdmin) {
       filter = { role: ROLES.ASM, status: "ACTIVE" };
     } else {
       filter = {

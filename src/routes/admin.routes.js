@@ -25,6 +25,7 @@ import { ReferralReward } from "../models/ReferralReward.js";
 import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
 import { settlePendingEarnings } from "../utils/walletBalance.js";
 import { BankMaster } from "../models/BankMaster.js";
+import { BankRm } from "../models/BankRm.js";
 import { upload } from "../middleware/upload.js";
 import mongoose from "mongoose";
 import fs from "fs";
@@ -533,6 +534,257 @@ router.delete("/banks/:bankId", auth, requireRole(ROLES.SUPER_ADMIN), async (req
   } catch (err) {
     console.error("Error deleting bank (admin):", err);
     return res.status(500).json({ message: "Error deleting bank" });
+  }
+});
+
+// ==================== BANK RM DIRECTORY (ADMIN) ====================
+
+const pickContact = (body = {}, prefix) => {
+  const nested = body?.[prefix] && typeof body[prefix] === "object" ? body[prefix] : {};
+  const name = String(nested.name ?? body[`${prefix}Name`] ?? "").trim();
+  const phone = String(nested.phone ?? body[`${prefix}Phone`] ?? "").trim();
+  const email = String(nested.email ?? body[`${prefix}Email`] ?? "")
+    .trim()
+    .toLowerCase();
+  return { name, phone, email };
+};
+
+const normalizeBankRmPayload = (body = {}) => {
+  const pick = (key) => String(body[key] ?? "").trim();
+  const rm = pickContact(body, "rm");
+  const asm = pickContact(body, "asm");
+  const rsm = pickContact(body, "rsm");
+  return {
+    bankNbfcName: pick("bankNbfcName"),
+    loginCode: pick("loginCode"),
+    product: pick("product"),
+    marketType: pick("marketType"),
+    city: pick("city"),
+    state: pick("state"),
+    company: pick("company"),
+    rm,
+    asm,
+    rsm,
+    // keep legacy flat RM fields in sync for older UIs
+    rmName: rm.name,
+    rmPhone: rm.phone,
+    rmEmail: rm.email,
+  };
+};
+
+const validateOptionalEmail = (email, label) => {
+  if (!email) return null;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return `${label} email must be a valid email address`;
+  }
+  return null;
+};
+
+const validateOptionalPhone = (phone, label) => {
+  if (!phone) return null;
+  const digits = String(phone).replace(/\D/g, "");
+  if (digits.length < 10) {
+    return `${label} phone must be at least 10 digits`;
+  }
+  return null;
+};
+
+const validateBankRmPayload = (payload) => {
+  const required = [
+    "bankNbfcName",
+    "loginCode",
+    "product",
+    "marketType",
+    "city",
+    "state",
+    "company",
+  ];
+  const missing = required.filter((key) => !payload[key]);
+  if (missing.length) {
+    return `Missing required fields: ${missing.join(", ")}`;
+  }
+
+  for (const [key, label] of [
+    ["rm", "RM"],
+    ["asm", "ASM"],
+    ["rsm", "RSM"],
+  ]) {
+    const contact = payload[key] || {};
+    const phoneErr = validateOptionalPhone(contact.phone, label);
+    if (phoneErr) return phoneErr;
+    const emailErr = validateOptionalEmail(contact.email, label);
+    if (emailErr) return emailErr;
+  }
+  return null;
+};
+
+// GET /api/admin/bank-rms
+router.get("/bank-rms", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const {
+      q,
+      bank,
+      product,
+      marketType,
+      state,
+      city,
+      includeInactive,
+    } = req.query || {};
+
+    const filter = {};
+    if (includeInactive !== "true" && includeInactive !== "1") {
+      filter.isActive = true;
+    }
+    if (bank) filter.bankNbfcName = String(bank).trim();
+    if (product) filter.product = String(product).trim();
+    if (marketType) filter.marketType = String(marketType).trim();
+    if (state) filter.state = String(state).trim();
+    if (city) filter.city = String(city).trim();
+
+    const search = String(q || "").trim();
+    if (search) {
+      const rx = { $regex: search, $options: "i" };
+      filter.$or = [
+        { bankNbfcName: rx },
+        { loginCode: rx },
+        { product: rx },
+        { marketType: rx },
+        { city: rx },
+        { state: rx },
+        { company: rx },
+        { rmName: rx },
+        { rmPhone: rx },
+        { rmEmail: rx },
+        { "rm.name": rx },
+        { "rm.phone": rx },
+        { "rm.email": rx },
+        { "asm.name": rx },
+        { "asm.phone": rx },
+        { "asm.email": rx },
+        { "rsm.name": rx },
+        { "rsm.phone": rx },
+        { "rsm.email": rx },
+      ];
+    }
+
+    const bankRms = await BankRm.find(filter)
+      .populate("createdBy", "firstName lastName role email")
+      .populate("updatedBy", "firstName lastName role email")
+      .sort({ updatedAt: -1 })
+      .lean();
+    return res.json({ bankRms });
+  } catch (err) {
+    console.error("Error fetching bank RMs (admin):", err);
+    return res.status(500).json({ message: "Error fetching bank RMs" });
+  }
+});
+
+// POST /api/admin/bank-rms
+router.post("/bank-rms", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const payload = normalizeBankRmPayload(req.body);
+    const validationError = validateBankRmPayload(payload);
+    if (validationError) {
+      return res.status(400).json({ message: validationError });
+    }
+
+    const bankRm = await BankRm.create({
+      ...payload,
+      createdBy: req.user.sub,
+    });
+
+    return res.status(201).json({
+      message: "Bank RM created successfully",
+      bankRm,
+    });
+  } catch (err) {
+    console.error("Error creating bank RM:", err);
+    return res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+// PUT /api/admin/bank-rms/:id
+router.put("/bank-rms/:id", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    const existing = await BankRm.findById(id);
+    if (!existing) {
+      return res.status(404).json({ message: "Bank RM not found" });
+    }
+
+    const existingObj = existing.toObject();
+    const mergeBody = {
+      bankNbfcName: req.body?.bankNbfcName ?? existingObj.bankNbfcName,
+      loginCode: req.body?.loginCode ?? existingObj.loginCode,
+      product: req.body?.product ?? existingObj.product,
+      marketType: req.body?.marketType ?? existingObj.marketType,
+      city: req.body?.city ?? existingObj.city,
+      state: req.body?.state ?? existingObj.state,
+      company: req.body?.company ?? existingObj.company,
+      rm: {
+        name: req.body?.rmName ?? req.body?.rm?.name ?? existingObj.rm?.name ?? existingObj.rmName,
+        phone: req.body?.rmPhone ?? req.body?.rm?.phone ?? existingObj.rm?.phone ?? existingObj.rmPhone,
+        email: req.body?.rmEmail ?? req.body?.rm?.email ?? existingObj.rm?.email ?? existingObj.rmEmail,
+      },
+      asm: {
+        name: req.body?.asmName ?? req.body?.asm?.name ?? existingObj.asm?.name,
+        phone: req.body?.asmPhone ?? req.body?.asm?.phone ?? existingObj.asm?.phone,
+        email: req.body?.asmEmail ?? req.body?.asm?.email ?? existingObj.asm?.email,
+      },
+      rsm: {
+        name: req.body?.rsmName ?? req.body?.rsm?.name ?? existingObj.rsm?.name,
+        phone: req.body?.rsmPhone ?? req.body?.rsm?.phone ?? existingObj.rsm?.phone,
+        email: req.body?.rsmEmail ?? req.body?.rsm?.email ?? existingObj.rsm?.email,
+      },
+    };
+
+    const payload = normalizeBankRmPayload(mergeBody);
+    const validationError = validateBankRmPayload(payload);
+    if (validationError) {
+      return res.status(400).json({ message: validationError });
+    }
+
+    Object.assign(existing, payload);
+    existing.updatedBy = req.user.sub;
+
+    if (req.body?.isActive !== undefined) {
+      const activeVal =
+        req.body.isActive === true ||
+        req.body.isActive === "true" ||
+        req.body.isActive === 1 ||
+        req.body.isActive === "1";
+      existing.isActive = Boolean(activeVal);
+    }
+
+    await existing.save();
+    return res.json({
+      message: "Bank RM updated successfully",
+      bankRm: existing,
+    });
+  } catch (err) {
+    console.error("Error updating bank RM:", err);
+    return res.status(500).json({ message: "Internal Server Error" });
+  }
+});
+
+// DELETE /api/admin/bank-rms/:id (soft delete)
+router.delete("/bank-rms/:id", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    const updated = await BankRm.findByIdAndUpdate(
+      id,
+      { $set: { isActive: false, updatedBy: req.user.sub } },
+      { new: true }
+    ).lean();
+
+    if (!updated) {
+      return res.status(404).json({ message: "Bank RM not found" });
+    }
+
+    return res.json({ message: "Bank RM deleted successfully", bankRm: updated });
+  } catch (err) {
+    console.error("Error deleting bank RM (admin):", err);
+    return res.status(500).json({ message: "Error deleting bank RM" });
   }
 });
 
