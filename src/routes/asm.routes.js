@@ -38,6 +38,7 @@ import {
   getDisbursedAt,
   isDateInRange,
 } from "../utils/asmHierarchy.js";
+import { loanTypesForAsmType } from "../utils/rmRsmHierarchy.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
@@ -556,18 +557,28 @@ router.get("/get-customers", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER
     const asmId = req.user.sub;
 
     const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(asmId);
+    const manager = await User.findById(asmId).select("role asmType").lean();
+    const allowedLoanTypes = manager?.role === ROLES.ASM ? loanTypesForAsmType(manager.asmType) : null;
+
+    const baseScope = [{ asmId }];
+    if (manager?.role === ROLES.ASM && allowedLoanTypes?.length) {
+      baseScope.push({
+        loanType: { $in: allowedLoanTypes },
+        $or: [
+          { rmId: { $in: rmIds } },
+          { partnerId: { $in: partnerIds } },
+        ],
+      });
+    } else {
+      if (rsmIds?.length) baseScope.push({ rsmId: { $in: rsmIds } });
+      if (rmIds?.length) baseScope.push({ rmId: { $in: rmIds } });
+      if (partnerIds?.length) baseScope.push({ partnerId: { $in: partnerIds } });
+    }
 
     const applications = await Application.find({
       $and: [
         activeApplicationsFilter(),
-        {
-          $or: [
-            { asmId },
-            { rsmId: { $in: rsmIds } },
-            { rmId: { $in: rmIds } },
-            { partnerId: { $in: partnerIds } },
-          ],
-        },
+        { $or: baseScope },
       ],
     })
       .populate("customerId", "employeeId _id firstName lastName email phone")
@@ -740,14 +751,25 @@ router.get(
       }).select("_id").lean();
       const _partnerIds = _partners.map((p) => p._id);
 
-      const filter = activeApplicationsFilter({
-        $or: [
-          { asmId },
-          { rsmId: { $in: _rsmIds } },
-          { rmId: { $in: _rmIds } },
-          { partnerId: { $in: _partnerIds } },
-        ],
-      });
+      const manager = await User.findById(asmId).select("role asmType").lean();
+      const allowedLoanTypes = manager?.role === ROLES.ASM ? loanTypesForAsmType(manager.asmType) : null;
+
+      const baseScope = [{ asmId }];
+      if (manager?.role === ROLES.ASM && allowedLoanTypes?.length) {
+        baseScope.push({
+          loanType: { $in: allowedLoanTypes },
+          $or: [
+            { rmId: { $in: _rmIds } },
+            { partnerId: { $in: _partnerIds } },
+          ],
+        });
+      } else {
+        if (_rsmIds?.length) baseScope.push({ rsmId: { $in: _rsmIds } });
+        if (_rmIds?.length) baseScope.push({ rmId: { $in: _rmIds } });
+        if (_partnerIds?.length) baseScope.push({ partnerId: { $in: _partnerIds } });
+      }
+
+      const filter = activeApplicationsFilter({ $or: baseScope });
 
       const applications = await Application.find(filter)
         .populate("customerId", "employeeId firstName lastName email phone")

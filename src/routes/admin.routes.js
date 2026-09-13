@@ -3,7 +3,7 @@ import argon2 from "argon2";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { ROLES, RSM_TYPES } from "../config/roles.js";
-import { assertValidRmRsmAssignments, assertValidRmRsmPair } from "../utils/rmRsmHierarchy.js";
+import { assertValidRmRsmAssignments, assertValidRmRsmPair, resolveSpecializedAsmForLoanType } from "../utils/rmRsmHierarchy.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import { User } from "../models/User.js";
 import { makeRmCode, makeAsmCode } from "../utils/codes.js";
@@ -1805,81 +1805,69 @@ router.get(
           select: "employeeId _id firstName lastName email phone loanAmount",
         })
         .populate({
+          path: "asmId",
+          select: "firstName lastName employeeId role asmType",
+        })
+        .populate({
+          path: "rsmId",
+          select: "firstName lastName employeeId role",
+        })
+        .populate({
           path: "partnerId",
           select: "firstName lastName employeeId rmId",
           populate: {
             path: "rmId",
-            select: "firstName lastName employeeId asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
+            select: "firstName lastName employeeId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId rsmId",
             populate: [
-              { path: "asmId", select: "firstName lastName employeeId" },
-              {
-                path: "personalRsmId",
-                select: "asmId firstName lastName employeeId",
-                populate: { path: "asmId", select: "firstName lastName employeeId" },
-              },
-              {
-                path: "businessRsmId",
-                select: "asmId firstName lastName employeeId",
-                populate: { path: "asmId", select: "firstName lastName employeeId" },
-              },
-              {
-                path: "homeLapRsmId",
-                select: "asmId firstName lastName employeeId",
-                populate: { path: "asmId", select: "firstName lastName employeeId" },
-              },
-              {
-                path: "businessHomeRsmId",
-                select: "asmId firstName lastName employeeId",
-                populate: { path: "asmId", select: "firstName lastName employeeId" },
-              },
+              { path: "personalAsmId", select: "firstName lastName employeeId asmType role" },
+              { path: "businessAsmId", select: "firstName lastName employeeId asmType role" },
+              { path: "homeLapAsmId", select: "firstName lastName employeeId asmType role" },
+              { path: "rsmId", select: "firstName lastName employeeId role" },
             ],
           },
         })
         .populate({
           path: "rmId",
-          select: "firstName lastName employeeId asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
+          select: "firstName lastName employeeId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId rsmId",
           populate: [
-            { path: "asmId", select: "firstName lastName employeeId" },
-            {
-              path: "personalRsmId",
-              select: "asmId firstName lastName employeeId",
-              populate: { path: "asmId", select: "firstName lastName employeeId" },
-            },
-            {
-              path: "businessRsmId",
-              select: "asmId firstName lastName employeeId",
-              populate: { path: "asmId", select: "firstName lastName employeeId" },
-            },
-            {
-              path: "homeLapRsmId",
-              select: "asmId firstName lastName employeeId",
-              populate: { path: "asmId", select: "firstName lastName employeeId" },
-            },
-            {
-              path: "businessHomeRsmId",
-              select: "asmId firstName lastName employeeId",
-              populate: { path: "asmId", select: "firstName lastName employeeId" },
-            },
+            { path: "personalAsmId", select: "firstName lastName employeeId asmType role" },
+            { path: "businessAsmId", select: "firstName lastName employeeId asmType role" },
+            { path: "homeLapAsmId", select: "firstName lastName employeeId asmType role" },
+            { path: "rsmId", select: "firstName lastName employeeId role" },
           ],
         })
-        .select("appNo loanType approvedLoanAmount status createdAt customer customerId")
+        .select("appNo loanType approvedLoanAmount status createdAt customer customerId asmId rsmId rmId partnerId")
         .lean();
-
-      const pickAsm = (rm) =>
-        rm?.asmId ||
-        rm?.personalRsmId?.asmId ||
-        rm?.businessRsmId?.asmId ||
-        rm?.homeLapRsmId?.asmId ||
-        rm?.businessHomeRsmId?.asmId ||
-        null;
 
       const formatted = applications.map((app) => {
         const c = app.customer || {};
         const customerUser = app.customerId || {};
         const p = app.partnerId || {};
-        // Prefer app RM; if missing (common after incomplete transfers), use partner's current RM
+        // Prefer app RM; if missing, use partner's RM
         const r = app.rmId || p.rmId || {};
-        const a = pickAsm(r) || {};
+
+        // 1. Resolve Specialized ASM:
+        // Must be an actual ASM with matching loanType. NEVER an RSM.
+        let resolvedAsm = null;
+        if (app.asmId && app.asmId.role === ROLES.ASM) {
+          resolvedAsm = app.asmId;
+        } else if (r) {
+          const matched = resolveSpecializedAsmForLoanType(r, app.loanType);
+          if (matched && typeof matched === "object" && matched.role === ROLES.ASM) {
+            resolvedAsm = matched;
+          }
+        }
+
+        // 2. Resolve Senior RSM:
+        let resolvedRsm = null;
+        if (app.rsmId && app.rsmId.role === ROLES.RSM) {
+          resolvedRsm = app.rsmId;
+        } else if (r?.rsmId && r.rsmId.role === ROLES.RSM) {
+          resolvedRsm = r.rsmId;
+        } else if (resolvedAsm?.rsmId && resolvedAsm.rsmId.role === ROLES.RSM) {
+          resolvedRsm = resolvedAsm.rsmId;
+        }
+
         const userMongoId =
           customerUser._id ||
           (typeof app.customerId === "object" ? app.customerId?._id : app.customerId) ||
@@ -1911,8 +1899,10 @@ router.get(
           partnerEmployeeId: p.employeeId || null,
           rmName: r.firstName ? `${r.firstName} ${r.lastName}` : null,
           rmEmployeeId: r.employeeId || null,
-          asmName: a.firstName ? `${a.firstName} ${a.lastName}` : null,
-          asmEmployeeId: a.employeeId || null,
+          asmName: resolvedAsm ? `${resolvedAsm.firstName} ${resolvedAsm.lastName}`.trim() : null,
+          asmEmployeeId: resolvedAsm ? resolvedAsm.employeeId : null,
+          rsmName: resolvedRsm ? `${resolvedRsm.firstName} ${resolvedRsm.lastName}`.trim() : null,
+          rsmEmployeeId: resolvedRsm ? resolvedRsm.employeeId : null,
         };
       });
 

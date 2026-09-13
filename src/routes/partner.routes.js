@@ -34,6 +34,7 @@ import { Target } from "../models/Target.js";
 import { Incentive } from "../models/Incentive.js";
 import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
+import { resolveSpecializedAsmForLoanType } from "../utils/rmRsmHierarchy.js";
 import { ReferralReward } from "../models/ReferralReward.js";
 import {
   buildPartnerInvoiceHtml,
@@ -1296,11 +1297,15 @@ router.post(
         }
       }
 
-      // Resolve ASM based on RM
+      // Resolve ASM and RSM based on RM & loanType
+      let assignedRsmId = null;
       if (assignedRmId) {
-        const rmDoc = await User.findById(assignedRmId).select("asmId").lean();
-        if (rmDoc?.asmId && !assignedAsmId) {
-          assignedAsmId = rmDoc.asmId;
+        const rmDoc = await User.findById(assignedRmId)
+          .select("rsmId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
+          .lean();
+        if (rmDoc) {
+          assignedAsmId = resolveSpecializedAsmForLoanType(rmDoc, loanType);
+          assignedRsmId = rmDoc.rsmId || null;
         }
       }
 
@@ -1317,13 +1322,13 @@ router.post(
             appNo,
             partnerId: assignedPartnerId,
             rmId: assignedRmId,
-            rsmId: null,
+            rsmId: assignedRsmId || null,
             asmId: assignedAsmId || null,
             customerId: customerUser._id,
             loanType,
             customer: {
               ...customerData,
-              rsmId: null,
+              rsmId: assignedRsmId || null,
               asmId: assignedAsmId || null,
             },
             docs: newDocs,
@@ -1514,13 +1519,17 @@ router.post(
         assignedRmId = referralPartner.rmId || null;
 
         if (referralPartner.rmId) {
-          const referralRm = await User.findById(referralPartner.rmId);
-          assignedAsmId = referralRm?.asmId || null;
+          const referralRm = await User.findById(referralPartner.rmId)
+            .select("rsmId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
+            .lean();
+          assignedAsmId = resolveSpecializedAsmForLoanType(referralRm, loanType);
+          assignedRsmId = referralRm?.rsmId || null;
         }
       }
 
-      if (req.user.role === ROLES.PARTNER && rm?.asmId) {
-        assignedAsmId = assignedAsmId || rm.asmId;
+      if (req.user.role === ROLES.PARTNER && rm) {
+        assignedAsmId = resolveSpecializedAsmForLoanType(rm, loanType);
+        assignedRsmId = rm?.rsmId || null;
       }
 
       // Check if customer exists
@@ -1808,11 +1817,14 @@ router.post(
         }
       }
 
-      // Resolve ASM based on RM
-      if (assignedRmId) {
-        const rmDoc = await User.findById(assignedRmId).select("asmId").lean();
-        if (rmDoc?.asmId && !assignedAsmId) {
-          assignedAsmId = rmDoc.asmId;
+      // Resolve ASM and RSM based on RM & loanType
+      if (assignedRmId && !assignedAsmId) {
+        const rmDoc = await User.findById(assignedRmId)
+          .select("rsmId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
+          .lean();
+        if (rmDoc) {
+          assignedAsmId = resolveSpecializedAsmForLoanType(rmDoc, loanType);
+          assignedRsmId = assignedRsmId || rmDoc.rsmId || null;
         }
       }
 
@@ -1829,13 +1841,13 @@ router.post(
             appNo,
             partnerId: assignedPartnerId,
             rmId: assignedRmId,
-            rsmId: null,
+            rsmId: assignedRsmId || null,
             asmId: assignedAsmId || null,
             customerId: customerUser._id,
             loanType,
             customer: {
               ...customerData,
-              rsmId: null,
+              rsmId: assignedRsmId || null,
               asmId: assignedAsmId || null,
             },
             docs: newDocs,

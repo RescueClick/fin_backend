@@ -13,6 +13,7 @@ import {
   normalizeDocTypeForLimits,
 } from "../utils/docUploadLimits.js";
 import { findCustomerApplyBlocker } from "../utils/loanReapplyPolicy.js";
+import { resolveSpecializedAsmForLoanType } from "../utils/rmRsmHierarchy.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { sendDeleteAccountRequestEmail } from "../utils/emailService.js";
 
@@ -281,11 +282,15 @@ router.post(
       }
 
       // Resolve RSM and ASM based on RM & loanType
-      let assignedAsmId = req.user.role === ROLES.PARTNER ? (partner?.asmId || null) : null;
+      let assignedAsmId = null;
+      let assignedRsmId = null;
       if (appRmId) {
-        const rmDoc = await User.findById(appRmId).select("asmId").lean();
-        if (rmDoc?.asmId && !assignedAsmId) {
-          assignedAsmId = rmDoc.asmId;
+        const rmDoc = await User.findById(appRmId)
+          .select("rsmId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
+          .lean();
+        if (rmDoc) {
+          assignedAsmId = resolveSpecializedAsmForLoanType(rmDoc, loanType);
+          assignedRsmId = rmDoc.rsmId || null;
         }
       }
 
@@ -303,7 +308,7 @@ router.post(
             appNo,
             partnerId: appPartnerId || null,
             rmId: appRmId || null,
-            rsmId: null,
+            rsmId: assignedRsmId || null,
             asmId: assignedAsmId || null,
             customerId: customerUser._id,
             loanType,

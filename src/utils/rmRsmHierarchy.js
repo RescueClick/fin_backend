@@ -19,6 +19,64 @@ export function normalizeAsmTypeValue(asmType) {
 export const normalizeRsmTypeValue = normalizeAsmTypeValue;
 
 /**
+ * Maps an ASM type to supported loan types.
+ */
+export function loanTypesForAsmType(asmType) {
+  const norm = normalizeAsmTypeValue(asmType);
+  if (norm === ASM_TYPES.PERSONAL) return ["PERSONAL"];
+  if (norm === ASM_TYPES.BUSINESS) return ["BUSINESS"];
+  if (norm === ASM_TYPES.HOME_LAP) {
+    return [
+      "HOME_LOAN_SALARIED",
+      "HOME_LOAN_SELF_EMPLOYED",
+      "LAP_SALARIED",
+      "LAP_SELF_EMPLOYED",
+      "LAP",
+    ];
+  }
+  if (norm === ASM_TYPES.BUSINESS_HOME) {
+    return [
+      "BUSINESS",
+      "HOME_LOAN_SALARIED",
+      "HOME_LOAN_SELF_EMPLOYED",
+      "LAP_SALARIED",
+      "LAP_SELF_EMPLOYED",
+      "LAP",
+    ];
+  }
+  return null;
+}
+
+/**
+ * Resolve the specialized ASM for an RM based strictly on loanType.
+ * Returns null if the RM does not have an ASM assigned for this loanType.
+ * NEVER falls back to Senior RSM (rsmId or legacy asmId).
+ */
+export function resolveSpecializedAsmForLoanType(rm, loanType) {
+  if (!rm) return null;
+  const lt = String(loanType || "").trim().toUpperCase();
+
+  if (lt === "PERSONAL") {
+    return rm.personalAsmId || rm.personalRsmId || null;
+  }
+  if (lt === "BUSINESS") {
+    return rm.businessAsmId || rm.businessHomeAsmId || rm.businessRsmId || rm.businessHomeRsmId || null;
+  }
+  if (
+    lt === "HOME_LOAN_SALARIED" ||
+    lt === "HOME_LOAN_SELF_EMPLOYED" ||
+    lt === "LAP_SALARIED" ||
+    lt === "LAP_SELF_EMPLOYED" ||
+    lt === "LAP" ||
+    lt.startsWith("HOME") ||
+    lt.startsWith("LAP")
+  ) {
+    return rm.homeLapAsmId || rm.businessHomeAsmId || rm.homeLapRsmId || rm.businessHomeRsmId || null;
+  }
+  return null;
+}
+
+/**
  * How an RM is linked to a specialized ASM (or legacy RSM):
  * - PERSONAL-line: personalAsmId / personalRsmId
  * - BUSINESS-line: businessAsmId / businessRsmId
