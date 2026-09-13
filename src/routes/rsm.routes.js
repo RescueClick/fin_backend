@@ -1507,12 +1507,12 @@ router.patch("/profile/update", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SU
     );
 
     const updatedRsm = await User.findOneAndUpdate(
-      { _id: rsmId, role: ROLES.RSM },
+      { _id: rsmId, role: { $in: [ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN] } },
       { $set: updateData },
       { new: true, runValidators: true, projection: "-passwordHash" }
     );
 
-    if (!updatedRsm) return res.status(404).json({ message: "RSM not found" });
+    if (!updatedRsm) return res.status(404).json({ message: "Profile not found" });
 
     const profileObj = updatedRsm?.toObject ? updatedRsm.toObject() : updatedRsm;
 
@@ -1608,7 +1608,8 @@ const pickContact = (body = {}, prefix) => {
   const email = String(nested.email ?? body[`${prefix}Email`] ?? "")
     .trim()
     .toLowerCase();
-  return { name, phone, email };
+  const product = String(nested.product ?? body[`${prefix}Product`] ?? "").trim();
+  return { name, phone, email, product };
 };
 
 const normalizeBankRmPayload = (body = {}) => {
@@ -1814,16 +1815,19 @@ router.put(
           name: req.body?.rmName ?? req.body?.rm?.name ?? existingObj.rm?.name ?? existingObj.rmName,
           phone: req.body?.rmPhone ?? req.body?.rm?.phone ?? existingObj.rm?.phone ?? existingObj.rmPhone,
           email: req.body?.rmEmail ?? req.body?.rm?.email ?? existingObj.rm?.email ?? existingObj.rmEmail,
+          product: req.body?.rmProduct ?? req.body?.rm?.product ?? existingObj.rm?.product,
         },
         asm: {
           name: req.body?.asmName ?? req.body?.asm?.name ?? existingObj.asm?.name,
           phone: req.body?.asmPhone ?? req.body?.asm?.phone ?? existingObj.asm?.phone,
           email: req.body?.asmEmail ?? req.body?.asm?.email ?? existingObj.asm?.email,
+          product: req.body?.asmProduct ?? req.body?.asm?.product ?? existingObj.asm?.product,
         },
         rsm: {
           name: req.body?.rsmName ?? req.body?.rsm?.name ?? existingObj.rsm?.name,
           phone: req.body?.rsmPhone ?? req.body?.rsm?.phone ?? existingObj.rsm?.phone,
           email: req.body?.rsmEmail ?? req.body?.rsm?.email ?? existingObj.rsm?.email,
+          product: req.body?.rsmProduct ?? req.body?.rsm?.product ?? existingObj.rsm?.product,
         },
       };
 

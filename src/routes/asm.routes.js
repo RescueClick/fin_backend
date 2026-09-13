@@ -3608,29 +3608,44 @@ router.delete(
   }
 );
 
-// Update RSM details and/or RSM type (ASM)
+// Update subordinate manager details/type (RSM edits ASM; ASM may edit legacy RSM rows)
 router.patch(
   "/rsm/:rsmId",
   auth,
-  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN, ROLES.ADMIN),
   async (req, res) => {
     try {
       const { rsmId } = req.params;
-      const asmId = req.user.sub;
+      const managerId = req.user.sub;
+      const isAdmin =
+        req.user.role === ROLES.SUPER_ADMIN || req.user.role === ROLES.ADMIN;
       if (!mongoose.Types.ObjectId.isValid(rsmId)) {
-        return res.status(400).json({ message: "Invalid RSM id" });
+        return res.status(400).json({ message: "Invalid manager id" });
       }
 
-      const rsm = await User.findOne({ _id: rsmId, role: ROLES.RSM, asmId });
+      // List endpoints return ASMs under an RSM (and legacy RSM rows under ASM).
+      // Match that hierarchy so edit/save does not fail with "RSM not found".
+      const findQuery = isAdmin
+        ? { _id: rsmId, role: { $in: [ROLES.ASM, ROLES.RSM] } }
+        : {
+            _id: rsmId,
+            role: { $in: [ROLES.ASM, ROLES.RSM] },
+            $or: [{ rsmId: managerId }, { asmId: managerId }],
+          };
+
+      const rsm = await User.findOne(findQuery);
       if (!rsm) {
-        return res.status(404).json({ message: "RSM not found or not under your ASM hierarchy" });
+        return res.status(404).json({
+          message: "Manager not found or not under your hierarchy",
+        });
       }
 
-      const { firstName, lastName, phone, email, rsmType, region } = req.body || {};
+      const { firstName, lastName, phone, email, rsmType, asmType, region } = req.body || {};
+      const newType = asmType || rsmType;
 
-      if (rsmType && !Object.values(RSM_TYPES).includes(rsmType)) {
+      if (newType && !Object.values(RSM_TYPES).includes(newType)) {
         return res.status(400).json({
-          message: `Invalid rsmType. Allowed: ${Object.values(RSM_TYPES).join(", ")}`,
+          message: `Invalid specialty type. Allowed: ${Object.values(RSM_TYPES).join(", ")}`,
         });
       }
 
@@ -3666,24 +3681,25 @@ router.patch(
         rsm.region = region;
       }
 
-      const oldRsmType = rsm.rsmType;
-      if (rsmType && rsmType !== oldRsmType) {
-        rsm.rsmType = rsmType;
+      const oldRsmType = rsm.asmType || rsm.rsmType;
+      if (newType && newType !== oldRsmType) {
+        rsm.rsmType = newType;
+        rsm.asmType = newType;
 
-        if (rsmType === RSM_TYPES.BUSINESS) {
+        if (newType === RSM_TYPES.BUSINESS) {
           await User.updateMany(
-            { role: ROLES.RM, $or: [{ businessHomeRsmId: rsm._id }, { businessRsmId: rsm._id }] },
-            { $set: { businessRsmId: rsm._id, businessHomeRsmId: rsm._id } }
+            { role: ROLES.RM, $or: [{ businessHomeRsmId: rsm._id }, { businessRsmId: rsm._id }, { businessAsmId: rsm._id }] },
+            { $set: { businessRsmId: rsm._id, businessHomeRsmId: rsm._id, businessAsmId: rsm._id, businessHomeAsmId: rsm._id } }
           );
-        } else if (rsmType === RSM_TYPES.HOME_LAP) {
+        } else if (newType === RSM_TYPES.HOME_LAP) {
           await User.updateMany(
-            { role: ROLES.RM, $or: [{ businessHomeRsmId: rsm._id }, { homeLapRsmId: rsm._id }] },
-            { $set: { homeLapRsmId: rsm._id } }
+            { role: ROLES.RM, $or: [{ businessHomeRsmId: rsm._id }, { homeLapRsmId: rsm._id }, { homeLapAsmId: rsm._id }] },
+            { $set: { homeLapRsmId: rsm._id, homeLapAsmId: rsm._id } }
           );
-        } else if (rsmType === RSM_TYPES.PERSONAL) {
+        } else if (newType === RSM_TYPES.PERSONAL) {
           await User.updateMany(
-            { role: ROLES.RM, personalRsmId: rsm._id },
-            { $set: { personalRsmId: rsm._id } }
+            { role: ROLES.RM, $or: [{ personalRsmId: rsm._id }, { personalAsmId: rsm._id }] },
+            { $set: { personalRsmId: rsm._id, personalAsmId: rsm._id } }
           );
         }
       }
@@ -3691,7 +3707,7 @@ router.patch(
       await rsm.save();
 
       return res.json({
-        message: "RSM updated successfully",
+        message: "Manager updated successfully",
         rsm: {
           _id: rsm._id,
           firstName: rsm.firstName,
@@ -3699,8 +3715,10 @@ router.patch(
           email: rsm.email,
           phone: rsm.phone,
           employeeId: rsm.employeeId,
-          rsmType: rsm.rsmType,
-          asmId: rsm.asmId,
+          rsmType: rsm.asmType || rsm.rsmType,
+          asmType: rsm.asmType || rsm.rsmType,
+          asmId: rsm.rsmId || rsm.asmId,
+          rsmId: rsm.rsmId || rsm.asmId,
           region: rsm.region,
           status: rsm.status,
         },

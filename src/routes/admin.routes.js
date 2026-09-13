@@ -546,7 +546,8 @@ const pickContact = (body = {}, prefix) => {
   const email = String(nested.email ?? body[`${prefix}Email`] ?? "")
     .trim()
     .toLowerCase();
-  return { name, phone, email };
+  const product = String(nested.product ?? body[`${prefix}Product`] ?? "").trim();
+  return { name, phone, email, product };
 };
 
 const normalizeBankRmPayload = (body = {}) => {
@@ -725,16 +726,19 @@ router.put("/bank-rms/:id", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
         name: req.body?.rmName ?? req.body?.rm?.name ?? existingObj.rm?.name ?? existingObj.rmName,
         phone: req.body?.rmPhone ?? req.body?.rm?.phone ?? existingObj.rm?.phone ?? existingObj.rmPhone,
         email: req.body?.rmEmail ?? req.body?.rm?.email ?? existingObj.rm?.email ?? existingObj.rmEmail,
+        product: req.body?.rmProduct ?? req.body?.rm?.product ?? existingObj.rm?.product,
       },
       asm: {
         name: req.body?.asmName ?? req.body?.asm?.name ?? existingObj.asm?.name,
         phone: req.body?.asmPhone ?? req.body?.asm?.phone ?? existingObj.asm?.phone,
         email: req.body?.asmEmail ?? req.body?.asm?.email ?? existingObj.asm?.email,
+        product: req.body?.asmProduct ?? req.body?.asm?.product ?? existingObj.asm?.product,
       },
       rsm: {
         name: req.body?.rsmName ?? req.body?.rsm?.name ?? existingObj.rsm?.name,
         phone: req.body?.rsmPhone ?? req.body?.rsm?.phone ?? existingObj.rsm?.phone,
         email: req.body?.rsmEmail ?? req.body?.rsm?.email ?? existingObj.rsm?.email,
+        product: req.body?.rsmProduct ?? req.body?.rsm?.product ?? existingObj.rsm?.product,
       },
     };
 
@@ -1451,6 +1455,10 @@ router.get(
         rsmCode: rsm.rsmCode || rsm.asmCode || rsm.employeeId,
         asmCode: rsm.rsmCode || rsm.asmCode || rsm.employeeId,
         region: rsm.region,
+        rsmType: rsm.rsmType || rsm.asmType || null,
+        asmType: rsm.asmType || rsm.rsmType || null,
+        asmId: rsm.asmId || rsm.rsmId || null,
+        rsmId: rsm.rsmId || rsm.asmId || null,
         status: rsm.status,
         createdAt: rsm.createdAt,
         updatedAt: rsm.updatedAt,
@@ -3574,11 +3582,11 @@ router.delete(
   }
 );
 
-// Update RSM or ASM details and/or role specialty type (SUPER_ADMIN)
+// Update RSM or ASM details and/or role specialty type (Admin)
 router.patch(
   ["/rsm/:rsmId", "/asm/:asmId"],
   auth,
-  requireRole(ROLES.SUPER_ADMIN),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
   async (req, res) => {
     try {
       const targetId = req.params.rsmId || req.params.asmId;
@@ -3633,9 +3641,16 @@ router.patch(
         rsm.region = region;
       }
 
-      const parentManagerId = rsmId || asmId;
-      if (parentManagerId && mongoose.Types.ObjectId.isValid(parentManagerId)) {
-        const parent = await User.findOne({ _id: parentManagerId, role: { $in: [ROLES.RSM, ROLES.ASM] } });
+      const rawParentId = rsmId || asmId;
+      const parentManagerId =
+        rawParentId && typeof rawParentId === "object"
+          ? rawParentId._id || rawParentId.id
+          : rawParentId;
+      if (parentManagerId && mongoose.Types.ObjectId.isValid(String(parentManagerId))) {
+        const parent = await User.findOne({
+          _id: parentManagerId,
+          role: { $in: [ROLES.RSM, ROLES.ASM] },
+        });
         if (!parent) return res.status(404).json({ message: "Parent manager not found" });
         rsm.rsmId = parent._id;
         rsm.asmId = parent._id;
