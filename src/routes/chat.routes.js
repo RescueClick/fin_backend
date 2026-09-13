@@ -10,6 +10,12 @@ import { Application } from "../models/Application.js";
 import { upload } from "../middleware/upload.js";
 import { activeUsers } from "../socket/socketHandler.js";
 import { getOnlineStaffIds, markHeartbeat } from "../utils/chatPresence.js";
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { s3, BUCKET_NAME } from "../config/s3.js";
+import fs from "fs";
+import path from "path";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
 
 const router = express.Router();
 
@@ -904,6 +910,139 @@ router.post("/upload", upload.array("files", 5), async (req, res) => {
   } catch (error) {
     console.error("Error uploading chat attachments:", error);
     res.status(500).json({ message: "Failed to upload files", error: error.message });
+  }
+});
+
+// ============================================================================
+// 8b. GET /api/chat/download
+// Force-download chat attachment (proxy) so browser saves instead of opening
+// ============================================================================
+function sanitizeDownloadName(name) {
+  const cleaned = String(name || "download")
+    .replace(/[/\\?%*:|"<>]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
+  return cleaned || "download";
+}
+
+function extractS3KeyFromUrl(fileUrl) {
+  try {
+    if (!fileUrl) return null;
+    if (fileUrl.startsWith("uploads/")) return fileUrl;
+    if (fileUrl.startsWith("/uploads/")) return fileUrl.slice(1);
+
+    const u = new URL(fileUrl);
+    const pathname = decodeURIComponent(u.pathname.replace(/^\/+/, ""));
+
+    if (BUCKET_NAME && u.hostname.startsWith(`${BUCKET_NAME}.`)) {
+      return pathname;
+    }
+    if (BUCKET_NAME && pathname.startsWith(`${BUCKET_NAME}/`)) {
+      return pathname.slice(BUCKET_NAME.length + 1);
+    }
+    if (pathname.startsWith("uploads/")) return pathname;
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isAllowedChatFileUrl(fileUrl) {
+  if (!fileUrl) return false;
+  if (fileUrl.startsWith("/uploads/") || fileUrl.startsWith("uploads/")) return true;
+  try {
+    const u = new URL(fileUrl);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+    const host = u.hostname.toLowerCase();
+    if (BUCKET_NAME && (host.includes(String(BUCKET_NAME).toLowerCase()) || host.includes("amazonaws.com"))) {
+      return true;
+    }
+    if (host.includes("dhansourcecapital.com")) return true;
+    return Boolean(extractS3KeyFromUrl(fileUrl));
+  } catch (_) {
+    return false;
+  }
+}
+
+router.get("/download", async (req, res) => {
+  try {
+    const fileUrl = String(req.query.url || "").trim();
+    const name = sanitizeDownloadName(req.query.name);
+
+    if (!fileUrl) {
+      return res.status(400).json({ message: "url is required" });
+    }
+    if (!isAllowedChatFileUrl(fileUrl)) {
+      return res.status(403).json({ message: "File URL not allowed" });
+    }
+
+    let contentType = "application/octet-stream";
+    let bodyStream = null;
+
+    const s3Key = extractS3KeyFromUrl(fileUrl);
+    if (s3Key && BUCKET_NAME) {
+      const out = await s3.send(
+        new GetObjectCommand({
+          Bucket: BUCKET_NAME,
+          Key: s3Key,
+        })
+      );
+      bodyStream = out.Body;
+      contentType = out.ContentType || contentType;
+      if (out.ContentLength != null) {
+        res.setHeader("Content-Length", String(out.ContentLength));
+      }
+    } else if (fileUrl.startsWith("/uploads/") || fileUrl.startsWith("uploads/")) {
+      const relative = fileUrl.replace(/^\/+/, "");
+      const fullPath = path.join(process.cwd(), relative);
+      if (!fullPath.startsWith(path.join(process.cwd(), "uploads")) || !fs.existsSync(fullPath)) {
+        return res.status(404).json({ message: "File not found" });
+      }
+      bodyStream = fs.createReadStream(fullPath);
+      const ext = path.extname(fullPath).toLowerCase();
+      if (ext === ".pdf") contentType = "application/pdf";
+      else if (ext === ".png") contentType = "image/png";
+      else if (ext === ".jpg" || ext === ".jpeg") contentType = "image/jpeg";
+    } else {
+      const upstream = await fetch(fileUrl);
+      if (!upstream.ok) {
+        return res.status(502).json({ message: "Failed to fetch file" });
+      }
+      contentType = upstream.headers.get("content-type") || contentType;
+      const len = upstream.headers.get("content-length");
+      if (len) res.setHeader("Content-Length", len);
+      bodyStream = Readable.fromWeb(upstream.body);
+    }
+
+    if (!bodyStream) {
+      return res.status(404).json({ message: "File not found" });
+    }
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${name.replace(/"/g, "")}"; filename*=UTF-8''${encodeURIComponent(name)}`
+    );
+    res.setHeader("Cache-Control", "private, no-store");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+
+    if (typeof bodyStream.pipe === "function") {
+      bodyStream.on("error", (err) => {
+        console.error("chat download stream error:", err);
+        if (!res.headersSent) res.status(500).end();
+        else res.destroy(err);
+      });
+      bodyStream.pipe(res);
+      return;
+    }
+
+    await pipeline(bodyStream, res);
+  } catch (error) {
+    console.error("Error downloading chat attachment:", error);
+    if (!res.headersSent) {
+      res.status(500).json({ message: "Failed to download file", error: error.message });
+    }
   }
 });
 
