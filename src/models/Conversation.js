@@ -31,6 +31,8 @@ const conversationSchema = new mongoose.Schema(
       loanType: { type: String, trim: true },
       amount: { type: Number },
       status: { type: String, trim: true },
+      customerId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      phone: { type: String, trim: true },
     },
     // For archiving or clearing conversation per user
     clearedFor: [

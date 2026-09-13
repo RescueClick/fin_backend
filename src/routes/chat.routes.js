@@ -27,6 +27,71 @@ function getOtherParticipant(conv, currentUserIdStr) {
   );
 }
 
+/**
+ * Build a complete loanRef card from Application (+ optional client payload)
+ */
+async function enrichLoanRef(loanRefInput) {
+  if (!loanRefInput) return null;
+
+  const applicationId =
+    loanRefInput.applicationId?._id ||
+    loanRefInput.applicationId ||
+    loanRefInput._id ||
+    null;
+
+  let app = null;
+  if (applicationId && mongoose.Types.ObjectId.isValid(String(applicationId))) {
+    app = await Application.findById(applicationId)
+      .select(
+        "appNo loanType status requestedAmount approvedLoanAmount customerId customer.firstName customer.middleName customer.lastName customer.phone customer.loanAmount"
+      )
+      .lean();
+  } else if (loanRefInput.applicationNumber && loanRefInput.applicationNumber !== "N/A") {
+    app = await Application.findOne({ appNo: loanRefInput.applicationNumber })
+      .select(
+        "appNo loanType status requestedAmount approvedLoanAmount customerId customer.firstName customer.middleName customer.lastName customer.phone customer.loanAmount"
+      )
+      .lean();
+  }
+
+  if (!app) {
+    // Keep whatever client sent if we cannot resolve
+    if (!loanRefInput.applicationId && !loanRefInput.applicationNumber) return null;
+    return {
+      applicationId: applicationId || undefined,
+      applicationNumber: loanRefInput.applicationNumber || "N/A",
+      applicantName: loanRefInput.applicantName || "Applicant",
+      loanType: loanRefInput.loanType || "",
+      amount: loanRefInput.amount || 0,
+      status: loanRefInput.status || "",
+      customerId: loanRefInput.customerId || undefined,
+      phone: loanRefInput.phone || "",
+    };
+  }
+
+  const c = app.customer || {};
+  const applicantName =
+    [c.firstName, c.middleName, c.lastName].filter(Boolean).join(" ").trim() ||
+    loanRefInput.applicantName ||
+    "Applicant";
+
+  return {
+    applicationId: app._id,
+    applicationNumber: app.appNo || loanRefInput.applicationNumber || "N/A",
+    applicantName,
+    loanType: app.loanType || loanRefInput.loanType || "PERSONAL",
+    amount:
+      app.approvedLoanAmount ||
+      app.requestedAmount ||
+      c.loanAmount ||
+      loanRefInput.amount ||
+      0,
+    status: app.status || loanRefInput.status || "",
+    customerId: app.customerId || loanRefInput.customerId || undefined,
+    phone: c.phone || loanRefInput.phone || "",
+  };
+}
+
 // ============================================================================
 // 1. GET /api/chat/contacts
 // Fetch list of internal staff colleagues for starting or continuing chats
@@ -188,7 +253,10 @@ router.get("/conversations", async (req, res) => {
         "participants",
         "_id firstName lastName email phone role rsmType employeeId asmCode rmCode"
       )
-      .populate("loanRef.applicationId", "applicationNumber loanType status loanAmount personalDetails")
+      .populate(
+        "loanRef.applicationId",
+        "appNo loanType status requestedAmount approvedLoanAmount customer.firstName customer.lastName customer.phone"
+      )
       .sort({ "lastMessage.createdAt": -1, updatedAt: -1 })
       .lean();
 
@@ -391,6 +459,28 @@ router.get("/conversations/:id/messages", async (req, res) => {
     // Chronological order for chat feed display
     const orderedMessages = messages.reverse();
 
+    // Hydrate incomplete loan cards (older messages saved with N/A / Applicant)
+    for (const msg of orderedMessages) {
+      const lr = msg.loanRef;
+      if (!lr?.applicationId) continue;
+      const needsFix =
+        !lr.applicationNumber ||
+        lr.applicationNumber === "N/A" ||
+        !lr.applicantName ||
+        lr.applicantName === "Applicant";
+      if (!needsFix) continue;
+      try {
+        const fixed = await enrichLoanRef(lr);
+        if (fixed) {
+          msg.loanRef = fixed;
+          ChatMessage.updateOne(
+            { _id: msg._id },
+            { $set: { loanRef: fixed } }
+          ).catch(() => {});
+        }
+      } catch (_) {}
+    }
+
     // Mark unread messages sent by others to current user as READ
     const unreadUpdated = await ChatMessage.updateMany(
       {
@@ -482,13 +572,16 @@ router.post("/conversations/:id/messages", async (req, res) => {
     );
     const senderName = `${sender?.firstName || ""} ${sender?.lastName || ""}`.trim() || "Staff";
 
+    // Always resolve loan card from DB so appNo / applicant name are correct
+    const resolvedLoanRef = await enrichLoanRef(loanRef);
+
     const newMessage = new ChatMessage({
       conversationId: id,
       sender: currentUserId,
       recipient: recipient._id,
       text: (text || "").trim(),
       attachments: Array.isArray(attachments) ? attachments : [],
-      loanRef: loanRef || null,
+      loanRef: resolvedLoanRef || null,
       status: "SENT",
     });
 
@@ -523,7 +616,7 @@ router.post("/conversations/:id/messages", async (req, res) => {
       (attachments && attachments.length > 0
         ? `📎 Sent ${attachments.length} file${attachments.length > 1 ? "s" : ""}`
         : loanRef
-        ? `📄 Loan Ref: ${loanRef.applicationNumber || "Application"}`
+        ? `📄 Loan Ref: ${resolvedLoanRef?.applicationNumber || loanRef?.applicationNumber || "Application"}`
         : "Message");
 
     conversation.lastMessage = {
@@ -534,8 +627,8 @@ router.post("/conversations/:id/messages", async (req, res) => {
       createdAt: new Date(),
     };
 
-    if (loanRef) {
-      conversation.loanRef = loanRef;
+    if (resolvedLoanRef) {
+      conversation.loanRef = resolvedLoanRef;
     }
 
     const recipientIdStr = recipient._id.toString();
@@ -671,7 +764,7 @@ router.post("/upload", upload.array("files", 5), async (req, res) => {
 
 // ============================================================================
 // 9. GET /api/chat/search-loans
-// Search active applications to embed loan cards into messages
+// Search applications by appNo, applicant name, mobile, PAN, email
 // ============================================================================
 router.get("/search-loans", async (req, res) => {
   try {
@@ -681,29 +774,71 @@ router.get("/search-loans", async (req, res) => {
     }
 
     const term = q.trim();
-    const regex = new RegExp(term, "i");
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(escaped, "i");
 
     const applications = await Application.find({
+      deletedAt: null,
       $or: [
-        { applicationNumber: regex },
-        { "personalDetails.fullName": regex },
-        { "personalDetails.mobileNumber": regex },
-        { "personalDetails.panNumber": regex },
+        { appNo: regex },
+        { "customer.firstName": regex },
+        { "customer.middleName": regex },
+        { "customer.lastName": regex },
+        { "customer.phone": regex },
+        { "customer.alternatePhone": regex },
+        { "customer.panNumber": regex },
+        { "customer.email": regex },
+        // Full name contains search term (e.g. "Anil Bagad")
+        {
+          $expr: {
+            $regexMatch: {
+              input: {
+                $trim: {
+                  input: {
+                    $concat: [
+                      { $ifNull: ["$customer.firstName", ""] },
+                      " ",
+                      { $ifNull: ["$customer.middleName", ""] },
+                      " ",
+                      { $ifNull: ["$customer.lastName", ""] },
+                    ],
+                  },
+                },
+              },
+              regex: escaped,
+              options: "i",
+            },
+          },
+        },
       ],
     })
-      .select("applicationNumber loanType status loanAmount personalDetails.fullName createdAt")
+      .select(
+        "appNo loanType status requestedAmount approvedLoanAmount customerId customer.firstName customer.middleName customer.lastName customer.phone customer.panNumber customer.email customer.loanAmount createdAt"
+      )
       .sort({ createdAt: -1 })
-      .limit(10)
+      .limit(20)
       .lean();
 
-    const formattedLoans = applications.map((app) => ({
-      applicationId: app._id,
-      applicationNumber: app.applicationNumber || "N/A",
-      applicantName: app.personalDetails?.fullName || "Applicant",
-      loanType: app.loanType || "PERSONAL",
-      amount: app.loanAmount || 0,
-      status: app.status || "DRAFT",
-    }));
+    const formattedLoans = applications.map((app) => {
+      const c = app.customer || {};
+      const applicantName =
+        [c.firstName, c.middleName, c.lastName].filter(Boolean).join(" ").trim() ||
+        c.email ||
+        "Applicant";
+
+      return {
+        applicationId: app._id,
+        applicationNumber: app.appNo || "N/A",
+        applicantName,
+        phone: c.phone || "",
+        panNumber: c.panNumber || "",
+        email: c.email || "",
+        customerId: app.customerId || null,
+        loanType: app.loanType || "PERSONAL",
+        amount: app.approvedLoanAmount || app.requestedAmount || c.loanAmount || 0,
+        status: app.status || "DRAFT",
+      };
+    });
 
     res.json({ success: true, loans: formattedLoans });
   } catch (error) {
