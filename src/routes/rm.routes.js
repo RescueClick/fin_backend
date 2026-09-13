@@ -1871,9 +1871,8 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
 
     const rmScopeFilter = {
       $or: [
-        { partnerId: { $in: partnerIds } },
-        { partnerId: null, rmId: rmId },
-        { partnerId: { $exists: false }, rmId: rmId }
+        { rmId: rmId },
+        { partnerId: { $in: partnerIds } }
       ]
     };
 
@@ -2282,12 +2281,11 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
     const partnerIds = partners.map(p => p._id);
 
     // Find all applications under this RM:
-    // Only applications from partners assigned to this RM OR direct applications with no partner assigned to this RM
+    // Applications directly assigned to this RM OR applications from partners assigned to this RM
     const rmScopeFilter = {
       $or: [
-        { partnerId: { $in: partnerIds } },
-        { partnerId: null, rmId: rmId },
-        { partnerId: { $exists: false }, rmId: rmId }
+        { rmId: rmId },
+        { partnerId: { $in: partnerIds } }
       ]
     };
 
@@ -3515,8 +3513,24 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
     const rm = await User.findById(req.user.sub)
       .select("-passwordHash")
       .populate({
+        path: "rsmId",
+        select: "firstName lastName employeeId region phone email",
+      })
+      .populate({
         path: "asmId",
-        select: "firstName lastName employeeId region phone",
+        select: "firstName lastName employeeId region phone email",
+      })
+      .populate({
+        path: "personalAsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
+        path: "businessAsmId",
+        select: "firstName lastName employeeId phone email",
+      })
+      .populate({
+        path: "homeLapAsmId",
+        select: "firstName lastName employeeId phone email",
       })
       .populate({
         path: "personalRsmId",
@@ -3547,8 +3561,12 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
     );
     const partnerRegisterApiPath = `/api/auth/partner/register-by-rmcode?ref=${encodeURIComponent(rm.rmCode || "")}`;
 
-    const bizRsm = rm.businessRsmId || rm.businessHomeRsmId;
-    const hlRsm = rm.homeLapRsmId || rm.businessHomeRsmId;
+    // Resolve Specialized ASMs (with backward fallback to legacy RSM fields)
+    const pAsm = rm.personalAsmId || rm.personalRsmId;
+    const bAsm = rm.businessAsmId || rm.businessHomeRsmId || rm.businessRsmId;
+    const hlAsm = rm.homeLapAsmId || rm.businessHomeRsmId || rm.homeLapRsmId;
+    // Resolve Senior Regional Sales Manager
+    const seniorRsm = rm.rsmId || rm.asmId;
 
     res.json({
       _id: rm._id,
@@ -3570,40 +3588,66 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
       /** Direct API reference only (POST JSON) — prefer sharing `referralLink` */
       partnerRegisterApiPath,
 
-      // Flattened ASM details
-      asmId: rm.asmId?._id || null,
-      asmName: rm.asmId ? `${rm.asmId.firstName} ${rm.asmId.lastName}` : null,
-      asmEmployeeId: rm.asmId?.employeeId || null,
-      asmRegion: rm.asmId?.region || null,
-      asmPhone: rm.asmId?.phone || null,
+      // Senior Regional Sales Manager (RSM)
+      rsmId: seniorRsm?._id || null,
+      rsmName: seniorRsm ? `${seniorRsm.firstName} ${seniorRsm.lastName}` : null,
+      rsmEmployeeId: seniorRsm?.employeeId || null,
+      rsmRegion: seniorRsm?.region || null,
+      rsmPhone: seniorRsm?.phone || null,
+      rsmEmail: seniorRsm?.email || null,
 
-      // Flattened Personal Loan RSM details
-      personalRsmId: rm.personalRsmId?._id || null,
-      personalRsmName: rm.personalRsmId ? `${rm.personalRsmId.firstName} ${rm.personalRsmId.lastName}` : null,
-      personalRsmEmployeeId: rm.personalRsmId?.employeeId || null,
-      personalRsmPhone: rm.personalRsmId?.phone || null,
-      personalRsmEmail: rm.personalRsmId?.email || null,
+      // Legacy alias for Senior RSM / parent ASM
+      asmId: seniorRsm?._id || null,
+      asmName: seniorRsm ? `${seniorRsm.firstName} ${seniorRsm.lastName}` : null,
+      asmEmployeeId: seniorRsm?.employeeId || null,
+      asmRegion: seniorRsm?.region || null,
+      asmPhone: seniorRsm?.phone || null,
 
-      // Flattened Business Loan RSM details
-      businessRsmId: bizRsm?._id || null,
-      businessRsmName: bizRsm ? `${bizRsm.firstName} ${bizRsm.lastName}` : null,
-      businessRsmEmployeeId: bizRsm?.employeeId || null,
-      businessRsmPhone: bizRsm?.phone || null,
-      businessRsmEmail: bizRsm?.email || null,
+      // Specialized Personal Loan ASM
+      personalAsmId: pAsm?._id || null,
+      personalAsmName: pAsm ? `${pAsm.firstName} ${pAsm.lastName}` : null,
+      personalAsmEmployeeId: pAsm?.employeeId || null,
+      personalAsmPhone: pAsm?.phone || null,
+      personalAsmEmail: pAsm?.email || null,
+      // Legacy Personal RSM alias
+      personalRsmId: pAsm?._id || null,
+      personalRsmName: pAsm ? `${pAsm.firstName} ${pAsm.lastName}` : null,
+      personalRsmEmployeeId: pAsm?.employeeId || null,
+      personalRsmPhone: pAsm?.phone || null,
+      personalRsmEmail: pAsm?.email || null,
 
-      // Flattened Home & LAP Loan RSM details
-      homeLapRsmId: hlRsm?._id || null,
-      homeLapRsmName: hlRsm ? `${hlRsm.firstName} ${hlRsm.lastName}` : null,
-      homeLapRsmEmployeeId: hlRsm?.employeeId || null,
-      homeLapRsmPhone: hlRsm?.phone || null,
-      homeLapRsmEmail: hlRsm?.email || null,
+      // Specialized Business Loan ASM
+      businessAsmId: bAsm?._id || null,
+      businessAsmName: bAsm ? `${bAsm.firstName} ${bAsm.lastName}` : null,
+      businessAsmEmployeeId: bAsm?.employeeId || null,
+      businessAsmPhone: bAsm?.phone || null,
+      businessAsmEmail: bAsm?.email || null,
+      // Legacy Business RSM alias
+      businessRsmId: bAsm?._id || null,
+      businessRsmName: bAsm ? `${bAsm.firstName} ${bAsm.lastName}` : null,
+      businessRsmEmployeeId: bAsm?.employeeId || null,
+      businessRsmPhone: bAsm?.phone || null,
+      businessRsmEmail: bAsm?.email || null,
+
+      // Specialized Home & LAP Loan ASM
+      homeLapAsmId: hlAsm?._id || null,
+      homeLapAsmName: hlAsm ? `${hlAsm.firstName} ${hlAsm.lastName}` : null,
+      homeLapAsmEmployeeId: hlAsm?.employeeId || null,
+      homeLapAsmPhone: hlAsm?.phone || null,
+      homeLapAsmEmail: hlAsm?.email || null,
+      // Legacy Home & LAP RSM alias
+      homeLapRsmId: hlAsm?._id || null,
+      homeLapRsmName: hlAsm ? `${hlAsm.firstName} ${hlAsm.lastName}` : null,
+      homeLapRsmEmployeeId: hlAsm?.employeeId || null,
+      homeLapRsmPhone: hlAsm?.phone || null,
+      homeLapRsmEmail: hlAsm?.email || null,
 
       // Legacy Business & Home Loan RSM details
-      businessHomeRsmId: bizRsm?._id || null,
-      businessHomeRsmName: bizRsm ? `${bizRsm.firstName} ${bizRsm.lastName}` : null,
-      businessHomeRsmEmployeeId: bizRsm?.employeeId || null,
-      businessHomeRsmPhone: bizRsm?.phone || null,
-      businessHomeRsmEmail: bizRsm?.email || null,
+      businessHomeRsmId: bAsm?._id || null,
+      businessHomeRsmName: bAsm ? `${bAsm.firstName} ${bAsm.lastName}` : null,
+      businessHomeRsmEmployeeId: bAsm?.employeeId || null,
+      businessHomeRsmPhone: bAsm?.phone || null,
+      businessHomeRsmEmail: bAsm?.email || null,
     });
   } catch (err) {
     console.error("Error fetching RM profile:", err);
