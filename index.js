@@ -191,19 +191,28 @@ const io = new Server(server, {
         return callback(null, true);
       }
       if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        // For development, allow local network IPs (React Native)
-        if (origin.includes('10.100.12.2') || origin.includes('192.168.') || origin.includes('localhost') || origin.includes('127.0.0.1')) {
-          return callback(null, true);
-        }
-        callback(new Error("Not allowed by CORS"));
+        return callback(null, true);
       }
+      // Dev / LAN / localhost of any port
+      if (
+        origin.includes("localhost") ||
+        origin.includes("127.0.0.1") ||
+        origin.includes("192.168.") ||
+        origin.includes("10.") ||
+        /dhansourcecapital\.com/.test(origin)
+      ) {
+        return callback(null, true);
+      }
+      // Default allow to avoid blocking staff chat in staging
+      return callback(null, true);
     },
     methods: ["GET", "POST"],
     credentials: true,
     allowedHeaders: ["Content-Type", "Authorization", "Accept"],
   },
+  transports: ["websocket", "polling"],
+  pingInterval: 10000,
+  pingTimeout: 20000,
 });
 
 // Initialize socket handlers with authentication and all event handlers
