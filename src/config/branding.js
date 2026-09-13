@@ -56,6 +56,36 @@ export const getPartnerAppPlayStoreUrl = () =>
       "https://play.google.com/store/apps/details?id=com.dhansourcecapital.partner&hl=en_IN"
   ).trim();
 
+/** Google Play listing for customer Android app (loan track / apply). */
+export const getCustomerAppPlayStoreUrl = () =>
+  String(
+    process.env.CUSTOMER_APP_PLAY_STORE_URL ||
+      "https://play.google.com/store/apps/details?id=com.dhansourcecapital.customer&hl=en_IN"
+  ).trim();
+
+/** Exact name to search on Play Store until the listing is live. */
+export const getCustomerAppPlaySearchName = () =>
+  String(process.env.CUSTOMER_APP_PLAY_SEARCH_NAME || "DhanSource Customer").trim();
+
+export const isCustomerAppOnPlayStore = () =>
+  String(process.env.CUSTOMER_APP_ON_PLAY_STORE || "false").toLowerCase() === "true";
+
+/** Play Store search URL (usable before publish). */
+export const getCustomerAppPlaySearchUrl = () => {
+  const q = encodeURIComponent(getCustomerAppPlaySearchName());
+  return `https://play.google.com/store/search?q=${q}&c=apps`;
+};
+
+/** Web tracking / login URL for customers after loan file creation. */
+export const getCustomerTrackUrl = (appNo) => {
+  const base = getClientBaseUrl();
+  const login = `${base}/LoginPage`;
+  if (appNo) {
+    return `${login}?redirect=/customer&appNo=${encodeURIComponent(String(appNo))}`;
+  }
+  return `${login}?redirect=/customer`;
+};
+
 /**
  * Append UTM params for analytics (Google Analytics, etc.) when partners share links.
  * Skips if `utm_source` is already present.

@@ -1,6 +1,16 @@
 // Comprehensive Email Service for all main workflows
 import { sendMail } from "./sendMail.js";
-import { COMPANY_NAME, COMPANY_NAME_LEGAL, getClientBaseUrl, SUPPORT_EMAIL } from "../config/branding.js";
+import {
+  COMPANY_NAME,
+  COMPANY_NAME_LEGAL,
+  getClientBaseUrl,
+  getCustomerAppPlaySearchName,
+  getCustomerAppPlaySearchUrl,
+  getCustomerAppPlayStoreUrl,
+  getCustomerTrackUrl,
+  isCustomerAppOnPlayStore,
+  SUPPORT_EMAIL,
+} from "../config/branding.js";
 
 /**
  * Email templates and service functions for all main workflows
@@ -300,23 +310,58 @@ export const sendPartnerRegistrationEmail = async (partner, password = null) => 
 
 /**
  * Send loan application created email to customer
+ * Includes: app no, login ID/password, web track link, Play Store customer app link
  */
 export const sendLoanApplicationEmail = async (customer, application, tempPassword = null) => {
-  const loginUrl = `${getClientBaseUrl()}/login`;
-  
+  const trackUrl = getCustomerTrackUrl(application?.appNo);
+  const playStoreUrl = getCustomerAppPlayStoreUrl();
+  const playSearchUrl = getCustomerAppPlaySearchUrl();
+  const playSearchName = getCustomerAppPlaySearchName();
+  const appOnPlay = isCustomerAppOnPlayStore();
+  const loginEmail = customer.email || "";
+
+  const playStoreBlock = appOnPlay
+    ? `<div class="info-box">
+      <h3 style="margin-top: 0; color: #12B99C;">Download DhanSource Customer App</h3>
+      <p style="margin: 0 0 12px; font-size: 14px; color: #334155;">
+        Track status, upload documents, and apply for loans on your phone.
+      </p>
+      <div style="text-align: center;">
+        <a href="${playStoreUrl}" class="button" style="background: #0F172A;">Get it on Google Play</a>
+      </div>
+    </div>`
+    : `<div class="info-box">
+      <h3 style="margin-top: 0; color: #12B99C;">Get DhanSource Customer App</h3>
+      <p style="margin: 0 0 10px; font-size: 14px; color: #334155;">
+        The app is publishing on Google Play soon. When available, find it like this:
+      </p>
+      <ol style="margin: 0 0 12px; padding-left: 18px; font-size: 14px; color: #334155; line-height: 1.6;">
+        <li>Open <strong>Google Play Store</strong> on your Android phone</li>
+        <li>Search for: <strong style="background:#ECFDF5;padding:2px 8px;border-radius:4px;">${playSearchName}</strong></li>
+        <li>Install the official DhanSource Customer app</li>
+        <li>Sign in with the email &amp; password in this message</li>
+      </ol>
+      <div style="text-align: center;">
+        <a href="${playSearchUrl}" class="button" style="background: #0F172A;">Open Play Store Search</a>
+      </div>
+      <p style="margin: 12px 0 0; font-size: 12px; color: #64748B;">
+        Until the app appears in search, use Track Application Online above.
+      </p>
+    </div>`;
+
   const content = `
-    <h2>Dear ${customer.firstName},</h2>
-    <p>Your loan application has been successfully created.</p>
+    <h2>Dear ${customer.firstName || "Customer"},</h2>
+    <p>Your loan application has been successfully created${application?.appNo ? ` with Application No <strong>${application.appNo}</strong>` : ""}.</p>
     
     <div class="info-box">
       <h3 style="margin-top: 0; color: #12B99C;">Application Details</h3>
       <div class="info-row">
         <span class="label">Application Number:</span>
-        <span class="value">${application.appNo}</span>
+        <span class="value"><strong>${application.appNo || "N/A"}</strong></span>
       </div>
       <div class="info-row">
         <span class="label">Loan Type:</span>
-        <span class="value">${application.loanType}</span>
+        <span class="value">${application.loanType || "N/A"}</span>
       </div>
       <div class="info-row">
         <span class="label">Loan Amount:</span>
@@ -324,38 +369,42 @@ export const sendLoanApplicationEmail = async (customer, application, tempPasswo
       </div>
       <div class="info-row">
         <span class="label">Status:</span>
-        <span class="status-badge status-pending">${application.status}</span>
+        <span class="status-badge status-pending">${application.status || "SUBMITTED"}</span>
       </div>
     </div>
     
-    ${tempPassword ? `
     <div class="info-box">
-      <h3 style="margin-top: 0; color: #12B99C;">Login Credentials</h3>
+      <h3 style="margin-top: 0; color: #12B99C;">Login &amp; Track Online</h3>
       <div class="info-row">
-        <span class="label">Email:</span>
-        <span class="value">${customer.email}</span>
+        <span class="label">Login Email / ID:</span>
+        <span class="value"><strong>${loginEmail}</strong></span>
       </div>
-      <div class="info-row">
+      ${
+        tempPassword
+          ? `<div class="info-row">
         <span class="label">Password:</span>
         <span class="value"><strong>${tempPassword}</strong></span>
       </div>
       <div class="alert alert-warning">
-        <strong>⚠️ Important:</strong> Please change your password after first login.
-      </div>
+        <strong>Important:</strong> Please change your password after first login.
+      </div>`
+          : `<p style="margin: 8px 0 0; font-size: 14px; color: #475569;">Use your existing account password to sign in and track this file.</p>`
+      }
     </div>
-    ` : ""}
-    
-    <div style="text-align: center;">
-      <a href="${loginUrl}" class="button">View Your Application</a>
+
+    <div style="text-align: center; margin: 24px 0;">
+      <a href="${trackUrl}" class="button">Track Application Online</a>
     </div>
+
+    ${playStoreBlock}
     
-    <p style="margin-top: 30px;">We will keep you updated on the status of your application.</p>
+    <p style="margin-top: 24px;">We will keep you updated on the status of your application.</p>
   `;
 
   try {
     await sendMail({
       to: customer.email,
-      subject: `Loan Application Created - ${application.appNo}`,
+      subject: `Loan Application Created - ${application.appNo || "DhanSource"}`,
       html: getEmailTemplate("Loan Application Created", content),
     });
     console.log("✅ Loan application email sent to:", customer.email);
