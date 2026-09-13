@@ -2,6 +2,7 @@ import jwt from "jsonwebtoken";
 import { User } from "../models/User.js";
 import { Application } from "../models/Application.js";
 import { getReportingLineFromRmId } from "../utils/reportingLine.js";
+import { getOnlineStaffIds, hasActiveHeartbeat } from "../utils/chatPresence.js";
 
 // Store active users: { userId: { socketIds: Set, role, userData, connectedAt } }
 const activeUsers = new Map();
@@ -780,12 +781,7 @@ export const initializeSocket = (io) => {
     });
 
     socket.on("chat:get_online_staff", (callback) => {
-      const onlineIds = [];
-      for (const [uid, info] of activeUsers.entries()) {
-        if (isStaffRole(info.role) && info.socketIds?.size > 0) {
-          onlineIds.push(String(uid));
-        }
-      }
+      const onlineIds = getOnlineStaffIds(activeUsers);
       if (typeof callback === "function") {
         callback({ success: true, onlineUserIds: onlineIds });
       } else {
@@ -809,7 +805,8 @@ export const initializeSocket = (io) => {
           activeUsers.delete(userId);
         }
 
-        if (isStaffRole(role)) {
+        // Stay "Online" if chat UI is still open (REST heartbeat)
+        if (isStaffRole(role) && !hasActiveHeartbeat(userId)) {
           io.to("internal_staff").emit("chat:presence", {
             userId: String(userId),
             isOnline: false,

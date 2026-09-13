@@ -8,6 +8,8 @@ import { Conversation } from "../models/Conversation.js";
 import { ChatMessage } from "../models/ChatMessage.js";
 import { Application } from "../models/Application.js";
 import { upload } from "../middleware/upload.js";
+import { activeUsers } from "../socket/socketHandler.js";
+import { getOnlineStaffIds, markHeartbeat } from "../utils/chatPresence.js";
 
 const router = express.Router();
 
@@ -205,6 +207,38 @@ router.get("/contacts", async (req, res) => {
   } catch (error) {
     console.error("Error fetching chat contacts:", error);
     res.status(500).json({ message: "Failed to fetch chat contacts", error: error.message });
+  }
+});
+
+// ============================================================================
+// 1b. POST /api/chat/heartbeat  — mark me online while chat UI is open
+// GET  /api/chat/online-staff — list online staff (socket + heartbeat)
+// ============================================================================
+router.post("/heartbeat", async (req, res) => {
+  try {
+    const userId = markHeartbeat(req.user.sub, req.user.role || "");
+
+    // Notify peers over socket if available
+    if (global.io) {
+      global.io.to("internal_staff").emit("chat:presence", {
+        userId,
+        isOnline: true,
+        timestamp: new Date(),
+      });
+    }
+
+    res.json({ success: true, onlineUserIds: getOnlineStaffIds(activeUsers) });
+  } catch (error) {
+    console.error("chat heartbeat error:", error);
+    res.status(500).json({ message: "Heartbeat failed", error: error.message });
+  }
+});
+
+router.get("/online-staff", async (req, res) => {
+  try {
+    res.json({ success: true, onlineUserIds: getOnlineStaffIds(activeUsers) });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch online staff", error: error.message });
   }
 });
 
