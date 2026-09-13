@@ -690,6 +690,180 @@ router.patch(
   }
 );
 
+/**
+ * GET /api/customer/vault/documents
+ * Fetch customer's uploaded vault / KYC documents
+ */
+router.get("/vault/documents", auth, requireRole(ROLES.CUSTOMER, "USER", ROLES.PARTNER), async (req, res) => {
+  try {
+    const user = await User.findById(req.user.sub).select("docs adharCard panCard selfie").lean();
+    if (!user) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+    return res.json({
+      success: true,
+      docs: Array.isArray(user.docs) ? user.docs : [],
+      panCard: user.panCard || null,
+      adharCard: user.adharCard || null,
+      selfie: user.selfie || null,
+    });
+  } catch (err) {
+    console.error("Fetch customer vault documents error:", err);
+    return res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
+
+/**
+ * POST /api/customer/vault/documents
+ * Upload documents to customer's personal document vault
+ */
+router.post(
+  "/vault/documents",
+  auth,
+  requireRole(ROLES.CUSTOMER, "USER", ROLES.PARTNER),
+  upload.array("docs", 10),
+  async (req, res) => {
+    try {
+      const customerId = req.user.sub;
+      const user = await User.findById(customerId);
+      if (!user) {
+        if (req.files?.length) await deleteS3ObjectsForUploadedFiles(req.files);
+        return res.status(404).json({ message: "Customer not found" });
+      }
+
+      const rawDocTypes = Array.isArray(req.body.docTypes)
+        ? req.body.docTypes
+        : req.body.docTypes
+        ? [req.body.docTypes]
+        : [];
+
+      if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ message: "No files uploaded" });
+      }
+
+      const viol = oversizeDocBatchViolation(req.files, rawDocTypes);
+      if (viol) {
+        await deleteS3ObjectsForUploadedFiles(req.files);
+        return res.status(400).json({ message: formatOversizeMessage(viol) });
+      }
+
+      const existingDocs = Array.isArray(user.docs) ? [...user.docs] : [];
+
+      req.files.forEach((file, index) => {
+        const rawType = rawDocTypes[index] || "DOCUMENT";
+        const docType = normalizeDocTypeForLimits(rawType);
+        const url = file.location;
+
+        if (docType === "PAN") user.panCard = url;
+        else if (docType === "AADHAR" || docType === "AADHAR_FRONT") user.adharCard = url;
+        else if (docType === "SELFIE" || docType === "PHOTO") user.selfie = url;
+
+        const existingIdx = existingDocs.findIndex(
+          (d) => String(d.docType || "").toUpperCase() === String(docType).toUpperCase()
+        );
+
+        if (existingIdx !== -1) {
+          existingDocs[existingIdx].url = url;
+          existingDocs[existingIdx].status = "PENDING";
+          existingDocs[existingIdx].uploadedAt = new Date();
+          existingDocs[existingIdx].uploadedBy = customerId;
+        } else {
+          existingDocs.push({
+            docType,
+            url,
+            uploadedBy: customerId,
+            status: "PENDING",
+            uploadedAt: new Date(),
+          });
+        }
+      });
+
+      user.docs = existingDocs;
+      await user.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Documents uploaded and saved to vault successfully",
+        docs: user.docs,
+      });
+    } catch (err) {
+      console.error("Customer vault upload error:", err);
+      if (req.files?.length) {
+        try {
+          await deleteS3ObjectsForUploadedFiles(req.files);
+        } catch {}
+      }
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+/**
+ * POST /api/customer/applications/:id/documents
+ * Single document upload for an application owned by customer
+ */
+router.post(
+  "/applications/:id/documents",
+  auth,
+  requireRole(ROLES.CUSTOMER, "USER", ROLES.PARTNER),
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const customerId = req.user.sub;
+      const { id } = req.params;
+      const docType = req.query.docType || req.body?.docType;
+
+      if (!req.file) {
+        return res.status(400).json({ message: "No file provided" });
+      }
+
+      const app = await Application.findOne({
+        _id: id,
+        customerId,
+      });
+
+      if (!app) {
+        return res.status(404).json({ message: "Application not found" });
+      }
+
+      const normalizedType = normalizeDocTypeForLimits(docType || "DOCUMENT");
+      const url = req.file.location;
+
+      const existingDocs = Array.isArray(app.docs) ? [...app.docs] : [];
+      const existingIdx = existingDocs.findIndex(
+        (d) => String(d.docType || "").toUpperCase() === String(normalizedType).toUpperCase()
+      );
+
+      if (existingIdx !== -1) {
+        existingDocs[existingIdx].url = url;
+        existingDocs[existingIdx].status = "PENDING";
+        existingDocs[existingIdx].uploadedAt = new Date();
+        existingDocs[existingIdx].uploadedBy = customerId;
+      } else {
+        existingDocs.push({
+          docType: normalizedType,
+          url,
+          uploadedBy: customerId,
+          status: "PENDING",
+          uploadedAt: new Date(),
+        });
+      }
+
+      app.docs = existingDocs;
+      await app.save();
+
+      return res.json({
+        success: true,
+        message: "Document uploaded successfully",
+        doc: { docType: normalizedType, url, status: "PENDING" },
+      });
+    } catch (err) {
+      console.error("Customer application doc upload error:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
 // POST /api/customer/delete-account-request (Customer Account Deletion Request with Active Loan Protection)
 router.post(
   "/delete-account-request",
