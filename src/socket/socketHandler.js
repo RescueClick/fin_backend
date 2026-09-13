@@ -3,8 +3,14 @@ import { User } from "../models/User.js";
 import { Application } from "../models/Application.js";
 import { getReportingLineFromRmId } from "../utils/reportingLine.js";
 
-// Store active users: { userId: { socketId, role, ... } }
+// Store active users: { userId: { socketIds: Set, role, userData, connectedAt } }
 const activeUsers = new Map();
+
+const STAFF_ROLES = ["SUPER_ADMIN", "ADMIN", "ASM", "RSM", "RM"];
+
+function isStaffRole(role) {
+  return STAFF_ROLES.includes(role);
+}
 
 // Socket authentication middleware
 export const authenticateSocket = async (socket, next) => {
@@ -71,13 +77,20 @@ export const initializeSocket = (io) => {
 
     console.log(`✅ User connected: ${userData.firstName} ${userData.lastName} (${role}) - Socket ID: ${socket.id} - User ID: ${userId}`);
 
-    // Store active user
-    activeUsers.set(userId, {
-      socketId: socket.id,
-      role,
-      userData,
-      connectedAt: new Date(),
-    });
+    // Track multi-tab sockets so presence stays online until last tab closes
+    const existing = activeUsers.get(userId);
+    if (existing) {
+      existing.socketIds.add(socket.id);
+      existing.role = role;
+      existing.userData = userData;
+    } else {
+      activeUsers.set(userId, {
+        socketIds: new Set([socket.id]),
+        role,
+        userData,
+        connectedAt: new Date(),
+      });
+    }
 
     // Join role-based room
     socket.join(role);
@@ -114,14 +127,16 @@ export const initializeSocket = (io) => {
     }
 
     // Join internal staff room for internal chat presence
-    const isStaffRole = ["SUPER_ADMIN", "ADMIN", "ASM", "RSM", "RM"].includes(role);
-    if (isStaffRole) {
+    if (isStaffRole(role)) {
       socket.join("internal_staff");
-      io.to("internal_staff").emit("chat:presence", {
-        userId,
-        isOnline: true,
-        timestamp: new Date(),
-      });
+      // Only broadcast "online" when this is the user's first connected socket
+      if (!existing) {
+        io.to("internal_staff").emit("chat:presence", {
+          userId: String(userId),
+          isOnline: true,
+          timestamp: new Date(),
+        });
+      }
     }
     
     // Log all rooms user is in
@@ -737,38 +752,35 @@ export const initializeSocket = (io) => {
     });
 
     socket.on("chat:typing", ({ conversationId, recipientId }) => {
+      const payload = {
+        conversationId: conversationId ? String(conversationId) : null,
+        userId: String(userId),
+        name: `${userData.firstName || ""} ${userData.lastName || ""}`.trim() || "Staff",
+      };
       if (conversationId) {
-        socket.to(`chat_conv_${conversationId}`).emit("chat:user_typing", {
-          conversationId,
-          userId,
-          name: `${userData.firstName || ""} ${userData.lastName || ""}`.trim() || "Staff",
-        });
+        socket.to(`chat_conv_${conversationId}`).emit("chat:user_typing", payload);
       } else if (recipientId) {
-        io.to(`user_${recipientId}`).emit("chat:user_typing", {
-          userId,
-          name: `${userData.firstName || ""} ${userData.lastName || ""}`.trim() || "Staff",
-        });
+        io.to(`user_${recipientId}`).emit("chat:user_typing", payload);
       }
     });
 
     socket.on("chat:stop_typing", ({ conversationId, recipientId }) => {
+      const payload = {
+        conversationId: conversationId ? String(conversationId) : null,
+        userId: String(userId),
+      };
       if (conversationId) {
-        socket.to(`chat_conv_${conversationId}`).emit("chat:user_stop_typing", {
-          conversationId,
-          userId,
-        });
+        socket.to(`chat_conv_${conversationId}`).emit("chat:user_stop_typing", payload);
       } else if (recipientId) {
-        io.to(`user_${recipientId}`).emit("chat:user_stop_typing", {
-          userId,
-        });
+        io.to(`user_${recipientId}`).emit("chat:user_stop_typing", payload);
       }
     });
 
     socket.on("chat:get_online_staff", (callback) => {
       const onlineIds = [];
       for (const [uid, info] of activeUsers.entries()) {
-        if (["SUPER_ADMIN", "ADMIN", "ASM", "RSM", "RM"].includes(info.role)) {
-          onlineIds.push(uid);
+        if (isStaffRole(info.role) && info.socketIds?.size > 0) {
+          onlineIds.push(String(uid));
         }
       }
       if (typeof callback === "function") {
@@ -783,13 +795,20 @@ export const initializeSocket = (io) => {
     socket.on("disconnect", (reason) => {
       if (userData && userId) {
         console.log(`❌ User disconnected: ${userData.firstName} ${userData.lastName} (${role}) - ${socket.id} - Reason: ${reason}`);
-        
-        // Remove from active users
-        activeUsers.delete(userId);
 
-        if (["SUPER_ADMIN", "ADMIN", "ASM", "RSM", "RM"].includes(role)) {
+        const entry = activeUsers.get(userId);
+        if (entry) {
+          entry.socketIds.delete(socket.id);
+          // Stay online if user still has another tab/device connected
+          if (entry.socketIds.size > 0) {
+            return;
+          }
+          activeUsers.delete(userId);
+        }
+
+        if (isStaffRole(role)) {
           io.to("internal_staff").emit("chat:presence", {
-            userId,
+            userId: String(userId),
             isOnline: false,
             timestamp: new Date(),
           });
@@ -797,7 +816,7 @@ export const initializeSocket = (io) => {
 
         // Emit user offline status
         io.to(role).emit("userOffline", {
-          userId,
+          userId: String(userId),
           timestamp: new Date(),
         });
       } else {
