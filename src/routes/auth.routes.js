@@ -75,8 +75,28 @@ router.post(
       throw new ApiError(400, "email and password required", { code: "VALIDATION_ERROR" });
     }
 
-    const user = await User.findOne({ email: String(email).toLowerCase() });
+    const input = String(email || "").trim();
+    const normalizedEmail = input.toLowerCase();
+    const digitsOnly = input.replace(/\D/g, "");
+    const normalizedPhone = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : null;
+
+    const user = await User.findOne({
+      $or: [
+        { email: normalizedEmail },
+        ...(normalizedPhone ? [{ phone: normalizedPhone }, { registeredMobile: normalizedPhone }] : []),
+        { employeeId: input },
+        { partnerCode: input },
+        { referralCode: input },
+      ],
+    });
     if (!user) throw new ApiError(401, "Invalid credentials", { code: "AUTH_INVALID_CREDENTIALS" });
+
+    if (!user.passwordHash) {
+      throw new ApiError(500, "Password not set for this account", { code: "AUTH_PASSWORD_NOT_SET" });
+    }
+
+    const ok = await argon2.verify(user.passwordHash, password);
+    if (!ok) throw new ApiError(401, "Invalid credentials", { code: "AUTH_INVALID_CREDENTIALS" });
 
     if (user.status === "SUSPENDED" || user.status !== "ACTIVE") {
       const rejectedDocs = (user.docs || [])
@@ -114,13 +134,6 @@ router.post(
         phone: user.phone,
       });
     }
-
-    if (!user.passwordHash) {
-      throw new ApiError(500, "Password not set for this account", { code: "AUTH_PASSWORD_NOT_SET" });
-    }
-
-    const ok = await argon2.verify(user.passwordHash, password);
-    if (!ok) throw new ApiError(401, "Invalid credentials", { code: "AUTH_INVALID_CREDENTIALS" });
 
     const token = signAccessToken({
       sub: String(user._id),
