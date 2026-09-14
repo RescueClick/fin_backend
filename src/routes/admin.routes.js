@@ -945,25 +945,37 @@ router.post(
 
       // Create Area Sales Manager (ASM)
       const targetRole = ROLES.ASM;
-      const asm = await User.create({
-        firstName,
-        lastName,
-        phone: normalizedPhone,
-        email: normalizedEmail,
-        passwordHash: await argon2.hash(rawPassword),
-        role: targetRole,
-        employeeId: await generateEmployeeId(targetRole),
-        asmCode: makeAsmCode(),
-        rsmCode: makeAsmCode(),
-        dob,
-        joinDate: joinDate ? new Date(joinDate) : new Date(),
-        region: (parentRsm && parentRsm.region) || region || "N/A",
-        asmType: specialtyType || null,
-        rsmType: specialtyType || null,
-        rsmId: parentRsm ? parentRsm._id : null,
-        asmId: parentRsm ? parentRsm._id : null,
-        adminId: req.user.sub,
-      });
+      let asm = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const empId = await generateEmployeeId(targetRole);
+          asm = await User.create({
+            firstName,
+            lastName,
+            phone: normalizedPhone,
+            email: normalizedEmail,
+            passwordHash: await argon2.hash(rawPassword),
+            role: targetRole,
+            employeeId: empId,
+            asmCode: makeAsmCode(),
+            rsmCode: makeAsmCode(),
+            dob,
+            joinDate: joinDate ? new Date(joinDate) : new Date(),
+            region: (parentRsm && parentRsm.region) || region || "N/A",
+            asmType: specialtyType || null,
+            rsmType: specialtyType || null,
+            rsmId: parentRsm ? parentRsm._id : null,
+            asmId: parentRsm ? parentRsm._id : null,
+            adminId: req.user.sub,
+          });
+          break;
+        } catch (createErr) {
+          if (createErr.code === 11000 && createErr.keyPattern?.employeeId && attempt < 2) {
+            continue;
+          }
+          throw createErr;
+        }
+      }
 
       // Transfer selected RMs if provided
       let transferredRmsCount = 0;

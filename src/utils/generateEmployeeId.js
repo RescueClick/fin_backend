@@ -3,8 +3,9 @@ import { User } from "../models/User.js";
 import { Application } from "../models/Application.js";
 
 /**
- * Generate unique employee/application ID with race condition protection
- * Uses retry logic to handle concurrent requests
+ * Generate unique, strictly linear employee/application ID.
+ * Scans all existing IDs with the given prefix globally across the collection
+ * to ensure true linearity and prevent Mongo duplicate key errors (E11000).
  */
 export async function generateEmployeeId(role, maxRetries = 10) {
   let prefix;
@@ -49,92 +50,60 @@ export async function generateEmployeeId(role, maxRetries = 10) {
       break;
 
     default:
-      throw new Error("Invalid role for employee ID");
+      throw new Error(`Invalid role for employee ID: ${role}`);
   }
 
-  // Retry logic to handle race conditions
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      // Get the highest existing ID for this role
-      let last;
-      if (role === "APPLICATION") {
-        last = await Application.find()
-          .sort({ createdAt: -1 })
-          .limit(1)
-          .select("appNo")
-          .lean();
-      } else {
-        last = await User.find({ role })
-          .sort({ createdAt: -1 })
-          .limit(1)
-          .select("employeeId")
-          .lean();
-      }
+      // Find all records globally with this prefix (NO role filter, because index is global)
+      const existingRecords = await Model.find({
+        [idField]: { $regex: `^${prefix}\\d+`, $options: "i" },
+      })
+        .select(idField)
+        .lean();
 
-      // Determine next number
-      let nextNum = 1;
-      if (last.length && last[0]) {
-        const existingId = last[0].employeeId || last[0].appNo;
-        if (existingId && existingId.startsWith(prefix)) {
-          const numPart = existingId.slice(prefix.length);
-          const parsed = parseInt(numPart, 10);
-          if (!isNaN(parsed)) {
-            nextNum = parsed + 1;
+      let maxNum = 0;
+      const regex = new RegExp(`^${prefix}(\\d+)`, "i");
+
+      for (const rec of existingRecords) {
+        const val = rec[idField];
+        if (typeof val === "string") {
+          const match = val.match(regex);
+          if (match && match[1]) {
+            const parsed = parseInt(match[1], 10);
+            if (!isNaN(parsed) && parsed > maxNum) {
+              maxNum = parsed;
+            }
           }
         }
       }
 
-      // Generate candidate ID
-      const candidateId = `${prefix}${nextNum.toString().padStart(4, "0")}`;
+      // Linear sequence: next number is strictly maxNum + 1
+      let candidateNum = maxNum + 1;
 
-      // ✅ CRITICAL: Check if this ID already exists (handles race conditions)
-      let exists = false;
-      if (role === "APPLICATION") {
-        exists = await Application.findOne({ appNo: candidateId }).lean();
-      } else {
-        exists = await User.findOne({ 
-          [idField]: candidateId,
-          role: role !== "APPLICATION" ? role : undefined
-        }).lean();
+      // Verify availability against whole collection until an unused candidate is found
+      while (true) {
+        const candidateId = `${prefix}${candidateNum.toString().padStart(4, "0")}`;
+        const taken = await Model.findOne({ [idField]: candidateId })
+          .select("_id")
+          .lean();
+
+        if (!taken) {
+          return candidateId;
+        }
+
+        candidateNum++;
       }
-
-      // If ID doesn't exist, return it
-      if (!exists) {
-        return candidateId;
-      }
-
-      // If ID exists, increment and try again (another request created it)
-      console.log(`⚠️ ID ${candidateId} already exists, trying next number...`);
-      nextNum++;
-      
-      // Try next number
-      const nextCandidateId = `${prefix}${nextNum.toString().padStart(4, "0")}`;
-      let nextExists = false;
-      if (role === "APPLICATION") {
-        nextExists = await Application.findOne({ appNo: nextCandidateId }).lean();
-      } else {
-        nextExists = await User.findOne({ 
-          [idField]: nextCandidateId,
-          role: role !== "APPLICATION" ? role : undefined
-        }).lean();
-      }
-
-      if (!nextExists) {
-        return nextCandidateId;
-      }
-
-      // If still exists, wait a bit and retry
-      await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
-    } catch (error) {
-      console.error(`Error generating ${role} ID (attempt ${attempt + 1}):`, error);
+    } catch (err) {
+      console.error(`Error in generateEmployeeId for ${role} (attempt ${attempt + 1}):`, err);
       if (attempt === maxRetries - 1) {
-        throw new Error(`Failed to generate unique ${role} ID after ${maxRetries} attempts: ${error.message}`);
+        // Fallback to high random suffix if DB query consistently fails
+        const timestampSuffix = Date.now().toString().slice(-4);
+        return `${prefix}9${timestampSuffix}`;
       }
-      await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
     }
   }
 
-  // Fallback: Use timestamp-based ID if all retries fail
-  const timestamp = Date.now().toString().slice(-6);
-  return `${prefix}${timestamp}`;
+  return `${prefix}${Date.now().toString().slice(-4)}`;
 }
