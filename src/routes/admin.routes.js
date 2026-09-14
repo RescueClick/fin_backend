@@ -824,6 +824,9 @@ router.put("/bank-rms/:id", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
     }
 
     Object.assign(existing, payload);
+    existing.markModified("rm");
+    existing.markModified("asm");
+    existing.markModified("rsm");
     existing.updatedBy = req.user.sub;
 
     if (req.body?.isActive !== undefined) {

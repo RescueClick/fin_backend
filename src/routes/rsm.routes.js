@@ -1912,6 +1912,9 @@ router.put(
       }
 
       Object.assign(existing, payload);
+      existing.markModified("rm");
+      existing.markModified("asm");
+      existing.markModified("rsm");
       existing.updatedBy = req.user.sub;
 
       if (req.body?.isActive !== undefined) {
