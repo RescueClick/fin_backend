@@ -578,11 +578,24 @@ router.post(
     }
 
     let defaultPartner = null;
-    if (process.env.DEFAULT_COMPANY_PARTNER_CODE) {
-      defaultPartner = await User.findOne({ partnerCode: process.env.DEFAULT_COMPANY_PARTNER_CODE, role: ROLES.PARTNER });
+    try {
+      const { Config } = await import("../models/Config.js");
+      const doc = await Config.findOne({ key: "PUBLIC_LOAN_DEFAULT_PARTNER_CODE" }).lean();
+      if (doc?.value?.partnerId) {
+        defaultPartner = await User.findOne({ _id: doc.value.partnerId, role: ROLES.PARTNER, status: "ACTIVE" });
+      }
+      if (!defaultPartner && doc?.value?.partnerCode) {
+        defaultPartner = await User.findOne({ partnerCode: doc.value.partnerCode, role: ROLES.PARTNER, status: "ACTIVE" });
+      }
+    } catch (cfgErr) {
+      console.warn("Could not query PUBLIC_LOAN_DEFAULT_PARTNER_CODE in customer signup:", cfgErr?.message);
+    }
+
+    if (!defaultPartner && process.env.DEFAULT_COMPANY_PARTNER_CODE) {
+      defaultPartner = await User.findOne({ partnerCode: process.env.DEFAULT_COMPANY_PARTNER_CODE, role: ROLES.PARTNER, status: "ACTIVE" });
     }
     if (!defaultPartner) {
-      defaultPartner = await User.findOne({ role: ROLES.PARTNER, firstName: /sanjay/i });
+      defaultPartner = await User.findOne({ role: ROLES.PARTNER, firstName: /sanjay/i, status: "ACTIVE" });
     }
     if (!defaultPartner) {
       defaultPartner = await User.findOne({ role: ROLES.PARTNER, status: "ACTIVE" });

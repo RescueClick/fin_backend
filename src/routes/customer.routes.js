@@ -14,8 +14,10 @@ import {
 } from "../utils/docUploadLimits.js";
 import { findCustomerApplyBlocker } from "../utils/loanReapplyPolicy.js";
 import { resolveSpecializedAsmForLoanType } from "../utils/rmRsmHierarchy.js";
+import mongoose from "mongoose";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
-import { sendDeleteAccountRequestEmail } from "../utils/emailService.js";
+import { sendDeleteAccountRequestEmail, sendLoanApplicationEmail } from "../utils/emailService.js";
+import { createNotification } from "../utils/notificationService.js";
 import { getSupportSettings } from "../utils/supportSettings.js";
 
 const router = Router();
@@ -82,7 +84,7 @@ router.post(
       }
 
       // Parse input JSON
-      const { customer, product, loanType, references } = JSON.parse(
+      const { customer, product, loanType, references, partnerReferralCode } = JSON.parse(
         req.body.data || "{}"
       );
 
@@ -273,6 +275,24 @@ router.post(
       let appPartnerId = req.user.role === ROLES.PARTNER ? userId : customerUser.partnerId;
       let appRmId = req.user.role === ROLES.PARTNER ? partner?.rmId : customerUser.rmId;
 
+      // If customer provided an explicit partner referral code in the form
+      if (req.user.role === ROLES.CUSTOMER && partnerReferralCode && typeof partnerReferralCode === "string") {
+        const cleanRef = partnerReferralCode.trim();
+        if (cleanRef) {
+          const explicitPartner = await User.findOne({
+            $or: [{ partnerCode: cleanRef }, { referralCode: cleanRef }],
+            role: ROLES.PARTNER,
+            status: "ACTIVE",
+          });
+          if (explicitPartner) {
+            appPartnerId = explicitPartner._id;
+            appRmId = explicitPartner.rmId;
+            await User.updateOne({ _id: customerUser._id }, { $set: { partnerId: appPartnerId, rmId: appRmId } });
+          }
+        }
+      }
+
+      // If still no partner mapped, use the admin-configured default partner (PUBLIC_LOAN_DEFAULT_PARTNER_CODE)
       if (!appPartnerId && req.user.role === ROLES.CUSTOMER) {
         const defPartner = await resolveDefaultCompanyPartner();
         if (defPartner) {
@@ -360,6 +380,53 @@ router.post(
           }
         }
       }
+
+      // Send loan confirmation email to customer & notify partner in background
+      setImmediate(async () => {
+        try {
+          await sendLoanApplicationEmail(
+            { firstName: customer.firstName, email: customerUser.email },
+            {
+              appNo: app.appNo,
+              loanType: app.loanType,
+              status: app.status,
+              appliedLoanAmount: customer.loanAmount || 0,
+              loanAmount: customer.loanAmount || 0,
+            },
+            customer.password ? null : tempPassword
+          );
+        } catch (emailErr) {
+          console.warn("Could not send customer loan email:", emailErr.message);
+        }
+
+        // Notify partner of new customer application
+        if (appPartnerId) {
+          try {
+            await createNotification({
+              userId: appPartnerId,
+              title: "New Customer Loan Application",
+              message: `${customer.firstName} ${customer.lastName || ""} submitted a ${loanType} application (App No: ${app.appNo}).`,
+              type: "APPLICATION_SUBMITTED",
+              applicationId: app._id,
+              metadata: { appNo: app.appNo, loanType, customerName: `${customer.firstName} ${customer.lastName || ""}` },
+            });
+          } catch (notifErr) {
+            console.warn("Could not create partner notification:", notifErr.message);
+          }
+        }
+
+        // Real-time socket sync to Partner app & Admin dashboard
+        if (global.io) {
+          global.io.emit("applicationCreated", {
+            applicationId: app._id,
+            appNo: app.appNo,
+            partnerId: appPartnerId,
+            customerId: customerUser._id,
+            timestamp: Date.now(),
+          });
+          global.io.emit("dashboardUpdate", { type: "application" });
+        }
+      });
 
       res.status(201).json({
         message: "Application + Customer created",
