@@ -124,6 +124,11 @@ const userSchema = new mongoose.Schema(
     adharCard: { type: String }, // backward compatibility
     panCard: { type: String }, // backward compatibility
     docs: [DocumentSchema], // dynamic docs array
+    // Account verification / rejection & re-upload permissions
+    inactiveReason: { type: String },
+    canReuploadDocs: { type: Boolean, default: false },
+    rejectedDocTypes: [{ type: String }],
+    docRejectionRemarks: { type: String },
     // In User.js
     followUps: [{ type: mongoose.Schema.Types.ObjectId, ref: "FollowUp" }],
 

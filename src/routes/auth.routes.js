@@ -14,6 +14,8 @@ import { ApiError } from "../utils/apiError.js";
 import { sendSuccess } from "../utils/apiResponse.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { getActivePartnerByPartnerCode } from "../utils/referralService.js";
+import { partnerUpload } from "../middleware/profileUpload.js";
+import { createNotificationsForUsers } from "../utils/notificationService.js";
 
 const router = Router();
 
@@ -76,12 +78,43 @@ router.post(
     const user = await User.findOne({ email: String(email).toLowerCase() });
     if (!user) throw new ApiError(401, "Invalid credentials", { code: "AUTH_INVALID_CREDENTIALS" });
 
-    if (user.status === "SUSPENDED") {
-      throw new ApiError(403, "Your account has been suspended. Contact admin.", { code: "AUTH_SUSPENDED" });
+    if (user.status === "SUSPENDED" || user.status !== "ACTIVE") {
+      const rejectedDocs = (user.docs || [])
+        .filter((d) => d.status === "REJECTED")
+        .map((d) => d.docType);
+
+      const rejectedDocTypes =
+        user.rejectedDocTypes && user.rejectedDocTypes.length > 0
+          ? user.rejectedDocTypes
+          : rejectedDocs;
+
+      const inactiveReason =
+        user.inactiveReason ||
+        user.docRejectionRemarks ||
+        (user.status === "PENDING"
+          ? "Your partner application is pending verification by the admin team."
+          : "Your account is currently inactive. Please contact administration.");
+
+      return res.status(403).json({
+        success: false,
+        message:
+          user.status === "SUSPENDED"
+            ? user.inactiveReason
+              ? `Account Suspended: ${user.inactiveReason}`
+              : "Your account has been suspended. Contact admin."
+            : `Account is not active (status: ${user.status}).`,
+        code: user.status === "SUSPENDED" ? "AUTH_SUSPENDED" : "AUTH_INACTIVE",
+        status: user.status,
+        inactiveReason,
+        docRejectionRemarks: user.docRejectionRemarks || inactiveReason,
+        canReuploadDocs: Boolean(user.canReuploadDocs || rejectedDocTypes.length > 0),
+        rejectedDocTypes,
+        partnerId: String(user._id),
+        email: user.email,
+        phone: user.phone,
+      });
     }
-    if (user.status !== "ACTIVE") {
-      throw new ApiError(403, `Account is not active (status: ${user.status}).`, { code: "AUTH_INACTIVE" });
-    }
+
     if (!user.passwordHash) {
       throw new ApiError(500, "Password not set for this account", { code: "AUTH_PASSWORD_NOT_SET" });
     }
@@ -989,5 +1022,128 @@ router.post("/email-change/resend", auth, async (req, res) => {
     res.status(500).json({ message: err.message || "Could not resend email" });
   }
 });
+
+/**
+ * POST /api/auth/partner/reupload-kyc
+ * Allows partners with rejected/incomplete documents to re-upload required KYC files.
+ */
+router.post(
+  "/partner/reupload-kyc",
+  (req, _res, next) => {
+    // Set partnerId on request if passed in header/query for S3 directory path
+    const pId = req.headers["x-partner-id"] || req.query.partnerId;
+    if (pId) req.partnerId = pId;
+    next();
+  },
+  partnerUpload.any(),
+  async (req, res) => {
+    try {
+      const partnerId = req.body?.partnerId || req.headers["x-partner-id"] || req.query.partnerId;
+      if (!partnerId) {
+        return res.status(400).json({ success: false, message: "partnerId is required." });
+      }
+
+      const partner = await User.findOne({ _id: partnerId, role: ROLES.PARTNER });
+      if (!partner) {
+        return res.status(404).json({ success: false, message: "Partner not found." });
+      }
+
+      const files = req.files || [];
+      if (files.length === 0) {
+        return res.status(400).json({ success: false, message: "No files uploaded." });
+      }
+
+      if (!Array.isArray(partner.docs)) {
+        partner.docs = [];
+      }
+
+      const uploadedDocTypes = [];
+
+      for (const file of files) {
+        if (!file.location) continue;
+        const normalizedType = String(file.fieldname || "").trim().toUpperCase().replace(/-/g, "_");
+        uploadedDocTypes.push(normalizedType);
+
+        // Update legacy fields if match
+        if (normalizedType.includes("ADHAR") || normalizedType.includes("AADHAR")) {
+          partner.adharCard = file.location;
+        } else if (normalizedType.includes("PAN")) {
+          partner.panCard = file.location;
+        } else if (normalizedType.includes("SELFIE")) {
+          partner.selfie = file.location;
+        }
+
+        // Find or replace in partner.docs array
+        const existingIdx = partner.docs.findIndex(
+          (d) =>
+            d.docType?.toUpperCase() === normalizedType ||
+            (normalizedType.includes("AADHAR") && d.docType?.toUpperCase().includes("ADHAR")) ||
+            (normalizedType.includes("PAN") && d.docType?.toUpperCase().includes("PAN")) ||
+            (normalizedType.includes("SELFIE") && d.docType?.toUpperCase().includes("SELFIE"))
+        );
+
+        if (existingIdx >= 0) {
+          partner.docs[existingIdx].url = file.location;
+          partner.docs[existingIdx].status = "PENDING";
+          partner.docs[existingIdx].remarks = "Re-uploaded by partner";
+          partner.docs[existingIdx].uploadedAt = new Date();
+        } else {
+          partner.docs.push({
+            docType: normalizedType,
+            url: file.location,
+            status: "PENDING",
+            remarks: "Re-uploaded by partner",
+            uploadedAt: new Date(),
+          });
+        }
+      }
+
+      // Remove uploaded types from rejectedDocTypes
+      if (Array.isArray(partner.rejectedDocTypes)) {
+        partner.rejectedDocTypes = partner.rejectedDocTypes.filter(
+          (t) => !uploadedDocTypes.some((ut) => ut.includes(t.toUpperCase()) || t.toUpperCase().includes(ut))
+        );
+      }
+
+      if (!partner.rejectedDocTypes || partner.rejectedDocTypes.length === 0) {
+        partner.canReuploadDocs = false;
+      }
+
+      partner.docRejectionRemarks = "Updated KYC documents submitted. Awaiting Admin verification.";
+      partner.inactiveReason = "Updated documents submitted. Awaiting Admin verification.";
+      await partner.save();
+
+      // Notify Super Admins
+      try {
+        const adminUsers = await User.find({
+          role: { $in: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+          status: "ACTIVE",
+        }).select("_id").lean();
+
+        if (adminUsers.length > 0) {
+          const adminIds = adminUsers.map((u) => u._id.toString());
+          await createNotificationsForUsers(adminIds, {
+            type: "kyc_update",
+            title: "Partner KYC Re-uploaded",
+            message: `Partner ${partner.firstName} ${partner.lastName} (${partner.email}) has re-uploaded requested documents. Please review and verify.`,
+            category: "partner",
+            priority: "high",
+          });
+        }
+      } catch (notifyErr) {
+        console.error("Failed to notify admins of partner KYC re-upload:", notifyErr);
+      }
+
+      return res.json({
+        success: true,
+        message: "Documents re-uploaded successfully! Admin will review and verify your account.",
+        partnerId: partner._id,
+      });
+    } catch (err) {
+      console.error("partner/reupload-kyc error:", err);
+      return res.status(500).json({ success: false, message: err.message || "Failed to re-upload documents." });
+    }
+  }
+);
 
 export default router;

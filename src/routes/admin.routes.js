@@ -1614,7 +1614,14 @@ router.get(
         $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
       };
       if (status && status !== "ALL") {
-        query.status = status.toUpperCase();
+        if (status.toUpperCase() === "SUSPENDED" || status.toUpperCase() === "INACTIVE") {
+          query.status = { $in: ["SUSPENDED", "INACTIVE"] };
+        } else {
+          query.status = status.toUpperCase();
+        }
+      } else if (!status) {
+        // By default, regular partner list only returns verified partners (excludes unverified PENDING registrations)
+        query.status = { $ne: "PENDING" };
       }
       const list = await User.find(query)
         .select("-passwordHash -__v")
@@ -1857,6 +1864,161 @@ router.post(
     } catch (err) {
       console.error("Error assigning partner to RM:", err);
       res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// POST /api/admin/partners/:id/request-doc-reupload
+// Allows Admin to reject specific documents with remarks and grant re-upload permission
+router.post(
+  "/partners/:id/request-doc-reupload",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { remarks, rejectedDocTypes } = req.body || {};
+
+      const partner = await User.findOne({ _id: id, role: ROLES.PARTNER });
+      if (!partner) {
+        return res.status(404).json({ message: "Partner not found" });
+      }
+
+      partner.canReuploadDocs = true;
+      partner.docRejectionRemarks = remarks || "Please re-upload required documents.";
+      partner.inactiveReason = remarks || "KYC documents rejected - please re-upload.";
+      partner.rejectedDocTypes =
+        Array.isArray(rejectedDocTypes) && rejectedDocTypes.length > 0
+          ? rejectedDocTypes
+          : [];
+
+      // Update matching docs status to REJECTED
+      if (Array.isArray(partner.docs)) {
+        partner.docs.forEach((doc) => {
+          if (
+            (partner.rejectedDocTypes || []).some(
+              (t) =>
+                t.toUpperCase() === doc.docType?.toUpperCase() ||
+                doc.docType?.toUpperCase().includes(t.toUpperCase()) ||
+                t.toUpperCase().includes(doc.docType?.toUpperCase())
+            )
+          ) {
+            doc.status = "REJECTED";
+            doc.remarks = remarks || "Rejected by Admin - please re-upload.";
+          }
+        });
+      }
+
+      await partner.save();
+
+      // Send email to partner
+      try {
+        await sendMail({
+          to: partner.email,
+          subject: "Action Required: Re-upload KYC Documents - DhanSource",
+          html: `
+            <p>Dear ${partner.firstName} ${partner.lastName},</p>
+            <p>During verification of your Partner account, our team noted the following issues with your KYC documents:</p>
+            <div style="background: #fef2f2; border-left: 4px solid #ef4444; padding: 16px; margin: 16px 0; border-radius: 4px;">
+              <p style="margin: 0; font-weight: bold; color: #991b1b;">Admin Remarks / Reason:</p>
+              <p style="margin: 8px 0 0 0; color: #7f1d1d;">${remarks || "Please re-upload clear copies of the requested documents."}</p>
+              ${
+                partner.rejectedDocTypes?.length > 0
+                  ? `<p style="margin: 8px 0 0 0; color: #7f1d1d;"><b>Documents to re-upload:</b> ${partner.rejectedDocTypes.join(", ")}</p>`
+                  : ""
+              }
+            </div>
+            <p>Please log in to your partner portal or app, where you will see the <b>Upload Documents</b> option to submit your replacement documents.</p>
+            <br/>
+            <p>Regards,<br/>DhanSource Capital Team</p>
+          `,
+        });
+      } catch (mailErr) {
+        console.error("Failed to send doc re-upload email to partner:", mailErr.message);
+      }
+
+      return res.json({
+        message: "Re-upload request sent to partner successfully.",
+        partner: {
+          _id: partner._id,
+          status: partner.status,
+          canReuploadDocs: partner.canReuploadDocs,
+          rejectedDocTypes: partner.rejectedDocTypes,
+          docRejectionRemarks: partner.docRejectionRemarks,
+          inactiveReason: partner.inactiveReason,
+        },
+      });
+    } catch (err) {
+      console.error("Error in request-doc-reupload:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// POST /api/admin/partners/:id/suspend
+router.post(
+  "/partners/:id/suspend",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { reason } = req.body || {};
+
+      const partner = await User.findOne({ _id: id, role: ROLES.PARTNER });
+      if (!partner) {
+        return res.status(404).json({ message: "Partner not found" });
+      }
+
+      partner.status = "SUSPENDED";
+      partner.inactiveReason = reason || "Account suspended by Admin.";
+      await partner.save();
+
+      return res.json({
+        message: "Partner suspended successfully.",
+        partner: {
+          _id: partner._id,
+          status: partner.status,
+          inactiveReason: partner.inactiveReason,
+        },
+      });
+    } catch (err) {
+      console.error("Error in suspend partner:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// POST /api/admin/partners/:id/activate
+router.post(
+  "/partners/:id/activate",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const partner = await User.findOne({ _id: id, role: ROLES.PARTNER });
+      if (!partner) {
+        return res.status(404).json({ message: "Partner not found" });
+      }
+
+      partner.status = "ACTIVE";
+      partner.inactiveReason = null;
+      partner.canReuploadDocs = false;
+      partner.rejectedDocTypes = [];
+      await partner.save();
+
+      return res.json({
+        message: "Partner activated successfully.",
+        partner: {
+          _id: partner._id,
+          status: partner.status,
+        },
+      });
+    } catch (err) {
+      console.error("Error in activate partner:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
     }
   }
 );
