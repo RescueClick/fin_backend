@@ -338,12 +338,38 @@ router.get(["/get-rm", "/get-rms"], auth, requireRole(ROLES.RSM, ROLES.ASM, ROLE
       })
       .lean();
 
+    // Cache active HL/LAP ASMs by RSM for self-healing missing assignments
+    const activeHlAsms = await User.find({
+      role: ROLES.ASM,
+      status: "ACTIVE",
+      asmType: ASM_TYPES.HOME_LAP,
+    })
+      .select("_id firstName lastName employeeId phone email rsmId asmId")
+      .lean();
+
+    const hlAsmByRsm = new Map();
+    for (const a of activeHlAsms) {
+      const parentId = String(a.rsmId || a.asmId || "");
+      if (parentId && !hlAsmByRsm.has(parentId)) {
+        hlAsmByRsm.set(parentId, a);
+      }
+    }
+
     const formatted = list.map((rm) => {
       const asm = rm.rsmId || rm.asmId;
       const personalRsm = rm.personalAsmId || rm.personalRsmId;
       const businessRsm = rm.businessAsmId || rm.businessRsmId;
-      // Accurate: only use actual HL/LAP assignment; do NOT fall back to business manager
-      const homeLapRsm = rm.homeLapAsmId || rm.homeLapRsmId || null;
+      let homeLapRsm = rm.homeLapAsmId || rm.homeLapRsmId || null;
+      if (!homeLapRsm) {
+        const parentRsmId = String(rm.rsmId?._id || rm.rsmId || rm.asmId?._id || rm.asmId || "");
+        if (parentRsmId && hlAsmByRsm.has(parentRsmId)) {
+          homeLapRsm = hlAsmByRsm.get(parentRsmId);
+          User.updateOne(
+            { _id: rm._id },
+            { $set: { homeLapAsmId: homeLapRsm._id, homeLapRsmId: homeLapRsm._id } }
+          ).exec().catch(() => {});
+        }
+      }
       const businessHomeRsm = rm.businessHomeAsmId || rm.businessHomeRsmId || null;
 
       // Store original IDs before destructuring

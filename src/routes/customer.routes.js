@@ -16,6 +16,7 @@ import { findCustomerApplyBlocker } from "../utils/loanReapplyPolicy.js";
 import { resolveSpecializedAsmForLoanType } from "../utils/rmRsmHierarchy.js";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { sendDeleteAccountRequestEmail } from "../utils/emailService.js";
+import { getSupportSettings } from "../utils/supportSettings.js";
 
 const router = Router();
 /** Partner views own applications (with status & docs) */
@@ -1006,5 +1007,21 @@ router.get(
     }
   }
 );
+
+// GET /api/customer/support-settings (public / customer app)
+router.get("/support-settings", async (req, res) => {
+  try {
+    const settings = await getSupportSettings();
+    return res.json({
+      success: true,
+      settings,
+    });
+  } catch (err) {
+    console.error("GET /customer/support-settings error:", err);
+    return res.status(500).json({
+      message: err.message || "Failed to fetch support settings",
+    });
+  }
+});
 
 export default router;

@@ -14,6 +14,8 @@ const configSchema = new mongoose.Schema(
         "DEFAULT_PAYOUT_POLICY",
         "INCENTIVE_SLAB_POLICY",
         "INVOICE_AND_TDS_SETTINGS",
+        "SUPPORT_SETTINGS",
+        "PARTNER_LEVELS_CONFIG",
       ],
     },
     value: {

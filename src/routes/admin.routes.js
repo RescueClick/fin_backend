@@ -54,6 +54,7 @@ import {
 import { emitPayoutStatusChanged, emitIncentiveStatusChanged } from "../utils/socketEmitter.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
+import { getSupportSettings, saveSupportSettings } from "../utils/supportSettings.js";
 import {
   buildReassignableApplicationFilter,
   buildReassignmentAudit,
@@ -990,6 +991,38 @@ router.post(
         }
       }
 
+      // Auto-assign this new specialized ASM to any RMs under this RSM who currently lack this specialty
+      if (parentRsm && parentRsm._id) {
+        if (specialtyType === ASM_TYPES.HOME_LAP) {
+          await User.updateMany(
+            {
+              role: ROLES.RM,
+              $or: [{ rsmId: parentRsm._id }, { asmId: parentRsm._id }],
+              $or: [{ homeLapAsmId: null }, { homeLapAsmId: { $exists: false } }],
+            },
+            { $set: { homeLapAsmId: asm._id, homeLapRsmId: asm._id } }
+          );
+        } else if (specialtyType === ASM_TYPES.PERSONAL) {
+          await User.updateMany(
+            {
+              role: ROLES.RM,
+              $or: [{ rsmId: parentRsm._id }, { asmId: parentRsm._id }],
+              $or: [{ personalAsmId: null }, { personalAsmId: { $exists: false } }],
+            },
+            { $set: { personalAsmId: asm._id, personalRsmId: asm._id } }
+          );
+        } else if (specialtyType === ASM_TYPES.BUSINESS) {
+          await User.updateMany(
+            {
+              role: ROLES.RM,
+              $or: [{ rsmId: parentRsm._id }, { asmId: parentRsm._id }],
+              $or: [{ businessAsmId: null }, { businessAsmId: { $exists: false } }],
+            },
+            { $set: { businessAsmId: asm._id, businessRsmId: asm._id } }
+          );
+        }
+      }
+
       // Send credentials mail
       try {
         const emailSent = await sendUserAccountEmail(asm, targetRole, rawPassword, {
@@ -1077,9 +1110,45 @@ router.post(
         });
       }
 
-      const effPersonalId = personalAsmId || personalRsmId;
-      const effBizId = businessAsmId || businessRsmId || businessHomeRsmId;
-      const effHomeLapId = homeLapAsmId || homeLapRsmId || businessHomeRsmId;
+      let effPersonalId = personalAsmId || personalRsmId;
+      let effBizId = businessAsmId || businessRsmId || businessHomeRsmId;
+      let effHomeLapId = homeLapAsmId || homeLapRsmId || businessHomeRsmId;
+
+      // Auto-lookup missing specialized ASMs under the selected RSM if available
+      const anchorMgrId = effPersonalId || effBizId || effHomeLapId || req.body?.rsmId;
+      if (anchorMgrId) {
+        const mgr = await User.findById(anchorMgrId).select("rsmId asmId").lean();
+        const parentRsm = req.body?.rsmId || mgr?.rsmId || mgr?.asmId;
+        if (parentRsm) {
+          if (!effHomeLapId) {
+            const defaultHl = await User.findOne({
+              role: ROLES.ASM,
+              status: "ACTIVE",
+              $or: [{ rsmId: parentRsm }, { asmId: parentRsm }],
+              asmType: ASM_TYPES.HOME_LAP,
+            }).select("_id").lean();
+            if (defaultHl) effHomeLapId = defaultHl._id;
+          }
+          if (!effBizId) {
+            const defaultBiz = await User.findOne({
+              role: ROLES.ASM,
+              status: "ACTIVE",
+              $or: [{ rsmId: parentRsm }, { asmId: parentRsm }],
+              asmType: ASM_TYPES.BUSINESS,
+            }).select("_id").lean();
+            if (defaultBiz) effBizId = defaultBiz._id;
+          }
+          if (!effPersonalId) {
+            const defaultPl = await User.findOne({
+              role: ROLES.ASM,
+              status: "ACTIVE",
+              $or: [{ rsmId: parentRsm }, { asmId: parentRsm }],
+              asmType: ASM_TYPES.PERSONAL,
+            }).select("_id").lean();
+            if (defaultPl) effPersonalId = defaultPl._id;
+          }
+        }
+      }
 
       if (!effPersonalId || (!effBizId && !effHomeLapId)) {
         return res.status(400).json({
@@ -1112,7 +1181,7 @@ router.post(
         personalRsmId: effPersonalId,
         businessRsmId: effBizId,
         homeLapRsmId: effHomeLapId,
-        businessHomeRsmId: effBizId,
+        businessHomeRsmId: businessHomeRsmId || null,
       });
       if (!validationCheck.ok) {
         return res.status(400).json({ message: validationCheck.message });
@@ -1403,12 +1472,39 @@ router.get(
         })
         .lean();
 
+      // Cache active HL/LAP ASMs by RSM for self-healing missing assignments
+      const activeHlAsms = await User.find({
+        role: ROLES.ASM,
+        status: "ACTIVE",
+        asmType: ASM_TYPES.HOME_LAP,
+      })
+        .select("_id firstName lastName employeeId phone email rsmId asmId")
+        .lean();
+
+      const hlAsmByRsm = new Map();
+      for (const a of activeHlAsms) {
+        const parentId = String(a.rsmId || a.asmId || "");
+        if (parentId && !hlAsmByRsm.has(parentId)) {
+          hlAsmByRsm.set(parentId, a);
+        }
+      }
+
       // Flatten ASM and RSM details into same object
       const formatted = list.map((rm) => {
         const personalAsm = rm.personalAsmId || rm.personalRsmId;
         const businessAsm = rm.businessAsmId || rm.businessRsmId;
-        // Accurate: only use actual HL/LAP assignment; do NOT fall back to business manager
-        const homeLapAsm = rm.homeLapAsmId || rm.homeLapRsmId || null;
+        let homeLapAsm = rm.homeLapAsmId || rm.homeLapRsmId || null;
+        if (!homeLapAsm) {
+          const parentRsmId = String(rm.rsmId?._id || rm.rsmId || rm.asmId?._id || rm.asmId || "");
+          if (parentRsmId && hlAsmByRsm.has(parentRsmId)) {
+            homeLapAsm = hlAsmByRsm.get(parentRsmId);
+            // Self-heal persistence in background
+            User.updateOne(
+              { _id: rm._id },
+              { $set: { homeLapAsmId: homeLapAsm._id, homeLapRsmId: homeLapAsm._id } }
+            ).exec().catch(() => {});
+          }
+        }
         const rsm = rm.rsmId;
         const asm = rm.asmId;
 
@@ -6928,8 +7024,8 @@ router.get(
           totalFilesCount,
           averageTicketSize,
           uniquePartnersCount: partnerSet.size,
-          year: targetYear,
-          month: targetMonth,
+          year: hasYear ? Number(year) : "all",
+          month: hasMonth ? Number(month) : "all",
         },
         applications: finalApps,
       });
@@ -9380,6 +9476,54 @@ router.post(
       return res
         .status(500)
         .json({ message: error.message || "Failed to update user password" });
+    }
+  }
+);
+
+// ==================== CUSTOMER SUPPORT SETTINGS ====================
+
+router.get(
+  "/support-settings",
+  auth,
+  requireRole(ROLES.ADMIN, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const settings = await getSupportSettings();
+      return res.json({
+        success: true,
+        settings,
+      });
+    } catch (err) {
+      console.error("GET /admin/support-settings error:", err);
+      return res.status(500).json({ message: err.message || "Failed to fetch support settings" });
+    }
+  }
+);
+
+router.put(
+  "/support-settings",
+  auth,
+  requireRole(ROLES.ADMIN, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { phone, email, whatsapp, hours } = req.body || {};
+      const updated = await saveSupportSettings({ phone, email, whatsapp, hours });
+
+      if (global.io) {
+        global.io.emit("supportSettingsUpdated", {
+          settings: updated,
+          timestamp: Date.now(),
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: "Customer support contact settings updated successfully",
+        settings: updated,
+      });
+    } catch (err) {
+      console.error("PUT /admin/support-settings error:", err);
+      return res.status(400).json({ message: err.message || "Failed to update support settings" });
     }
   }
 );
