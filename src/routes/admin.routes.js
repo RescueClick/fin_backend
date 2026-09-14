@@ -557,14 +557,31 @@ const normalizeBankRmPayload = (body = {}) => {
   const rm = pickContact(body, "rm");
   const asm = pickContact(body, "asm");
   const rsm = pickContact(body, "rsm");
+
+  const isPanIndia =
+    body.isPanIndia === true ||
+    body.isPanIndia === "true" ||
+    body.isPanIndia === 1 ||
+    body.isPanIndia === "1" ||
+    String(body.state || "").trim().toLowerCase() === "pan india" ||
+    String(body.state || "").trim().toLowerCase() === "open india";
+
+  let stateVal = pick("state");
+  let cityVal = pick("city");
+  if (isPanIndia) {
+    if (!stateVal || stateVal.toLowerCase() === "open india") stateVal = "PAN India";
+    if (!cityVal) cityVal = "All Cities";
+  }
+
   return {
     bankNbfcName: pick("bankNbfcName"),
     loginCode: pick("loginCode"),
     product: pick("product"),
     marketType: pick("marketType"),
-    city: pick("city"),
-    state: pick("state"),
+    city: cityVal,
+    state: stateVal,
     company: pick("company"),
+    isPanIndia,
     rm,
     asm,
     rsm,
@@ -598,10 +615,14 @@ const validateBankRmPayload = (payload) => {
     "loginCode",
     "product",
     "marketType",
-    "city",
-    "state",
     "company",
   ];
+  if (!payload.isPanIndia) {
+    required.push("city", "state");
+  } else {
+    if (!payload.state) payload.state = "PAN India";
+    if (!payload.city) payload.city = "All Cities";
+  }
   const missing = required.filter((key) => !payload[key]);
   if (missing.length) {
     return `Missing required fields: ${missing.join(", ")}`;
@@ -641,13 +662,56 @@ router.get("/bank-rms", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) =
     if (bank) filter.bankNbfcName = String(bank).trim();
     if (product) filter.product = String(product).trim();
     if (marketType) filter.marketType = String(marketType).trim();
-    if (state) filter.state = String(state).trim();
-    if (city) filter.city = String(city).trim();
+    if (state) {
+      const stateTrimmed = String(state).trim();
+      if (
+        stateTrimmed.toLowerCase() === "pan india" ||
+        stateTrimmed.toLowerCase() === "open india"
+      ) {
+        filter.$or = [
+          { state: { $regex: /^pan\s*india$/i } },
+          { state: { $regex: /^open\s*india$/i } },
+          { isPanIndia: true },
+        ];
+      } else {
+        filter.$or = [
+          { state: stateTrimmed },
+          { isPanIndia: true },
+          { state: { $regex: /^pan\s*india$/i } },
+          { state: { $regex: /^open\s*india$/i } },
+        ];
+      }
+    }
+    if (city) {
+      const cityTrimmed = String(city).trim();
+      if (cityTrimmed.toLowerCase() !== "all cities") {
+        if (filter.$or) {
+          const stateOr = filter.$or;
+          filter.$and = [
+            { $or: stateOr },
+            {
+              $or: [
+                { city: cityTrimmed },
+                { isPanIndia: true },
+                { city: { $regex: /^all\s*cities$/i } },
+              ],
+            },
+          ];
+          delete filter.$or;
+        } else {
+          filter.$or = [
+            { city: cityTrimmed },
+            { isPanIndia: true },
+            { city: { $regex: /^all\s*cities$/i } },
+          ];
+        }
+      }
+    }
 
     const search = String(q || "").trim();
     if (search) {
       const rx = { $regex: search, $options: "i" };
-      filter.$or = [
+      const searchOr = [
         { bankNbfcName: rx },
         { loginCode: rx },
         { product: rx },
@@ -668,6 +732,14 @@ router.get("/bank-rms", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) =
         { "rsm.phone": rx },
         { "rsm.email": rx },
       ];
+      if (filter.$and) {
+        filter.$and.push({ $or: searchOr });
+      } else if (filter.$or) {
+        filter.$and = [{ $or: filter.$or }, { $or: searchOr }];
+        delete filter.$or;
+      } else {
+        filter.$or = searchOr;
+      }
     }
 
     const bankRms = await BankRm.find(filter)
@@ -724,6 +796,7 @@ router.put("/bank-rms/:id", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
       city: req.body?.city ?? existingObj.city,
       state: req.body?.state ?? existingObj.state,
       company: req.body?.company ?? existingObj.company,
+      isPanIndia: req.body?.isPanIndia ?? existingObj.isPanIndia,
       rm: {
         name: req.body?.rmName ?? req.body?.rm?.name ?? existingObj.rm?.name ?? existingObj.rmName,
         phone: req.body?.rmPhone ?? req.body?.rm?.phone ?? existingObj.rm?.phone ?? existingObj.rmPhone,

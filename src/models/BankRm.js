@@ -16,6 +16,7 @@ const bankRmSchema = new mongoose.Schema(
     city: { type: String, required: true, trim: true, index: true },
     state: { type: String, required: true, trim: true, index: true },
     company: { type: String, required: true, trim: true },
+    isPanIndia: { type: Boolean, default: false, index: true },
 
     // Contacts for this bank / product / city
     rm: { type: contactFields, default: () => ({}) },

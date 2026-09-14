@@ -1617,14 +1617,30 @@ const normalizeBankRmPayload = (body = {}) => {
   const rm = pickContact(body, "rm");
   const asm = pickContact(body, "asm");
   const rsm = pickContact(body, "rsm");
+  const isPanIndia =
+    body.isPanIndia === true ||
+    body.isPanIndia === "true" ||
+    body.isPanIndia === 1 ||
+    body.isPanIndia === "1" ||
+    String(body.state || "").trim().toLowerCase() === "pan india" ||
+    String(body.state || "").trim().toLowerCase() === "open india";
+
+  let stateVal = pick("state");
+  let cityVal = pick("city");
+  if (isPanIndia) {
+    if (!stateVal || stateVal.toLowerCase() === "open india") stateVal = "PAN India";
+    if (!cityVal) cityVal = "All Cities";
+  }
+
   return {
     bankNbfcName: pick("bankNbfcName"),
     loginCode: pick("loginCode"),
     product: pick("product"),
     marketType: pick("marketType"),
-    city: pick("city"),
-    state: pick("state"),
+    city: cityVal,
+    state: stateVal,
     company: pick("company"),
+    isPanIndia,
     rm,
     asm,
     rsm,
@@ -1657,10 +1673,14 @@ const validateBankRmPayload = (payload) => {
     "loginCode",
     "product",
     "marketType",
-    "city",
-    "state",
     "company",
   ];
+  if (!payload.isPanIndia) {
+    required.push("city", "state");
+  } else {
+    if (!payload.state) payload.state = "PAN India";
+    if (!payload.city) payload.city = "All Cities";
+  }
   const missing = required.filter((key) => !payload[key]);
   if (missing.length) {
     return `Missing required fields: ${missing.join(", ")}`;
@@ -1685,8 +1705,51 @@ const buildBankRmActiveFilter = (query = {}) => {
   if (query.bank) filter.bankNbfcName = String(query.bank).trim();
   if (query.product) filter.product = String(query.product).trim();
   if (query.marketType) filter.marketType = String(query.marketType).trim();
-  if (query.state) filter.state = String(query.state).trim();
-  if (query.city) filter.city = String(query.city).trim();
+  if (query.state) {
+    const stateTrimmed = String(query.state).trim();
+    if (
+      stateTrimmed.toLowerCase() === "pan india" ||
+      stateTrimmed.toLowerCase() === "open india"
+    ) {
+      filter.$or = [
+        { state: { $regex: /^pan\s*india$/i } },
+        { state: { $regex: /^open\s*india$/i } },
+        { isPanIndia: true },
+      ];
+    } else {
+      filter.$or = [
+        { state: stateTrimmed },
+        { isPanIndia: true },
+        { state: { $regex: /^pan\s*india$/i } },
+        { state: { $regex: /^open\s*india$/i } },
+      ];
+    }
+  }
+  if (query.city) {
+    const cityTrimmed = String(query.city).trim();
+    if (cityTrimmed.toLowerCase() !== "all cities") {
+      if (filter.$or) {
+        const stateOr = filter.$or;
+        filter.$and = [
+          { $or: stateOr },
+          {
+            $or: [
+              { city: cityTrimmed },
+              { isPanIndia: true },
+              { city: { $regex: /^all\s*cities$/i } },
+            ],
+          },
+        ];
+        delete filter.$or;
+      } else {
+        filter.$or = [
+          { city: cityTrimmed },
+          { isPanIndia: true },
+          { city: { $regex: /^all\s*cities$/i } },
+        ];
+      }
+    }
+  }
   return filter;
 };
 
@@ -1713,14 +1776,25 @@ router.get(
 
       const stateFilter = { ...marketFilter };
       if (marketType) stateFilter.marketType = String(marketType).trim();
-      const states = await BankRm.distinct("state", stateFilter);
+      const rawStates = await BankRm.distinct("state", stateFilter);
+      const stateSet = new Set(rawStates.map((v) => String(v || "").trim()).filter(Boolean));
+      stateSet.add("PAN India");
 
       const cityFilter = { ...stateFilter };
-      if (state) cityFilter.state = String(state).trim();
-      const cities = await BankRm.distinct("city", cityFilter);
+      if (state) {
+        const sTrim = String(state).trim();
+        if (sTrim.toLowerCase() !== "pan india") {
+          cityFilter.state = sTrim;
+        }
+      }
+      const rawCities = await BankRm.distinct("city", cityFilter);
+      const citySet = new Set(rawCities.map((v) => String(v || "").trim()).filter(Boolean));
+      if (state && String(state).trim().toLowerCase() === "pan india") {
+        citySet.add("All Cities");
+      }
 
       const sortAlpha = (arr) =>
-        (arr || [])
+        Array.from(arr)
           .map((v) => String(v || "").trim())
           .filter(Boolean)
           .sort((a, b) => a.localeCompare(b));
@@ -1729,8 +1803,8 @@ router.get(
         banks: sortAlpha(banks),
         products: sortAlpha(products),
         marketTypes: sortAlpha(marketTypes),
-        states: sortAlpha(states),
-        cities: sortAlpha(cities),
+        states: sortAlpha(stateSet),
+        cities: sortAlpha(citySet),
       });
     } catch (err) {
       console.error("Error fetching bank RM filter options:", err);
