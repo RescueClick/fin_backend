@@ -2,7 +2,7 @@ import { Router } from "express";
 import argon2 from "argon2";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
-import { ROLES, RSM_TYPES } from "../config/roles.js";
+import { ROLES, RSM_TYPES, ASM_TYPES } from "../config/roles.js";
 import { assertValidRmRsmAssignments, assertValidRmRsmPair, resolveSpecializedAsmForLoanType } from "../utils/rmRsmHierarchy.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import { User } from "../models/User.js";
