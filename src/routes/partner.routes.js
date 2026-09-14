@@ -1706,10 +1706,11 @@ router.post(
           ? [references]
           : [];
 
-      // Draft/incomplete can be updated; REJECTED history kept — reapply only after 3 months
+      // Draft/incomplete/lead can be updated; REJECTED history kept — reapply only after 3 months
       let existingApp = await Application.findOne({
         customerId: customerUser._id,
-        status: { $in: ["DRAFT", "DOC_INCOMPLETE"] },
+        loanType,
+        status: { $in: ["DRAFT", "DOC_INCOMPLETE", "LEAD"] },
         isArchived: { $ne: true },
         $or: [{ deletedAt: null }, { deletedAt: { $gt: new Date() } }],
       }).sort({ updatedAt: -1 });
@@ -1756,6 +1757,9 @@ router.post(
         stabilityOfResidency: customer.stabilityOfResidency || "",
         loanAmount: Number(customer.loanAmount ?? 0),
         bankStatementPassword: customer.bankStatementPassword || "",
+        hasRunningLoan: customer.hasRunningLoan || "NO",
+        monthlyEmiPaying: Number(customer.monthlyEmiPaying ?? 0),
+        loanPurpose: customer.loanPurpose || "",
         partnerId: assignedPartnerId,
         rmId: assignedRmId,
         asmId: assignedAsmId,
@@ -1763,7 +1767,7 @@ router.post(
 
       if (
         existingApp &&
-        ["DRAFT", "DOC_INCOMPLETE"].includes(existingApp.status)
+        ["DRAFT", "DOC_INCOMPLETE", "LEAD"].includes(existingApp.status)
       ) {
         // Partner resubmission should reflect only the docs uploaded in this request.
         // (Do NOT keep older docs that the partner didn't re-upload.)
@@ -1779,6 +1783,10 @@ router.post(
         }
         existingApp.docs = docsToSave;
         existingApp.customer = { ...existingApp.customer, ...customerData };
+        existingApp.hasRunningLoan = customerData.hasRunningLoan;
+        existingApp.monthlyEmiPaying = customerData.monthlyEmiPaying;
+        existingApp.loanPurpose = customerData.loanPurpose;
+        existingApp.requestedAmount = customerData.loanAmount || existingApp.requestedAmount;
         existingApp.employmentInfo = employmentInfo;
         existingApp.businessInfo = businessInfo;
         existingApp.propertyInfo = propertyInfo;
@@ -1856,6 +1864,9 @@ router.post(
             businessInfo,
             propertyInfo,
             coApplicant,
+            hasRunningLoan: customerData.hasRunningLoan,
+            monthlyEmiPaying: customerData.monthlyEmiPaying,
+            loanPurpose: customerData.loanPurpose,
             status: applicationStatus === "DRAFT" ? "DRAFT" : "SUBMITTED",
             stageHistory: [],
           });

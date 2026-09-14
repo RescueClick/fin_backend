@@ -20,6 +20,7 @@ import referralRoutes from "./src/routes/referral.routes.js";
 import referralBannerRoutes from "./src/routes/referralBanner.routes.js";
 import cibilRoutes from "./src/routes/cibil.routes.js";
 import chatRoutes from "./src/routes/chat.routes.js";
+import leadRoutes from "./src/routes/lead.routes.js";
 import { connectDB } from "./src/db/db.js";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -175,6 +176,7 @@ app.use("/api/referral", referralRoutes); // Customer/partner: my referral code,
 app.use("/api/referral-banners", referralBannerRoutes); // Referral benefit banners: app display + admin CRUD
 app.use("/api/cibil", cibilRoutes); // CIBIL checks and payments
 app.use("/api/chat", chatRoutes); // Internal Staff Chat (Admin, ASM, RSM, RM)
+app.use("/api/leads", leadRoutes); // Lead capture & RM follow-up
 
 
 

@@ -315,12 +315,72 @@ router.post(
         }
       }
 
-      // Create Application
-      // ✅ CRITICAL: Retry logic to handle duplicate appNo race conditions
+      // Check for existing LEAD or DRAFT application to promote
+      let existingLeadApp = await Application.findOne({
+        customerId: customerUser._id,
+        loanType,
+        status: { $in: ["LEAD", "DRAFT", "DOC_INCOMPLETE"] },
+        isArchived: { $ne: true },
+      }).sort({ updatedAt: -1 });
+
+      const hasRunningLoan = customer.hasRunningLoan || "NO";
+      const monthlyEmiPaying = Number(customer.monthlyEmiPaying ?? 0);
+      const loanPurpose = customer.loanPurpose || "";
+
       let app = null;
       let appRetries = 0;
       const maxAppRetries = 5;
       let appCreated = false;
+
+      if (existingLeadApp) {
+        existingLeadApp.partnerId = appPartnerId || existingLeadApp.partnerId;
+        existingLeadApp.rmId = appRmId || existingLeadApp.rmId;
+        existingLeadApp.rsmId = assignedRsmId || existingLeadApp.rsmId;
+        existingLeadApp.asmId = assignedAsmId || existingLeadApp.asmId;
+        existingLeadApp.docs = docs;
+        existingLeadApp.references = refs;
+        existingLeadApp.employmentInfo = employmentInfo;
+        existingLeadApp.businessInfo = businessInfo;
+        existingLeadApp.propertyInfo = propertyInfo;
+        existingLeadApp.hasRunningLoan = hasRunningLoan;
+        existingLeadApp.monthlyEmiPaying = monthlyEmiPaying;
+        existingLeadApp.loanPurpose = loanPurpose;
+        existingLeadApp.requestedAmount = customer.loanAmount ? Number(customer.loanAmount) : existingLeadApp.requestedAmount;
+        existingLeadApp.customer = {
+          ...existingLeadApp.customer,
+          firstName: customer.firstName,
+          middleName: customer.middleName || "",
+          lastName: customer.lastName || "",
+          email: customer.email,
+          phone: customer.phone,
+          mothersName: customer.mothersName || "",
+          panNumber: customer.panNumber || "",
+          dateOfBirth: customer.dateOfBirth,
+          gender: customer.gender,
+          maritalStatus: customer.maritalStatus,
+          currentAddress: product.currentAddress,
+          permanentAddress: product.permanentAddress || product.currentAddress,
+          loanAmount: customer.loanAmount ? Number(customer.loanAmount) : undefined,
+          hasRunningLoan,
+          monthlyEmiPaying,
+          loanPurpose,
+          partnerId: appPartnerId || null,
+          rmId: appRmId || null,
+          asmId: assignedAsmId || null,
+        };
+        existingLeadApp.status = "SUBMITTED";
+        existingLeadApp.stageHistory.push({
+          from: "LEAD",
+          to: "SUBMITTED",
+          by: customerUser._id,
+          at: new Date(),
+          note: "Customer completed full application submission",
+        });
+        await existingLeadApp.save();
+        app = existingLeadApp;
+        appCreated = true;
+        console.log(`✅ Promoted existing LEAD application to SUBMITTED: ${app.appNo}`);
+      }
       
       while (!appCreated && appRetries < maxAppRetries) {
         try {
@@ -333,6 +393,10 @@ router.post(
             asmId: assignedAsmId || null,
             customerId: customerUser._id,
             loanType,
+            hasRunningLoan,
+            monthlyEmiPaying,
+            loanPurpose,
+            requestedAmount: customer.loanAmount ? Number(customer.loanAmount) : undefined,
             customer: {
               firstName: customer.firstName,
               middleName: customer.middleName || "",
@@ -349,6 +413,9 @@ router.post(
               loanAmount: customer.loanAmount
                 ? Number(customer.loanAmount)
                 : undefined,
+              hasRunningLoan,
+              monthlyEmiPaying,
+              loanPurpose,
               partnerId: appPartnerId || null,
               rmId: appRmId || null,
               rsmId: null,

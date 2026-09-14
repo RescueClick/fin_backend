@@ -2312,15 +2312,20 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
       return {
         customerId: app.customerId?._id,
         customerEmployeeId: app.customerId?.employeeId || null,
-        customerName: `${app.customerId?.firstName ?? ""} ${
-          app.customerId?.lastName ?? ""
+        customerName: `${app.customer?.firstName || app.customerId?.firstName || ""} ${
+          app.customer?.lastName || app.customerId?.lastName || ""
         }`.trim(),
-        contact: app.customerId?.phone || null,
-        email: app.customerId?.email || null,
+        contact: app.customer?.phone || app.customerId?.phone || null,
+        email: app.customer?.email || app.customerId?.email || null,
         loanType: app.loanType,
-        requestedAmount: app.customer?.loanAmount || null,
+        requestedAmount: app.customer?.loanAmount || app.requestedAmount || null,
         approvedAmount: app.approvedLoanAmount || null,
         status: app.status,
+        hasRunningLoan: app.hasRunningLoan || app.customer?.hasRunningLoan || "NO",
+        monthlyEmiPaying: app.monthlyEmiPaying ?? app.customer?.monthlyEmiPaying ?? 0,
+        loanPurpose: app.loanPurpose || app.customer?.loanPurpose || "",
+        leadSource: app.leadSource || "PARTNER",
+        leadFollowUp: app.leadFollowUp || { status: "NEW", remarks: "" },
         payOutStatus: payout?.payOutStatus || "PENDING",
         payoutAmount: payout?.amount || 0,
         partner: {
@@ -2332,6 +2337,7 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
           phone: app.partnerId?.phone,
         },
         applicationId: app._id,
+        appNo: app.appNo,
         createdAt: app.createdAt,
       };
     });

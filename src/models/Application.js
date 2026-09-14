@@ -3,6 +3,7 @@ import { createDisbursedReferralReward } from "../utils/referralService.js";
 
 // =================== CONSTANTS ===================
 export const APP_STATUSES = [
+  "LEAD",
   "DRAFT",
   "SUBMITTED",
   "DOC_INCOMPLETE",
@@ -127,6 +128,10 @@ const CustomerSchema = new mongoose.Schema(
     password: { type: String },
     bankStatementPassword: { type: String },
 
+    hasRunningLoan: { type: String, enum: ["YES", "NO", "Yes", "No"], default: "NO" },
+    monthlyEmiPaying: { type: Number, default: 0 },
+    loanPurpose: { type: String, trim: true },
+
     partnerId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     rmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     asmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" }
@@ -222,7 +227,35 @@ const ApplicationSchema = new mongoose.Schema(
     propertyInfo: { type: PropertyInfoSchema },     // Home Loan
     approvedLoanAmount: { type: Number }, // approved/disbursed by RM
     remarks: { type: String },
-    requestedAmount: { type: Number },
+    hasRunningLoan: { type: String, default: "NO" },
+    monthlyEmiPaying: { type: Number, default: 0 },
+    loanPurpose: { type: String, trim: true },
+    leadSource: {
+      type: String,
+      enum: ["PARTNER", "CUSTOMER_DIRECT", "PUBLIC_REFERRAL"],
+      default: "PARTNER",
+    },
+    leadFollowUp: {
+      status: {
+        type: String,
+        enum: [
+          "NEW",
+          "CONNECTED",
+          "RINGING",
+          "FOLLOW_UP_SCHEDULED",
+          "INTERESTED",
+          "DOCUMENTS_PENDING",
+          "NOT_INTERESTED",
+          "WRONG_NUMBER",
+          "LOST",
+        ],
+        default: "NEW",
+      },
+      remarks: { type: String, default: "" },
+      lastContactedAt: { type: Date },
+      nextFollowUpDate: { type: Date },
+      updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    },
     // Workflow
     // Option A: new applications should not start in DRAFT
     status: { type: String, enum: APP_STATUSES, default: "SUBMITTED" },
