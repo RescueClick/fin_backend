@@ -1776,9 +1776,52 @@ router.get(
 
       const stateFilter = { ...marketFilter };
       if (marketType) stateFilter.marketType = String(marketType).trim();
+      const ALL_INDIAN_STATES = [
+        "PAN India",
+        "Andhra Pradesh",
+        "Arunachal Pradesh",
+        "Assam",
+        "Bihar",
+        "Chhattisgarh",
+        "Goa",
+        "Gujarat",
+        "Haryana",
+        "Himachal Pradesh",
+        "Jharkhand",
+        "Karnataka",
+        "Kerala",
+        "Madhya Pradesh",
+        "Maharashtra",
+        "Manipur",
+        "Meghalaya",
+        "Mizoram",
+        "Nagaland",
+        "Odisha",
+        "Punjab",
+        "Rajasthan",
+        "Sikkim",
+        "Tamil Nadu",
+        "Telangana",
+        "Tripura",
+        "Uttar Pradesh",
+        "Uttarakhand",
+        "West Bengal",
+        "Andaman and Nicobar Islands",
+        "Chandigarh",
+        "Dadra and Nagar Haveli and Daman and Diu",
+        "Delhi",
+        "Jammu and Kashmir",
+        "Ladakh",
+        "Lakshadweep",
+        "Puducherry",
+      ];
+
+      const stateSet = new Set(ALL_INDIAN_STATES);
       const rawStates = await BankRm.distinct("state", stateFilter);
-      const stateSet = new Set(rawStates.map((v) => String(v || "").trim()).filter(Boolean));
-      stateSet.add("PAN India");
+      rawStates.forEach((v) => {
+        const trimmed = String(v || "").trim();
+        if (trimmed) stateSet.add(trimmed);
+      });
 
       const cityFilter = { ...stateFilter };
       if (state) {
@@ -1789,9 +1832,7 @@ router.get(
       }
       const rawCities = await BankRm.distinct("city", cityFilter);
       const citySet = new Set(rawCities.map((v) => String(v || "").trim()).filter(Boolean));
-      if (state && String(state).trim().toLowerCase() === "pan india") {
-        citySet.add("All Cities");
-      }
+      citySet.add("All Cities");
 
       const sortAlpha = (arr) =>
         Array.from(arr)
@@ -1799,12 +1840,24 @@ router.get(
           .filter(Boolean)
           .sort((a, b) => a.localeCompare(b));
 
+      // Ensure PAN India is always at the top of states, followed by alphabetical states
+      const sortedStates = Array.from(stateSet).filter(
+        (s) => s.toLowerCase() !== "pan india"
+      ).sort((a, b) => a.localeCompare(b));
+      sortedStates.unshift("PAN India");
+
+      // Ensure All Cities is always at the top of cities
+      const sortedCities = Array.from(citySet).filter(
+        (c) => c.toLowerCase() !== "all cities"
+      ).sort((a, b) => a.localeCompare(b));
+      sortedCities.unshift("All Cities");
+
       return res.json({
         banks: sortAlpha(banks),
         products: sortAlpha(products),
         marketTypes: sortAlpha(marketTypes),
-        states: sortAlpha(stateSet),
-        cities: sortAlpha(citySet),
+        states: sortedStates,
+        cities: sortedCities,
       });
     } catch (err) {
       console.error("Error fetching bank RM filter options:", err);
