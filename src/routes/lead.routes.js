@@ -239,7 +239,6 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       loanPurpose,
       partnerId: assignedPartner._id,
       rmId: assignedRmId,
-      asmId: assignedAsmId,
     };
 
     // 6. Find Existing Lead or Create New
@@ -273,8 +272,9 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       app.requestedAmount = loanAmount || app.requestedAmount || 0;
       app.partnerId = assignedPartner._id;
       app.rmId = assignedRmId || app.rmId;
-      app.asmId = assignedAsmId || app.asmId;
-      app.rsmId = assignedRsmId || app.rsmId;
+      // Per rule: LEADs stay with RM and do not route to ASM/RSM until DOC_COMPLETE
+      app.asmId = null;
+      app.rsmId = null;
       app.updatedAt = new Date();
       await app.save();
     } else {
@@ -290,8 +290,8 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
             appNo,
             partnerId: assignedPartner._id,
             rmId: assignedRmId,
-            rsmId: assignedRsmId,
-            asmId: assignedAsmId,
+            rsmId: null, // Routed to RSM only on DOC_COMPLETE
+            asmId: null, // Routed to ASM only on DOC_COMPLETE
             customerId: customerUser._id,
             loanType: normalizedLoanType,
             customer: customerPayload,

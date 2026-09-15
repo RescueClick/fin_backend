@@ -1145,6 +1145,7 @@ router.post(
 
       // ✅ RM can ONLY handle document-related statuses (up to DOC_COMPLETE)
       const RM_ALLOWED_STATUSES = [
+        "LEAD",
         "DRAFT",
         "SUBMITTED",
         "DOC_INCOMPLETE",
@@ -1183,7 +1184,7 @@ router.post(
           .json({ message: "Application not found under this RM" });
 
       // ✅ If application is past DOC_COMPLETE stage (handled by RSM), RM CANNOT change status
-      const isPastDocComplete = !["DRAFT", "SUBMITTED", "DOC_INCOMPLETE", "DOC_COMPLETE"].includes(app.status);
+      const isPastDocComplete = !["LEAD", "DRAFT", "SUBMITTED", "DOC_INCOMPLETE", "DOC_COMPLETE"].includes(app.status);
       if (isPastDocComplete) {
         return res.status(403).json({
           message: "This application has been transferred to RSM and can no longer be modified by RM. Once documents are complete, further stage transitions are handled by RSM/ASM."
@@ -2553,7 +2554,7 @@ router.post(
         });
       }
 
-      const isPastDocComplete = !["DRAFT", "SUBMITTED", "DOC_INCOMPLETE"].includes(application.status);
+      const isPastDocComplete = !["LEAD", "DRAFT", "SUBMITTED", "DOC_INCOMPLETE"].includes(application.status);
       if (isPastDocComplete) {
         await deleteS3ObjectsForUploadedFiles([req.file]);
         return res.status(403).json({
@@ -2691,7 +2692,7 @@ router.put(
         });
       }
 
-      const isPastDocComplete = !["DRAFT", "SUBMITTED", "DOC_INCOMPLETE"].includes(app.status);
+      const isPastDocComplete = !["LEAD", "DRAFT", "SUBMITTED", "DOC_INCOMPLETE"].includes(app.status);
       if (isPastDocComplete) {
         return res.status(403).json({
           message:
@@ -2895,7 +2896,7 @@ router.post(
         });
       }
 
-      const isPastDocComplete = !["DRAFT", "SUBMITTED", "DOC_INCOMPLETE"].includes(app.status);
+      const isPastDocComplete = !["LEAD", "DRAFT", "SUBMITTED", "DOC_INCOMPLETE"].includes(app.status);
       if (isPastDocComplete) {
         return res.status(403).json({
           message:

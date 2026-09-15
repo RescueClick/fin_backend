@@ -353,9 +353,10 @@ ApplicationSchema.methods.areAllDocumentsVerified = function () {
 // 🚦 State transition guard
 ApplicationSchema.methods.transition = function (to, byUserId, note) {
   const allowed = {
-    DRAFT: ["SUBMITTED"],
-    SUBMITTED: ["DOC_COMPLETE", "LOGIN", "UNDER_REVIEW", "DOC_INCOMPLETE", "REJECTED"],
-    DOC_INCOMPLETE: ["DOC_COMPLETE", "LOGIN", "UNDER_REVIEW", "REJECTED"],
+    LEAD: ["SUBMITTED", "DOC_INCOMPLETE", "DOC_COMPLETE", "DRAFT"],
+    DRAFT: ["SUBMITTED", "LEAD"],
+    SUBMITTED: ["DOC_COMPLETE", "LOGIN", "UNDER_REVIEW", "DOC_INCOMPLETE", "REJECTED", "LEAD"],
+    DOC_INCOMPLETE: ["DOC_COMPLETE", "LOGIN", "UNDER_REVIEW", "REJECTED", "LEAD"],
     // RSM/ASM/RM operational stages
     DOC_COMPLETE: ["LOGIN", "UNDER_REVIEW", "DOC_INCOMPLETE", "REJECTED"],
     LOGIN: ["UNDER_REVIEW", "APPROVED", "DOC_COMPLETE", "DOC_INCOMPLETE", "REJECTED"],
