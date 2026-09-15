@@ -962,7 +962,7 @@ router.post(
 // Public application creation (no login required)
 router.post(
   "/public/create-application",
-  upload.array("docs"), // max 10 files
+  upload.array("docs", 20), // personal loan can send 13+ docs
   async (req, res) => {
     try {
       const {
@@ -1245,9 +1245,15 @@ router.post(
         existingApp &&
         ["DRAFT", "DOC_INCOMPLETE"].includes(existingApp.status)
       ) {
-        // Partner resubmission should reflect only the docs uploaded in this request.
-        // (Do NOT keep older docs that the partner didn't re-upload.)
-        const docsToSave = newDocs;
+        // Partner resubmission with files replaces docs. Empty DRAFT shell
+        // (mobile resilient fallback) must KEEP existing docs so we don't wipe
+        // uploads before per-document upload completes.
+        const docsToSave =
+          newDocs.length > 0
+            ? newDocs
+            : applicationStatus === "DRAFT"
+              ? existingApp.docs || []
+              : newDocs;
         if (applicationStatus !== "DRAFT") {
           const missingDocs = findMissingMandatoryDocs(loanType, customer, docsToSave);
           if (missingDocs.length > 0) {
@@ -1432,7 +1438,7 @@ router.post(
   "/create-applications",
   auth,
   requireRole(ROLES.PARTNER, ROLES.CUSTOMER),
-  upload.array("docs"), // max 10 files
+  upload.array("docs", 20), // personal loan can send 13+ docs
   async (req, res) => {
     try {
       const userId = req.user.sub;
@@ -1503,6 +1509,27 @@ router.post(
       let assignedPartnerId = req.user.role === ROLES.PARTNER ? userId : null;
       let assignedRmId = req.user.role === ROLES.PARTNER ? partner?.rmId : null;
       let assignedAsmId = req.user.role === ROLES.PARTNER ? partner?.asmId : null;
+      // Must be declared: assigning undeclared assignedRsmId throws ReferenceError (500 "Server error")
+      let assignedRsmId = null;
+
+      const resolveRsmIdForLoanType = (rmDoc, type) => {
+        if (!rmDoc) return null;
+        const lt = String(type || "").trim().toUpperCase();
+        if (lt === "PERSONAL") return rmDoc.personalRsmId || rmDoc.rsmId || null;
+        if (lt === "BUSINESS") {
+          return rmDoc.businessRsmId || rmDoc.businessHomeRsmId || rmDoc.rsmId || null;
+        }
+        if (
+          lt === "HOME_LOAN_SALARIED" ||
+          lt === "HOME_LOAN_SELF_EMPLOYED" ||
+          lt === "LAP_SALARIED" ||
+          lt === "LAP_SELF_EMPLOYED" ||
+          lt === "LAP"
+        ) {
+          return rmDoc.homeLapRsmId || rmDoc.businessHomeRsmId || rmDoc.rsmId || null;
+        }
+        return rmDoc.rsmId || null;
+      };
 
       if (req.user.role !== ROLES.PARTNER && partnerReferralCode) {
         referralPartner = await User.findOne({
@@ -1523,13 +1550,13 @@ router.post(
             .select("rsmId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
             .lean();
           assignedAsmId = resolveSpecializedAsmForLoanType(referralRm, loanType);
-          assignedRsmId = referralRm?.rsmId || null;
+          assignedRsmId = resolveRsmIdForLoanType(referralRm, loanType);
         }
       }
 
       if (req.user.role === ROLES.PARTNER && rm) {
         assignedAsmId = resolveSpecializedAsmForLoanType(rm, loanType);
-        assignedRsmId = rm?.rsmId || null;
+        assignedRsmId = resolveRsmIdForLoanType(rm, loanType);
       }
 
       // Check if customer exists
@@ -1769,9 +1796,15 @@ router.post(
         existingApp &&
         ["DRAFT", "DOC_INCOMPLETE", "LEAD"].includes(existingApp.status)
       ) {
-        // Partner resubmission should reflect only the docs uploaded in this request.
-        // (Do NOT keep older docs that the partner didn't re-upload.)
-        const docsToSave = newDocs;
+        // Partner resubmission with files replaces docs. Empty DRAFT shell
+        // (mobile resilient fallback) must KEEP existing docs so we don't wipe
+        // uploads before per-document upload completes.
+        const docsToSave =
+          newDocs.length > 0
+            ? newDocs
+            : applicationStatus === "DRAFT"
+              ? existingApp.docs || []
+              : newDocs;
         if (applicationStatus !== "DRAFT") {
           const missingDocs = findMissingMandatoryDocs(loanType, customer, docsToSave);
           if (missingDocs.length > 0) {
@@ -1826,13 +1859,17 @@ router.post(
       }
 
       // Resolve ASM and RSM based on RM & loanType
-      if (assignedRmId && !assignedAsmId) {
+      if (assignedRmId && (!assignedAsmId || !assignedRsmId)) {
         const rmDoc = await User.findById(assignedRmId)
           .select("rsmId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
           .lean();
         if (rmDoc) {
-          assignedAsmId = resolveSpecializedAsmForLoanType(rmDoc, loanType);
-          assignedRsmId = assignedRsmId || rmDoc.rsmId || null;
+          if (!assignedAsmId) {
+            assignedAsmId = resolveSpecializedAsmForLoanType(rmDoc, loanType);
+          }
+          if (!assignedRsmId) {
+            assignedRsmId = resolveRsmIdForLoanType(rmDoc, loanType);
+          }
         }
       }
 
@@ -4768,7 +4805,8 @@ router.get(
       const applications = await Application.find({
         partnerId,
         loanType: loanType.toUpperCase(),
-        status: "DOC_INCOMPLETE",
+        // LEAD = Step-1 incomplete form; DOC_INCOMPLETE / DRAFT = docs/form resume
+        status: { $in: ["LEAD", "DRAFT", "DOC_INCOMPLETE"] },
         deletedAt: null,
       })
         .populate("customerId", "firstName lastName email phone")
@@ -4777,14 +4815,20 @@ router.get(
       const formatted = applications.map((app) => ({
         applicationId: app._id,
         customerId: app.customerId?._id,
-        customerName: `${app.customerId?.firstName || ""} ${app.customerId?.lastName || ""
-          }`.trim(),
-        contact: app.customerId?.phone || null,
-        email: app.customerId?.email || null,
+        customerName: `${app.customerId?.firstName || app.customer?.firstName || ""} ${
+          app.customerId?.lastName || app.customer?.lastName || ""
+        }`.trim(),
+        contact: app.customerId?.phone || app.customer?.phone || null,
+        email: app.customerId?.email || app.customer?.email || null,
         loanType: app.loanType,
         status: app.status,
+        leadSource: app.leadSource || null,
         docs: app.docs || [],
         createdAt: app.createdAt,
+        resumeHint:
+          app.status === "LEAD"
+            ? "Complete remaining loan form steps"
+            : "Upload / update pending documents",
       }));
 
       res.json(formatted);

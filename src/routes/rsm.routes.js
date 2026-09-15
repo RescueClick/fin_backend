@@ -57,6 +57,11 @@ import {
   isValidFollowUpStatus,
 } from "../utils/followUpHelpers.js";
 import { FollowUp } from "../models/followUp.js";
+import {
+  openLeadStatsByRm,
+  notifyRmToProgressLeads,
+  loadUserDisplayName,
+} from "../utils/leadWorkflow.js";
 
 const router = Router();
 
@@ -393,16 +398,18 @@ router.post(
         });
       }
 
-      // Get the RSM creating the RM to verify their type
-      const rsm = await User.findById(rsmId).select("rsmType asmId");
+      // Get the RSM/ASM creating the RM to verify their type
+      const rsm = await User.findById(rsmId).select("role rsmType asmType asmId");
       if (!rsm) {
-        return res.status(404).json({ message: "RSM not found" });
+        return res.status(404).json({ message: "Manager not found" });
       }
 
-      // Verify RSM type matches (RSM Personal can only assign to Personal, etc.)
-      if (rsm.rsmType !== assignToRsmType) {
+      const managerType = rsm.asmType || rsm.rsmType;
+
+      // Verify RSM/ASM type matches (Personal can only assign to Personal, etc.)
+      if (managerType && managerType !== assignToRsmType) {
         return res.status(403).json({
-          message: `RSM type mismatch. Your RSM type is ${rsm.rsmType}, but you're trying to assign RM to ${assignToRsmType}`
+          message: `Manager type mismatch. Your type is ${managerType}, but you're trying to assign RM to ${assignToRsmType}`
         });
       }
 
@@ -619,6 +626,8 @@ router.post(
       // Validate status transition is allowed from current status
       const currentStatus = app.status;
       const allowedTransitions = {
+        LEAD: ["SUBMITTED", "DOC_INCOMPLETE", "DOC_COMPLETE", "REJECTED", "LOGIN", "UNDER_REVIEW"],
+        DRAFT: ["SUBMITTED", "LEAD", "REJECTED"],
         SUBMITTED: ["DOC_COMPLETE", "LOGIN", "UNDER_REVIEW", "DOC_INCOMPLETE", "REJECTED"],
         DOC_INCOMPLETE: ["DOC_COMPLETE", "LOGIN", "UNDER_REVIEW", "REJECTED"],
         DOC_COMPLETE: ["LOGIN", "UNDER_REVIEW", "DOC_INCOMPLETE", "REJECTED"],
@@ -631,7 +640,7 @@ router.post(
       };
 
       if (req.user.role !== ROLES.SUPER_ADMIN && req.user.role !== ROLES.ADMIN) {
-        if (!allowedTransitions[currentStatus]?.includes(to)) {
+        if (currentStatus !== to && !allowedTransitions[currentStatus]?.includes(to)) {
           return res.status(400).json({
             message: `Cannot transition from ${currentStatus} to ${to}. Allowed transitions: ${allowedTransitions[currentStatus]?.join(", ") || "none"
               }`,
@@ -671,8 +680,18 @@ router.post(
       // Store old status before transition
       const oldStatus = app.status;
 
-      // Transition
-      app.transition(to, rsmId, note);
+      // Transition only when status actually changes (same-status update = note-only / no-op)
+      if (oldStatus !== to) {
+        app.transition(to, rsmId, note);
+      } else if (note && String(note).trim()) {
+        app.stageHistory.push({
+          from: oldStatus,
+          to,
+          by: rsmId,
+          at: new Date(),
+          note: String(note).trim(),
+        });
+      }
 
       // Persist rejection remark on the application so partners can see it in app/web
       if (to === "REJECTED" && note && String(note).trim()) {
@@ -1497,7 +1516,7 @@ router.get("/profile", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN
       .lean();
 
     if (!rsm) {
-      return res.status(404).json({ message: "RSM not found" });
+      return res.status(404).json({ message: "Manager profile not found" });
     }
 
     res.json({
@@ -2321,8 +2340,35 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES
 
     await followUp.save();
 
+    const askLeadProgress = req.body?.askLeadProgress !== false;
+    let leadNudge = { notified: false, openLeadsCount: 0 };
+    if (askLeadProgress) {
+      try {
+        const leadStats = await openLeadStatsByRm([rmId]);
+        const stats = leadStats.get(String(rmId)) || { openLeadsCount: 0 };
+        leadNudge.openLeadsCount = stats.openLeadsCount || 0;
+        if (leadNudge.openLeadsCount > 0) {
+          const askedByName = await loadUserDisplayName(rsmId);
+          await notifyRmToProgressLeads(rmId, {
+            askedByName,
+            askedByRole: req.user.role === ROLES.ASM ? "ASM" : "RSM",
+            openLeadsCount: leadNudge.openLeadsCount,
+            remarks:
+              remarks ||
+              "Please follow up with partners and get Step-1 leads converted to completed loan forms.",
+          });
+          leadNudge.notified = true;
+        }
+      } catch (nudgeErr) {
+        console.warn("RSM→RM lead nudge failed:", nudgeErr.message);
+      }
+    }
+
     res.json({
-      message: "Follow-up recorded successfully",
+      message: leadNudge.notified
+        ? `Follow-up recorded. RM notified about ${leadNudge.openLeadsCount} open lead(s).`
+        : "Follow-up recorded successfully",
+      leadNudge,
       followUp: {
         ...followUp.toObject(),
         lastCall: followUp.lastCall.toISOString(),
@@ -2353,7 +2399,7 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPE
       .lean();
     const rmIds = rms.map((rm) => rm._id);
 
-    const [followMap, appCounts, fillStats] = await Promise.all([
+    const [followMap, appCounts, fillStats, leadStats] = await Promise.all([
       latestFollowUpsByTargets({
         targetIds: rmIds,
         followUpType: "RM",
@@ -2361,6 +2407,7 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPE
       }),
       applicationCountsByRm(rmIds, null),
       partnerFillStatsByRm(rmIds, null),
+      openLeadStatsByRm(rmIds),
     ]);
 
     let items = rms.map((rm) => {
@@ -2371,6 +2418,12 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPE
         partnerCount: 0,
         partnersFilled: 0,
         partnersNotFilled: 0,
+      };
+      const leads = leadStats.get(rk) || {
+        openLeadsCount: 0,
+        partnerLeadsCount: 0,
+        overdueLeadsCount: 0,
+        agingOver48hCount: 0,
       };
       const performance = applicationCount > 0 ? "working" : "non_working";
 
@@ -2401,6 +2454,10 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPE
         partnerCount: stats.partnerCount,
         partnersFilled: stats.partnersFilled,
         partnersNotFilled: stats.partnersNotFilled,
+        openLeadsCount: leads.openLeadsCount,
+        partnerLeadsCount: leads.partnerLeadsCount,
+        overdueLeadsCount: leads.overdueLeadsCount,
+        agingOver48hCount: leads.agingOver48hCount,
         hasFilledForm: stats.partnersFilled > 0,
         performance,
         status: followUp?.status || "N/A",
@@ -2425,6 +2482,8 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPE
     }
 
     const summary = buildRmFollowUpSummary(items);
+    summary.openLeadsTotal = items.reduce((s, i) => s + (i.openLeadsCount || 0), 0);
+    summary.agingOver48hTotal = items.reduce((s, i) => s + (i.agingOver48hCount || 0), 0);
 
     res.json({
       period: period

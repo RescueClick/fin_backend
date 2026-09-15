@@ -11,6 +11,14 @@ import { createNotification } from "../utils/notificationService.js";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
+import { getAsmScopeIds } from "../utils/asmHierarchy.js";
+import {
+  notifyPartnerToCompleteLeadForm,
+  notifyRmToProgressLeads,
+  formatHierarchyLead,
+  loadUserDisplayName,
+  buildPartnerCompleteFormUrl,
+} from "../utils/leadWorkflow.js";
 
 const router = express.Router();
 
@@ -437,15 +445,32 @@ router.get("/rm", auth, requireRole(ROLES.RM), async (req, res) => {
 /**
  * POST /api/leads/:id/follow-up
  * RM updates follow-up status, notes, and next follow-up date for a lead.
+ * For partner-sourced leads, can notify partner to complete the loan form.
  */
 router.post("/:id/follow-up", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, remarks, nextFollowUpDate } = req.body;
+    const {
+      status,
+      remarks,
+      nextFollowUpDate,
+      notifyPartner = false,
+    } = req.body || {};
 
     const app = await Application.findById(id);
     if (!app) {
       return res.status(404).json({ message: "Application/Lead not found" });
+    }
+
+    // RM ownership: direct rmId or partner under this RM
+    const rmId = req.user.sub;
+    const partners = await User.find({ rmId, role: ROLES.PARTNER }).select("_id").lean();
+    const partnerIds = partners.map((p) => String(p._id));
+    const ownsLead =
+      String(app.rmId || "") === String(rmId) ||
+      (app.partnerId && partnerIds.includes(String(app.partnerId)));
+    if (!ownsLead) {
+      return res.status(403).json({ message: "This lead is not assigned to you" });
     }
 
     const followUpData = {
@@ -453,7 +478,7 @@ router.post("/:id/follow-up", auth, requireRole(ROLES.RM), async (req, res) => {
       remarks: remarks || "",
       lastContactedAt: new Date(),
       nextFollowUpDate: nextFollowUpDate ? new Date(nextFollowUpDate) : null,
-      updatedBy: req.user.sub,
+      updatedBy: rmId,
     };
 
     app.leadFollowUp = followUpData;
@@ -461,23 +486,248 @@ router.post("/:id/follow-up", auth, requireRole(ROLES.RM), async (req, res) => {
     app.stageHistory.push({
       from: app.status,
       to: app.status,
-      by: req.user.sub,
+      by: rmId,
       at: new Date(),
       note: `Follow-up: [${followUpData.status}] ${followUpData.remarks}`,
     });
 
     await app.save();
 
+    // Industrial rule: when partner lead needs form completion, notify partner
+    const shouldNotifyPartner =
+      app.status === "LEAD" &&
+      app.partnerId &&
+      (notifyPartner === true ||
+        ["DOCUMENTS_PENDING", "INTERESTED", "FOLLOW_UP_SCHEDULED"].includes(
+          String(followUpData.status || "").toUpperCase()
+        ));
+
+    let partnerNotify = { notified: false };
+    if (shouldNotifyPartner) {
+      try {
+        partnerNotify = await notifyPartnerToCompleteLeadForm(app, {
+          askedByRole: "RM",
+          note: followUpData.remarks,
+        });
+        if (partnerNotify.notified) {
+          app.stageHistory.push({
+            from: app.status,
+            to: app.status,
+            by: rmId,
+            at: new Date(),
+            note: "Partner notified to complete loan form",
+          });
+          await app.save();
+        }
+      } catch (notifyErr) {
+        console.warn("Partner complete-form notify failed:", notifyErr.message);
+      }
+    }
+
     return res.json({
       success: true,
-      message: "Lead follow-up updated successfully",
+      message: partnerNotify.notified
+        ? "Follow-up saved. Partner notified to complete the loan form."
+        : "Lead follow-up updated successfully",
       leadFollowUp: app.leadFollowUp,
+      partnerNotified: Boolean(partnerNotify.notified),
+      formUrl: partnerNotify.formUrl || null,
     });
   } catch (error) {
     console.error("Error saving lead follow-up:", error);
     return res.status(500).json({ message: "Failed to update lead follow-up" });
   }
 });
+
+/**
+ * POST /api/leads/:id/nudge-partner
+ * RM explicitly asks partner to complete the Step-1 lead loan form.
+ */
+router.post("/:id/nudge-partner", auth, requireRole(ROLES.RM), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { remarks = "" } = req.body || {};
+    const rmId = req.user.sub;
+
+    const app = await Application.findById(id);
+    if (!app || app.status !== "LEAD") {
+      return res.status(404).json({ message: "Open LEAD not found" });
+    }
+    if (!app.partnerId) {
+      return res.status(400).json({
+        message: "This lead has no partner. Contact the customer directly.",
+      });
+    }
+
+    const partners = await User.find({ rmId, role: ROLES.PARTNER }).select("_id").lean();
+    const partnerIds = partners.map((p) => String(p._id));
+    const ownsLead =
+      String(app.rmId || "") === String(rmId) ||
+      partnerIds.includes(String(app.partnerId));
+    if (!ownsLead) {
+      return res.status(403).json({ message: "This lead is not assigned to you" });
+    }
+
+    const partnerNotify = await notifyPartnerToCompleteLeadForm(app, {
+      askedByRole: "RM",
+      note: remarks,
+    });
+
+    app.leadFollowUp = {
+      ...(app.leadFollowUp?.toObject?.() || app.leadFollowUp || {}),
+      status: app.leadFollowUp?.status === "NEW" ? "DOCUMENTS_PENDING" : (app.leadFollowUp?.status || "DOCUMENTS_PENDING"),
+      remarks: remarks || app.leadFollowUp?.remarks || "Asked partner to complete loan form",
+      lastContactedAt: new Date(),
+      updatedBy: rmId,
+    };
+    app.stageHistory.push({
+      from: app.status,
+      to: app.status,
+      by: rmId,
+      at: new Date(),
+      note: `RM asked partner to complete loan form${remarks ? `: ${remarks}` : ""}`,
+    });
+    await app.save();
+
+    const partner = await User.findById(app.partnerId).select("firstName lastName phone").lean();
+
+    return res.json({
+      success: true,
+      message: "Partner notified to complete the loan form",
+      formUrl: partnerNotify.formUrl || buildPartnerCompleteFormUrl(app),
+      partner: {
+        name: `${partner?.firstName || ""} ${partner?.lastName || ""}`.trim(),
+        phone: partner?.phone || "",
+      },
+      leadFollowUp: app.leadFollowUp,
+    });
+  } catch (error) {
+    console.error("Error nudging partner for lead:", error);
+    return res.status(500).json({ message: "Failed to notify partner" });
+  }
+});
+
+/**
+ * GET /api/leads/hierarchy
+ * ASM / RSM monitor view of open LEADs under their RMs (no ownership transfer).
+ */
+router.get(
+  "/hierarchy",
+  auth,
+  requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const managerId = req.user.sub;
+      let rmIds = [];
+
+      if (req.user.role === ROLES.SUPER_ADMIN || req.user.role === ROLES.ADMIN) {
+        const rms = await User.find({ role: ROLES.RM, status: "ACTIVE" }).select("_id").lean();
+        rmIds = rms.map((r) => r._id);
+      } else {
+        const scope = await getAsmScopeIds(managerId);
+        rmIds = scope.rmIds || [];
+      }
+
+      if (!rmIds.length) {
+        return res.json({ summary: { openLeads: 0, partnerLeads: 0, agingOver48h: 0 }, items: [] });
+      }
+
+      const leads = await Application.find(
+        activeApplicationsFilter({
+          status: "LEAD",
+          rmId: { $in: rmIds },
+        })
+      )
+        .populate("partnerId", "firstName lastName phone partnerCode")
+        .populate("rmId", "firstName lastName employeeId phone")
+        .populate("customerId", "firstName lastName email phone")
+        .sort({ updatedAt: -1 })
+        .lean();
+
+      const items = leads.map(formatHierarchyLead);
+      const now = Date.now();
+      const summary = {
+        openLeads: items.length,
+        partnerLeads: items.filter((i) => i.leadSource === "PARTNER").length,
+        agingOver48h: items.filter(
+          (i) => now - new Date(i.createdAt).getTime() > 48 * 60 * 60 * 1000
+        ).length,
+      };
+
+      return res.json({ summary, items });
+    } catch (error) {
+      console.error("Error fetching hierarchy leads:", error);
+      return res.status(500).json({ message: "Failed to fetch hierarchy leads" });
+    }
+  }
+);
+
+/**
+ * POST /api/leads/:id/nudge-rm
+ * ASM/RSM asks the owning RM to progress this lead (partner complete form).
+ */
+router.post(
+  "/:id/nudge-rm",
+  auth,
+  requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { remarks = "" } = req.body || {};
+      const managerId = req.user.sub;
+
+      const app = await Application.findById(id);
+      if (!app || app.status !== "LEAD") {
+        return res.status(404).json({ message: "Open LEAD not found" });
+      }
+      if (!app.rmId) {
+        return res.status(400).json({ message: "Lead has no assigned RM" });
+      }
+
+      // Scope check (non-admin)
+      if (req.user.role !== ROLES.SUPER_ADMIN && req.user.role !== ROLES.ADMIN) {
+        const scope = await getAsmScopeIds(managerId);
+        const allowed = (scope.rmIds || []).some((rid) => String(rid) === String(app.rmId));
+        if (!allowed) {
+          return res.status(403).json({ message: "Lead is not under your hierarchy" });
+        }
+      }
+
+      const askedByName = await loadUserDisplayName(managerId);
+      const askedByRole = req.user.role === ROLES.RSM ? "RSM" : "ASM";
+
+      await notifyRmToProgressLeads(app.rmId, {
+        askedByName,
+        askedByRole,
+        openLeadsCount: 1,
+        applicationId: app._id,
+        appNo: app.appNo,
+        remarks:
+          remarks ||
+          "Please follow up with the partner and get the loan form completed.",
+      });
+
+      app.stageHistory.push({
+        from: app.status,
+        to: app.status,
+        by: managerId,
+        at: new Date(),
+        note: `${askedByRole} asked RM to progress lead${remarks ? `: ${remarks}` : ""}`,
+      });
+      await app.save();
+
+      return res.json({
+        success: true,
+        message: "RM notified to progress this lead",
+        applicationId: app._id,
+        appNo: app.appNo,
+      });
+    } catch (error) {
+      console.error("Error nudging RM for lead:", error);
+      return res.status(500).json({ message: "Failed to notify RM" });
+    }
+  }
+);
 
 /**
  * GET /api/leads/admin

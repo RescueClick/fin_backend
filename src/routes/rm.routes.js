@@ -43,6 +43,10 @@ import {
   partnerPendingDocStats,
   totalLoansForRm,
 } from "../utils/followUpHelpers.js";
+import {
+  openLeadStatsByPartner,
+  completedFormCountsByPartner,
+} from "../utils/leadWorkflow.js";
 import { sendMail } from "../utils/sendMail.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendApplicationStatusEmail, sendDocumentStatusEmail } from "../utils/emailService.js";
@@ -80,11 +84,11 @@ async function assignRsmForDocComplete(app, rmId) {
     return { ok: false, statusCode: 404, message: "RM not found" };
   }
 
-  let targetAsmId = null;
+  let targetManagerId = null;
   if (app.loanType === "PERSONAL") {
-    targetAsmId = rm.personalAsmId || rm.personalRsmId;
+    targetManagerId = rm.personalAsmId || rm.personalRsmId;
   } else if (app.loanType === "BUSINESS") {
-    targetAsmId = rm.businessAsmId || rm.businessHomeAsmId || rm.businessRsmId || rm.businessHomeRsmId;
+    targetManagerId = rm.businessAsmId || rm.businessHomeAsmId || rm.businessRsmId || rm.businessHomeRsmId;
   } else if (
     app.loanType === "HOME_LOAN_SALARIED" ||
     app.loanType === "HOME_LOAN_SELF_EMPLOYED" ||
@@ -92,12 +96,12 @@ async function assignRsmForDocComplete(app, rmId) {
     app.loanType === "LAP_SELF_EMPLOYED" ||
     app.loanType === "LAP"
   ) {
-    targetAsmId = rm.homeLapAsmId || rm.businessHomeAsmId || rm.homeLapRsmId || rm.businessHomeRsmId;
+    targetManagerId = rm.homeLapAsmId || rm.businessHomeAsmId || rm.homeLapRsmId || rm.businessHomeRsmId;
   } else {
     return { ok: false, statusCode: 400, message: `Unknown loan type: ${app.loanType}` };
   }
 
-  if (!targetAsmId) {
+  if (!targetManagerId) {
     return {
       ok: false,
       statusCode: 400,
@@ -105,13 +109,22 @@ async function assignRsmForDocComplete(app, rmId) {
     };
   }
 
-  const asm = await User.findById(targetAsmId).select("rsmId asmId asmType rsmType firstName lastName employeeId");
-  if (!asm) {
-    return { ok: false, statusCode: 404, message: "Assigned ASM not found" };
+  const manager = await User.findById(targetManagerId).select(
+    "role rsmId asmId asmType rsmType firstName lastName employeeId"
+  );
+  if (!manager) {
+    return { ok: false, statusCode: 404, message: "Assigned ASM/RSM not found" };
   }
 
-  app.asmId = targetAsmId;
-  app.rsmId = asm.rsmId || asm.asmId;
+  // Keep asmId/rsmId fields consistent with actual user roles (avoids "RSM not found" on ASM panel).
+  if (manager.role === ROLES.RSM) {
+    app.rsmId = manager._id;
+    app.asmId = manager.asmId || null;
+  } else {
+    // Specialized ASM (or legacy manager) owns the loan line
+    app.asmId = manager._id;
+    app.rsmId = manager.rsmId || manager.asmId || null;
+  }
   return { ok: true };
 }
 
@@ -121,7 +134,7 @@ async function assignRsmForDocComplete(app, rmId) {
 async function syncApplicationStatusAfterDocUpdate(app, rmId) {
   const oldStatus = app.status;
 
-  if (!(app.status === "SUBMITTED" || app.status === "DOC_INCOMPLETE")) {
+  if (!(app.status === "SUBMITTED" || app.status === "DOC_INCOMPLETE" || app.status === "LEAD")) {
     return { statusChanged: false, oldStatus, newStatus: oldStatus };
   }
 
@@ -130,21 +143,8 @@ async function syncApplicationStatusAfterDocUpdate(app, rmId) {
 
   // Disabled automatic transition to DOC_COMPLETE as per user request.
   // The RM must manually transition the application to DOC_COMPLETE.
-  // if (allVerified) {
-  //   if (oldStatus === "DOC_COMPLETE") {
-  //     return { statusChanged: false, oldStatus, newStatus: oldStatus };
-  //   }
-  //   const assign = await assignRsmForDocComplete(app, rmId);
-  //   if (!assign.ok) {
-  //     const err = new Error(assign.message);
-  //     err.statusCode = assign.statusCode;
-  //     throw err;
-  //   }
-  //   app.transition("DOC_COMPLETE", rmId, "All required documents verified");
-  //   return { statusChanged: true, oldStatus, newStatus: "DOC_COMPLETE" };
-  // }
 
-  if (anyRejected && oldStatus === "SUBMITTED") {
+  if (anyRejected && (oldStatus === "SUBMITTED" || oldStatus === "LEAD")) {
     app.transition("DOC_INCOMPLETE", rmId, "Document rejected — re-upload required");
     return { statusChanged: true, oldStatus, newStatus: "DOC_INCOMPLETE" };
   }
@@ -955,23 +955,28 @@ router.get(
         .lean();
 
       const partnerIds = partners.map((p) => p._id);
-      const [followMap, appCounts, pendingStats, totalLoans] = await Promise.all([
-        latestFollowUpsByTargets({
-          targetIds: partnerIds,
-          followUpType: "PARTNER",
-          period,
-          partnerIdMode: true,
-        }),
-        applicationCountsByPartner(partnerIds, null),
-        partnerPendingDocStats(partnerIds),
-        totalLoansForRm(rmId, partnerIds),
-      ]);
+      const [followMap, appCounts, pendingStats, totalLoans, leadStats, completedCounts] =
+        await Promise.all([
+          latestFollowUpsByTargets({
+            targetIds: partnerIds,
+            followUpType: "PARTNER",
+            period,
+            partnerIdMode: true,
+          }),
+          applicationCountsByPartner(partnerIds, null),
+          partnerPendingDocStats(partnerIds),
+          totalLoansForRm(rmId, partnerIds),
+          openLeadStatsByPartner(partnerIds),
+          completedFormCountsByPartner(partnerIds),
+        ]);
 
       let items = partners.map((partner) => {
         const pid = String(partner._id);
         const lastFollowUp = followMap.get(pid);
         const applicationCount = appCounts.get(pid) || 0;
-        const hasFilledForm = applicationCount > 0;
+        const completedFormCount = completedCounts.get(pid) || 0;
+        // Industrial: LEAD-only partners are NOT "filled" — form still incomplete
+        const hasFilledForm = completedFormCount > 0;
         const performance = hasFilledForm ? "working" : "non_working";
         const pending = pendingStats.get(pid) || {
           applicationCountNeedingInfo: 0,
@@ -979,6 +984,7 @@ router.get(
           remainingDocTypes: [],
           appsNeedingMoreInfo: [],
         };
+        const leads = leadStats.get(pid) || { openLeadsCount: 0, leads: [] };
 
         return {
           employeeId: partner?.employeeId,
@@ -993,9 +999,12 @@ router.get(
           lastCall: formatFollowUpLastCall(lastFollowUp?.lastCall),
           lastCallRaw: lastFollowUp?.lastCall || null,
           applicationCount,
+          completedFormCount,
+          openLeadsCount: leads.openLeadsCount,
+          openLeads: leads.leads,
           hasFilledForm,
           performance,
-          moreInfoRequired: pending.applicationCountNeedingInfo > 0,
+          moreInfoRequired: pending.applicationCountNeedingInfo > 0 || leads.openLeadsCount > 0,
           appsNeedingMoreInfoCount: pending.applicationCountNeedingInfo,
           pendingDocsCount: pending.pendingDocsCount,
           remainingDocTypes: pending.remainingDocTypes,
@@ -1022,6 +1031,10 @@ router.get(
       summary.moreInfoRequired = items.filter((i) => i.moreInfoRequired).length;
       summary.pendingDocsTotal = items.reduce(
         (s, i) => s + (i.pendingDocsCount || 0),
+        0
+      );
+      summary.openLeadsTotal = items.reduce(
+        (s, i) => s + (i.openLeadsCount || 0),
         0
       );
 
@@ -1143,14 +1156,15 @@ router.post(
       if (!to)
         return res.status(400).json({ message: "Target status 'to' required" });
 
-      // ✅ RM can ONLY handle document-related statuses (up to DOC_COMPLETE)
+      // ✅ RM can handle doc statuses + reject non-deals (LEAD / early stages)
       const RM_ALLOWED_STATUSES = [
         "LEAD",
         "DRAFT",
         "SUBMITTED",
         "DOC_INCOMPLETE",
         "DOC_COMPLETE",
-        "DOC_SUBMITTED"
+        "DOC_SUBMITTED",
+        "REJECTED",
       ];
 
       if (!RM_ALLOWED_STATUSES.includes(to)) {
@@ -1162,19 +1176,24 @@ router.post(
       if (!APP_STATUSES.includes(to))
         return res.status(400).json({ message: "Invalid status" });
 
+      if (to === "REJECTED" && (!note || !String(note).trim())) {
+        return res.status(400).json({
+          message: "A remark/reason is required to reject this application.",
+        });
+      }
+
       const rmId = req.user.sub;
       
       // Get all partners under this RM
       const partners = await User.find({ rmId, role: ROLES.PARTNER }).select("_id").lean();
       const partnerIds = partners.map(p => p._id);
 
-      // Find application either directly assigned to RM or via partners
+      // Find application assigned to this RM (direct) or via partners
       const app = await Application.findOne({
         _id: req.params.id,
         $or: [
+          { rmId },
           { partnerId: { $in: partnerIds } },
-          { partnerId: null, rmId: rmId },
-          { partnerId: { $exists: false }, rmId: rmId }
         ]
       }).populate("customerId");
 
@@ -1184,6 +1203,7 @@ router.post(
           .json({ message: "Application not found under this RM" });
 
       // ✅ If application is past DOC_COMPLETE stage (handled by RSM), RM CANNOT change status
+      // Exception: REJECTED is blocked once past DOC_COMPLETE (RSM owns that stage)
       const isPastDocComplete = !["LEAD", "DRAFT", "SUBMITTED", "DOC_INCOMPLETE", "DOC_COMPLETE"].includes(app.status);
       if (isPastDocComplete) {
         return res.status(403).json({
@@ -1192,7 +1212,7 @@ router.post(
       }
 
       // If application is at DOC_COMPLETE, RM can only revert to DOC_INCOMPLETE if document changes are needed
-      if (app.status === "DOC_COMPLETE" && to !== "DOC_INCOMPLETE" && to !== "DOC_COMPLETE") {
+      if (app.status === "DOC_COMPLETE" && to !== "DOC_INCOMPLETE" && to !== "DOC_COMPLETE" && to !== "REJECTED") {
         return res.status(403).json({
           message: "Cannot change status from DOC_COMPLETE. Once documents are complete, the application is transferred to RSM for processing. You may only revert to DOC_INCOMPLETE if needed."
         });
@@ -1235,57 +1255,13 @@ router.post(
           });
         }
 
-        // ✅ AUTO-ROUTE TO SPECIALIZED ASM based on loanType + RM's ASM mapping
-        const rm = await User.findById(req.user.sub).select(
-          "personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId"
-        );
-        if (!rm) {
-          return res.status(404).json({ message: "RM not found" });
+        // ✅ AUTO-ROUTE TO SPECIALIZED ASM/RSM based on loanType + RM mapping
+        const assign = await assignRsmForDocComplete(app, req.user.sub);
+        if (!assign.ok) {
+          return res.status(assign.statusCode || 400).json({ message: assign.message });
         }
 
-        let targetAsmId = null;
-        let targetRsmId = null;
-
-        // Determine which specialized ASM should handle this loan based on loanType
-        if (app.loanType === "PERSONAL") {
-          targetAsmId = rm.personalAsmId || rm.personalRsmId;
-          console.log(`📋 Loan Type: PERSONAL → Routing to Personal Loan ASM: ${targetAsmId}`);
-        } else if (app.loanType === "BUSINESS") {
-          targetAsmId = rm.businessAsmId || rm.businessHomeAsmId || rm.businessRsmId || rm.businessHomeRsmId;
-          console.log(`📋 Loan Type: BUSINESS → Routing to Business Loan ASM: ${targetAsmId}`);
-        } else if (
-          app.loanType === "HOME_LOAN_SALARIED" ||
-          app.loanType === "HOME_LOAN_SELF_EMPLOYED" ||
-          app.loanType === "LAP_SALARIED" ||
-          app.loanType === "LAP_SELF_EMPLOYED" ||
-          app.loanType === "LAP"
-        ) {
-          targetAsmId = rm.homeLapAsmId || rm.businessHomeAsmId || rm.homeLapRsmId || rm.businessHomeRsmId;
-          console.log(`📋 Loan Type: ${app.loanType} → Routing to Home & LAP Loan ASM: ${targetAsmId}`);
-        } else {
-          console.error(`❌ Unknown loan type: ${app.loanType}`);
-        }
-
-        if (!targetAsmId) {
-          return res.status(400).json({
-            message: `RM is not assigned to an ASM for loan type ${app.loanType}. Please contact admin to assign ASM.`
-          });
-        }
-
-        // Fetch ASM to get parent RSM link
-        const asm = await User.findById(targetAsmId).select("rsmId asmId asmType rsmType firstName lastName employeeId");
-        if (!asm) {
-          return res.status(404).json({ message: "Assigned ASM not found" });
-        }
-
-        targetRsmId = asm.rsmId || asm.asmId;
-
-        // Assign specialized ASM and parent RSM to application
-        app.asmId = targetAsmId;
-        app.rsmId = targetRsmId;
-
-        console.log(`✅ Auto-routed application ${app.appNo} (${app.loanType}) to ASM ${asm.firstName} ${asm.lastName} (${asm.employeeId}) - RSM: ${targetRsmId}`);
-        console.log(`   📝 Setting asmId: ${targetAsmId}, rsmId: ${targetRsmId}`);
+        console.log(`✅ Auto-routed application ${app.appNo} (${app.loanType}) asmId=${app.asmId}, rsmId=${app.rsmId}`);
       }
 
       // Store old status before transition
@@ -1299,15 +1275,22 @@ router.post(
         app.stageHistory.push({ from: oldStatus, to, by: req.user.sub, note });
       }
 
+      if (to === "REJECTED" && note && String(note).trim()) {
+        app.remarks = String(note).trim();
+        // Soft-delete after 3 months (same as RSM reject flow)
+        app.deletedAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+      }
+
       // ✅ Save application with rsmId and asmId
       await app.save();
       
-      // ✅ Verify the save was successful
-      const savedApp = await Application.findById(app._id).select("rsmId asmId status loanType appNo").lean();
-      console.log(`💾 Saved application ${savedApp.appNo}: rsmId=${savedApp.rsmId}, asmId=${savedApp.asmId}, status=${savedApp.status}, loanType=${savedApp.loanType}`);
-      
-      if (!savedApp.rsmId) {
-        console.error(`❌ ERROR: Application ${savedApp.appNo} was saved but rsmId is null!`);
+      // ✅ Verify routing was saved on DOC_COMPLETE
+      if (to === "DOC_COMPLETE") {
+        const savedApp = await Application.findById(app._id).select("rsmId asmId status loanType appNo").lean();
+        console.log(`💾 Saved application ${savedApp.appNo}: rsmId=${savedApp.rsmId}, asmId=${savedApp.asmId}, status=${savedApp.status}, loanType=${savedApp.loanType}`);
+        if (!savedApp.asmId && !savedApp.rsmId) {
+          console.error(`❌ ERROR: Application ${savedApp.appNo} DOC_COMPLETE but asmId/rsmId both null`);
+        }
       }
 
       // Emit socket notification with action tracking
@@ -1363,10 +1346,10 @@ router.post(
       };
 
       // If DOC_COMPLETE, include routing info
-      if (to === "DOC_COMPLETE" && app.rsmId) {
+      if (to === "DOC_COMPLETE") {
         responseData.rsmId = app.rsmId;
         responseData.asmId = app.asmId;
-        responseData.message = "Documents completed. Application routed to RSM for processing.";
+        responseData.message = "Documents completed. Application routed to ASM/RSM for processing.";
       }
 
       res.json(responseData);
@@ -2294,7 +2277,7 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
       activeApplicationsFilter(rmScopeFilter)
     )
       .populate("customerId", "employeeId firstName lastName email phone") // ✅ get employeeId from User
-      .populate("partnerId", "firstName lastName email phone")
+      .populate("partnerId", "firstName lastName email phone partnerCode")
       .lean();
 
     // Get payout status + amount for these applications
@@ -2336,6 +2319,7 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
           }`.trim(),
           email: app.partnerId?.email,
           phone: app.partnerId?.phone,
+          code: app.partnerId?.partnerCode || "",
         },
         applicationId: app._id,
         appNo: app.appNo,
@@ -2598,12 +2582,14 @@ router.post(
         application.docs.push(newDoc);
       }
 
-      if (application.status === "SUBMITTED") {
+      if (application.status === "SUBMITTED" || application.status === "LEAD") {
         try {
           application.transition(
             "DOC_INCOMPLETE",
             rmId,
-            "Documents uploaded by RM - verification in progress"
+            application.status === "LEAD"
+              ? "Documents uploaded by RM on LEAD - moved to DOC_INCOMPLETE"
+              : "Documents uploaded by RM - verification in progress"
           );
         } catch (transitionErr) {
           console.error(

@@ -2,7 +2,7 @@ import { Router } from "express";
 import argon2 from "argon2";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
-import { ROLES, RSM_TYPES } from "../config/roles.js";
+import { ROLES, RSM_TYPES, ASM_TYPES } from "../config/roles.js";
 import { User } from "../models/User.js";
 import { makeRmCode } from "../utils/codes.js";
 import { Payout } from "../models/Payout.js";
@@ -43,9 +43,24 @@ import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
-import { emitPayoutCreated } from "../utils/socketEmitter.js";
+import { emitPayoutCreated, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
 import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
 import { createNotification } from "../utils/notificationService.js";
+import { FollowUp } from "../models/followUp.js";
+import {
+  parseFollowUpPeriod,
+  latestFollowUpsByTargets,
+  applicationCountsByRm,
+  partnerFillStatsByRm,
+  formatFollowUpLastCall,
+  buildRmFollowUpSummary,
+  isValidFollowUpStatus,
+} from "../utils/followUpHelpers.js";
+import {
+  openLeadStatsByRm,
+  notifyRmToProgressLeads,
+  loadUserDisplayName,
+} from "../utils/leadWorkflow.js";
 
 const router = Router();
 
@@ -1562,8 +1577,36 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES
 
     await followUp.save();
 
+    // Industrial: when ASM coaches RM, also nudge them on open partner leads
+    const askLeadProgress = req.body?.askLeadProgress !== false;
+    let leadNudge = { notified: false, openLeadsCount: 0 };
+    if (askLeadProgress) {
+      try {
+        const leadStats = await openLeadStatsByRm([rmId]);
+        const stats = leadStats.get(String(rmId)) || { openLeadsCount: 0 };
+        leadNudge.openLeadsCount = stats.openLeadsCount || 0;
+        if (leadNudge.openLeadsCount > 0) {
+          const askedByName = await loadUserDisplayName(asmId);
+          await notifyRmToProgressLeads(rmId, {
+            askedByName,
+            askedByRole: req.user.role === ROLES.RSM ? "RSM" : "ASM",
+            openLeadsCount: leadNudge.openLeadsCount,
+            remarks:
+              remarks ||
+              "Please follow up with partners and get Step-1 leads converted to completed loan forms.",
+          });
+          leadNudge.notified = true;
+        }
+      } catch (nudgeErr) {
+        console.warn("ASM→RM lead nudge failed:", nudgeErr.message);
+      }
+    }
+
     res.json({
-      message: "Follow-up recorded successfully",
+      message: leadNudge.notified
+        ? `Follow-up recorded. RM notified about ${leadNudge.openLeadsCount} open lead(s).`
+        : "Follow-up recorded successfully",
+      leadNudge,
       followUp: {
         ...followUp.toObject(),
         lastCall: followUp.lastCall.toISOString(),
@@ -1601,7 +1644,7 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPE
       .lean();
     const rmIds = rms.map((rm) => rm._id);
 
-    const [followMap, appCounts, fillStats] = await Promise.all([
+    const [followMap, appCounts, fillStats, leadStats] = await Promise.all([
       latestFollowUpsByTargets({
         targetIds: rmIds,
         followUpType: "RM",
@@ -1609,6 +1652,7 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPE
       }),
       applicationCountsByRm(rmIds, null),
       partnerFillStatsByRm(rmIds, null),
+      openLeadStatsByRm(rmIds),
     ]);
 
     let items = rms.map((rm) => {
@@ -1619,6 +1663,12 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPE
         partnerCount: 0,
         partnersFilled: 0,
         partnersNotFilled: 0,
+      };
+      const leads = leadStats.get(rk) || {
+        openLeadsCount: 0,
+        partnerLeadsCount: 0,
+        overdueLeadsCount: 0,
+        agingOver48hCount: 0,
       };
       const performance = applicationCount > 0 ? "working" : "non_working";
 
@@ -1649,6 +1699,10 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPE
         partnerCount: stats.partnerCount,
         partnersFilled: stats.partnersFilled,
         partnersNotFilled: stats.partnersNotFilled,
+        openLeadsCount: leads.openLeadsCount,
+        partnerLeadsCount: leads.partnerLeadsCount,
+        overdueLeadsCount: leads.overdueLeadsCount,
+        agingOver48hCount: leads.agingOver48hCount,
         hasFilledForm: stats.partnersFilled > 0,
         performance,
         status: followUp?.status || "N/A",
@@ -1673,6 +1727,8 @@ router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPE
     }
 
     const summary = buildRmFollowUpSummary(items);
+    summary.openLeadsTotal = items.reduce((s, i) => s + (i.openLeadsCount || 0), 0);
+    summary.agingOver48hTotal = items.reduce((s, i) => s + (i.agingOver48hCount || 0), 0);
 
     res.json({
       period: period
@@ -4822,6 +4878,8 @@ router.post(
       }
 
       const ASM_ALLOWED_STATUSES = [
+        "LEAD",
+        "SUBMITTED",
         "DOC_INCOMPLETE",
         "DOC_COMPLETE",
         "LOGIN",
@@ -4839,21 +4897,47 @@ router.post(
       }
 
       const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(asmId);
-      const app = await Application.findOne({
+      let app = await Application.findOne({
         _id: req.params.id,
         $or: [
           { asmId },
+          { rsmId: asmId },
           ...(rsmIds.length ? [{ rsmId: { $in: rsmIds } }] : []),
           ...(rmIds.length ? [{ rmId: { $in: rmIds } }] : []),
           ...(partnerIds.length ? [{ partnerId: { $in: partnerIds } }] : []),
         ],
       })
         .populate("customerId")
-        .populate("rmId", "firstName lastName employeeId")
+        .populate("rmId", "firstName lastName employeeId personalAsmId businessAsmId homeLapAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId businessHomeAsmId")
         .populate("partnerId", "firstName lastName employeeId");
+
+      // Fallback: if app exists in hierarchy via RM mapping but asmId/rsmId were saved swapped
+      if (!app && mongoose.Types.ObjectId.isValid(req.params.id) && rmIds.length) {
+        app = await Application.findOne({
+          _id: req.params.id,
+          rmId: { $in: rmIds },
+        })
+          .populate("customerId")
+          .populate("rmId", "firstName lastName employeeId personalAsmId businessAsmId homeLapAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId businessHomeAsmId")
+          .populate("partnerId", "firstName lastName employeeId");
+      }
 
       if (!app) {
         return res.status(404).json({ message: "Application not found under this ASM hierarchy" });
+      }
+
+      // Repair swapped/missing routing so future lookups don't fail with "RSM not found"
+      const me = String(asmId);
+      const actor = await User.findById(asmId).select("role rsmId asmId").lean();
+      if (actor?.role === ROLES.ASM) {
+        if (String(app.asmId || "") !== me) app.asmId = asmId;
+        if (actor.rsmId && !app.rsmId) app.rsmId = actor.rsmId;
+        // If rsmId was incorrectly set to this ASM id, clear/fix it
+        if (app.rsmId && String(app.rsmId) === me) {
+          app.rsmId = actor.rsmId || null;
+        }
+      } else if (actor?.role === ROLES.RSM) {
+        if (String(app.rsmId || "") !== me) app.rsmId = asmId;
       }
 
       if (app.status === "DISBURSED") {
@@ -4878,7 +4962,9 @@ router.post(
       }
 
       const oldStatus = app.status;
-      app.transition(to, asmId, note || `Status updated to ${to} by ASM`);
+      if (oldStatus !== to) {
+        app.transition(to, asmId, note || `Status updated to ${to} by ASM`);
+      }
 
       if (to === "REJECTED" && note && String(note).trim()) {
         app.remarks = String(note).trim();
@@ -4899,6 +4985,8 @@ router.post(
         message: `Application transitioned to ${to} successfully`,
         status: app.status,
         appNo: app.appNo,
+        asmId: app.asmId,
+        rsmId: app.rsmId,
       });
     } catch (err) {
       console.error("ASM Application transition error:", err);
