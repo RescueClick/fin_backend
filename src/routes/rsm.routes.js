@@ -2694,44 +2694,51 @@ router.get("/get-partners", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_
     const rsmId = req.user.sub;
     const scope = await loadRsmReportingScope(rsmId);
 
-    const rms = await User.find({
-      role: ROLES.RM,
-      ...scope,
-    })
+    const rms = await User.find(
+      activeUsersFilter({
+        role: ROLES.RM,
+        ...scope,
+      })
+    )
       .select("_id firstName lastName employeeId")
       .lean();
     const rmIds = rms.map((rm) => rm._id);
     const rmMap = Object.fromEntries(rms.map((rm) => [String(rm._id), rm]));
 
-    const rsmOid = toObjectId(rsmId);
-    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
     const { status } = req.query || {};
-    const query = {
-      role: ROLES.PARTNER,
-      $or: [
-        ...(rmIds.length ? [{ rmId: { $in: rmIds } }] : []),
-        { asmId: rsmOid },
-        { rsmId: rsmOid },
-      ],
-      ...userBase,
-    };
-    if (status && status !== "ALL") {
-      query.status = status.toUpperCase();
+
+    // Regular list: only verified partners assigned to a real RM under this manager
+    if (!rmIds.length) {
+      return res.json([]);
     }
 
-    const partners = await User.find(query)
+    const queryExtra = {
+      role: ROLES.PARTNER,
+      status: { $ne: "PENDING" },
+      rmId: { $in: rmIds },
+    };
+    if (status && status !== "ALL") {
+      if (String(status).toUpperCase() === "PENDING") {
+        return res.json([]);
+      }
+      queryExtra.status = status.toUpperCase();
+    }
+
+    const partners = await User.find(activeUsersFilter(queryExtra))
       .select("-passwordHash -__v")
       .lean();
 
-    const formatted = partners.map((partner) => {
-      const rm = rmMap[String(partner.rmId)] || null;
-      return {
-        ...partner,
-        rmName: rm ? `${rm.firstName} ${rm.lastName}` : null,
-        rmEmployeeId: rm ? rm.employeeId : null,
-        rmId: rm ? rm._id : partner.rmId || null,
-      };
-    });
+    const formatted = partners
+      .filter((partner) => partner.rmId && rmMap[String(partner.rmId)])
+      .map((partner) => {
+        const rm = rmMap[String(partner.rmId)];
+        return {
+          ...partner,
+          rmName: `${rm.firstName} ${rm.lastName}`,
+          rmEmployeeId: rm.employeeId,
+          rmId: rm._id,
+        };
+      });
 
     res.json(formatted);
   } catch (err) {

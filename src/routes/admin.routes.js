@@ -1717,25 +1717,42 @@ router.get(
   async (req, res) => {
     try {
       const { status } = req.query || {};
+
+      // Placeholder RM owners used for unverified self-registrations — never show in regular list
+      const placeholderOwners = await User.find({
+        role: { $in: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      })
+        .select("_id")
+        .lean();
+      const placeholderRmIds = placeholderOwners.map((u) => u._id);
+
       const query = {
         role: ROLES.PARTNER,
         $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        // Unverified / unassigned partners belong only in Admin Partner queue
+        status: { $ne: "PENDING" },
+        rmId: {
+          $exists: true,
+          $ne: null,
+          ...(placeholderRmIds.length ? { $nin: placeholderRmIds } : {}),
+        },
       };
       if (status && status !== "ALL") {
+        if (status.toUpperCase() === "PENDING") {
+          // PENDING partners are only via /get-unassigned-partners (Admin Partner)
+          return res.json([]);
+        }
         if (status.toUpperCase() === "SUSPENDED" || status.toUpperCase() === "INACTIVE") {
           query.status = { $in: ["SUSPENDED", "INACTIVE"] };
         } else {
           query.status = status.toUpperCase();
         }
-      } else if (!status) {
-        // By default, regular partner list only returns verified partners (excludes unverified PENDING registrations)
-        query.status = { $ne: "PENDING" };
       }
       const list = await User.find(query)
         .select("-passwordHash -__v")
         .populate({
           path: "rmId",
-          select: "firstName lastName employeeId asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
+          select: "firstName lastName employeeId role asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
           populate: [
             { path: "asmId", select: "firstName lastName employeeId" },
             {
@@ -1762,28 +1779,30 @@ router.get(
         })
         .lean();
 
-      const formatted = list.map((partner) => {
-        const rm = partner.rmId;
-        const asm =
-          rm?.asmId ||
-          rm?.personalRsmId?.asmId ||
-          rm?.businessRsmId?.asmId ||
-          rm?.homeLapRsmId?.asmId ||
-          rm?.businessHomeRsmId?.asmId ||
-          null;
+      const formatted = list
+        .filter((partner) => partner.rmId?.role === ROLES.RM)
+        .map((partner) => {
+          const rm = partner.rmId;
+          const asm =
+            rm?.asmId ||
+            rm?.personalRsmId?.asmId ||
+            rm?.businessRsmId?.asmId ||
+            rm?.homeLapRsmId?.asmId ||
+            rm?.businessHomeRsmId?.asmId ||
+            null;
 
-        delete partner.rmId;
+          delete partner.rmId;
 
-        return {
-          ...partner,
-          rmName: rm ? `${rm.firstName} ${rm.lastName}` : null,
-          rmEmployeeId: rm ? rm.employeeId : null,
-          rmId: rm ? rm._id : null,
-          asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
-          asmEmployeeId: asm ? asm.employeeId : null,
-          asmId: asm ? asm._id : null,
-        };
-      });
+          return {
+            ...partner,
+            rmName: rm ? `${rm.firstName} ${rm.lastName}` : null,
+            rmEmployeeId: rm ? rm.employeeId : null,
+            rmId: rm ? rm._id : null,
+            asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
+            asmEmployeeId: asm ? asm.employeeId : null,
+            asmId: asm ? asm._id : null,
+          };
+        });
 
       res.json(formatted);
     } catch (err) {
@@ -1799,33 +1818,54 @@ router.get(
   requireRole(ROLES.SUPER_ADMIN), // or SUPER_ADMIN depending on your flow
   async (req, res) => {
     try {
-      // Find Admin user
-      const admin = await User.findOne({ role: ROLES.SUPER_ADMIN });
-
-      if (!admin) {
+      // Placeholder owners used for self-registered partners before a real RM is assigned
+      const placeholderOwners = await User.find({
+        role: { $in: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      })
+        .select("_id firstName lastName employeeId role")
+        .lean();
+      if (!placeholderOwners.length) {
         return res.status(404).json({ message: "Admin not found" });
       }
+      const placeholderRmIds = placeholderOwners.map((u) => u._id);
+      const admin =
+        placeholderOwners.find((u) => u.role === ROLES.SUPER_ADMIN) ||
+        placeholderOwners[0];
 
-      // Partners awaiting approval or RM assignment
+      // Admin Partner queue: PENDING + any partner still parked on Admin (no real RM yet)
       const partners = await User.find({
         role: ROLES.PARTNER,
-        status: "PENDING",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        $and: [
+          {
+            $or: [
+              { status: "PENDING" },
+              { rmId: { $in: placeholderRmIds } },
+              { rmId: null },
+              { rmId: { $exists: false } },
+            ],
+          },
+        ],
       })
         .select("-passwordHash -__v")
         .populate({
           path: "rmId",
-          select: "firstName lastName employeeId"
+          select: "firstName lastName employeeId role",
         })
         .lean();
 
       // Map partners and keep stored doc URLs (S3 URLs already absolute)
       const formatted = partners.map((p) => {
-        const rm = p.rmId || admin;
+        const rm = p.rmId?.role === ROLES.RM ? p.rmId : null;
         return {
           ...p,
-          rmId: rm._id,
-          rmName: `${rm.firstName} ${rm.lastName}`,
-          rmEmployeeId: rm.employeeId,
+          status: p.status === "ACTIVE" && !rm ? "PENDING" : p.status,
+          needsRmAssignment: !rm,
+          rmId: rm?._id || admin._id,
+          rmName: rm
+            ? `${rm.firstName} ${rm.lastName}`
+            : "Unassigned — assign RM",
+          rmEmployeeId: rm?.employeeId || null,
           docs: p.docs || [],
         };
       });
@@ -1879,18 +1919,35 @@ router.post(
           .json({ message: "Both partnerId and rmId are required" });
       }
 
-      const admin = await User.findOne({ role: ROLES.SUPER_ADMIN });
-      if (!admin) return res.status(404).json({ message: "Admin not found" });
+      const placeholderOwners = await User.find({
+        role: { $in: [ROLES.SUPER_ADMIN, ROLES.ADMIN] },
+      })
+        .select("_id")
+        .lean();
+      const placeholderRmIds = new Set(placeholderOwners.map((u) => String(u._id)));
+      if (!placeholderRmIds.size) {
+        return res.status(404).json({ message: "Admin not found" });
+      }
 
       const partner = await User.findOne({
         _id: partnerId,
         role: ROLES.PARTNER,
-        status: "PENDING",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
       });
-      if (!partner)
-        return res
-          .status(404)
-          .json({ message: "Partner not found or not in PENDING status" });
+      if (!partner) {
+        return res.status(404).json({ message: "Partner not found" });
+      }
+
+      const currentRmId = partner.rmId ? String(partner.rmId) : null;
+      const isPending = partner.status === "PENDING";
+      const isParkedOnAdmin =
+        !currentRmId || placeholderRmIds.has(currentRmId);
+      if (!isPending && !isParkedOnAdmin) {
+        return res.status(400).json({
+          message:
+            "Partner already has a real RM. Use Move Partners to reassign.",
+        });
+      }
 
       const rm = await User.findOne({
         _id: rmId,
@@ -1900,9 +1957,12 @@ router.post(
       if (!rm)
         return res.status(404).json({ message: "RM not found or inactive" });
 
-      // Assign partner to RM
+      // Assign partner to RM and activate
       partner.rmId = rm._id;
       partner.status = "ACTIVE";
+      // Clear any stale manager shortcuts — hierarchy comes from the assigned RM
+      partner.asmId = undefined;
+      partner.rsmId = undefined;
       await partner.save();
 
       try {

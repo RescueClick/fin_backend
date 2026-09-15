@@ -500,31 +500,34 @@ router.get(["/get-rm", "/get-rms"], auth, requireRole(ROLES.RSM, ROLES.ASM, ROLE
 router.get("/get-partners", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
-    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
 
     // Resolve full ASM → RSM → RM hierarchy to find all RMs under this ASM
     const rmIds = await getRmIdsUnderAsm(asmId);
 
     const { status } = req.query || {};
-    const asmOid = new mongoose.Types.ObjectId(asmId);
-    const query = {
-      role: ROLES.PARTNER,
-      $or: [
-        ...(rmIds.length ? [{ rmId: { $in: rmIds } }] : []),
-        { asmId: asmOid },
-        { rsmId: asmOid },
-      ],
-      ...userBase,
-    };
-    if (status && status !== "ALL") {
-      query.status = status.toUpperCase();
+
+    // Regular list: only verified partners assigned to a real RM under this ASM
+    if (!rmIds.length) {
+      return res.json([]);
     }
 
-    const list = await User.find(query)
+    const queryExtra = {
+      role: ROLES.PARTNER,
+      status: { $ne: "PENDING" },
+      rmId: { $in: rmIds },
+    };
+    if (status && status !== "ALL") {
+      if (String(status).toUpperCase() === "PENDING") {
+        return res.json([]);
+      }
+      queryExtra.status = status.toUpperCase();
+    }
+
+    const list = await User.find(activeUsersFilter(queryExtra))
       .select("-passwordHash -__v")
       .populate({
         path: "rmId",
-        select: "firstName lastName employeeId asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
+        select: "firstName lastName employeeId role asmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId",
         populate: [
           { path: "asmId", select: "firstName lastName employeeId" },
           {
@@ -551,7 +554,9 @@ router.get("/get-partners", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
       })
       .lean();
 
-    const formatted = list.map((partner) => {
+    const formatted = list
+      .filter((partner) => partner.rmId?.role === ROLES.RM)
+      .map((partner) => {
       const rm = partner.rmId;
       const asm =
         rm?.asmId ||
@@ -576,9 +581,9 @@ router.get("/get-partners", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
 
       return {
         ...partner,
-        rmName: rm ? `${rm.firstName} ${rm.lastName}` : null,
-        rmEmployeeId: rm ? rm.employeeId : null,
-        rmId: rm ? rm._id : null,
+        rmName: `${rm.firstName} ${rm.lastName}`,
+        rmEmployeeId: rm.employeeId,
+        rmId: rm._id,
         asmName: asm ? `${asm.firstName} ${asm.lastName}` : null,
         asmEmployeeId: asm ? asm.employeeId : null,
         asmId: asm ? asm._id : asmId,
