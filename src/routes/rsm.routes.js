@@ -198,7 +198,7 @@ function expectedRsmIdForApplication(app) {
  */
 async function repairDocCompleteRoutingForRsm(rsmUserId) {
   const rsmObjectId = toObjectId(rsmUserId);
-  const rsm = await User.findById(rsmUserId).select("asmType rsmType rsmId asmId").lean();
+  const rsm = await User.findById(rsmUserId).select("role asmType rsmType rsmId asmId").lean();
   if (!rsm) return;
 
   const rsmTypeNorm = normalizeRsmTypeValue(rsm.asmType || rsm.rsmType);
@@ -212,63 +212,122 @@ async function repairDocCompleteRoutingForRsm(rsmUserId) {
     ...loanFilter,
   })
     .select("_id appNo asmId rsmId rmId loanType status")
-    .populate("rmId", "personalAsmId businessAsmId homeLapAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
+    .populate("rmId", "personalAsmId businessAsmId homeLapAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId businessHomeAsmId")
     .lean();
 
   const me = rsmObjectId.toString();
 
   for (const row of candidates) {
-    const appLike = { ...row, rmId: row.rmId };
-    const expected = expectedRsmIdForApplication(appLike);
-    if (!expected || expected.toString() !== me) continue;
+    const rm = row.rmId;
+    if (!rm) continue;
 
-    const cur = row.asmId ? row.asmId.toString() : (row.rsmId ? row.rsmId.toString() : null);
-    if (cur === me) continue;
+    let isMatch = false;
+    if (rsmTypeNorm === RSM_TYPES.PERSONAL || row.loanType === "PERSONAL") {
+      isMatch = rm.personalAsmId?.toString() === me || rm.personalRsmId?.toString() === me;
+    } else if (rsmTypeNorm === RSM_TYPES.BUSINESS || row.loanType === "BUSINESS") {
+      isMatch = rm.businessAsmId?.toString() === me || rm.businessRsmId?.toString() === me || rm.businessHomeAsmId?.toString() === me || rm.businessHomeRsmId?.toString() === me;
+    } else {
+      isMatch = rm.homeLapAsmId?.toString() === me || rm.homeLapRsmId?.toString() === me || rm.businessHomeAsmId?.toString() === me || rm.businessHomeRsmId?.toString() === me;
+    }
 
-    await Application.updateOne(
-      { _id: row._id },
-      { $set: { asmId: rsmObjectId, rsmId: rsm.rsmId || rsm.asmId || null } }
-    );
+    if (!isMatch) continue;
+
+    if (rsm.role === ROLES.ASM) {
+      if (row.asmId?.toString() !== me) {
+        await Application.updateOne(
+          { _id: row._id },
+          { $set: { asmId: rsmObjectId, ...(rsm.rsmId ? { rsmId: rsm.rsmId } : {}) } }
+        );
+      }
+    } else if (rsm.role === ROLES.RSM) {
+      if (row.rsmId?.toString() !== me) {
+        await Application.updateOne(
+          { _id: row._id },
+          { $set: { rsmId: rsmObjectId } }
+        );
+      }
+    }
   }
 }
 
 /**
- * Load application for detail/doc download: trust rsmId if already this RSM; else allow
- * when RM mapping says this RSM owns the loan type, and fix routing in DB.
- * Only allows access if the application has completed document stage (DOC_COMPLETE or beyond).
+ * Load application for detail/doc download:
+ * Grants access if:
+ * 1. User is SUPER_ADMIN or ADMIN.
+ * 2. Application's asmId or rsmId directly matches the user's ID.
+ * 3. Application's RM belongs to this ASM / RSM hierarchy (and fixes routing if needed).
  */
 async function loadApplicationForRsm(applicationId, rsmUserId) {
   const rsmObjectId = toObjectId(rsmUserId);
-  const rsmProfile = await User.findById(rsmUserId).select("asmType rsmType rsmId asmId").lean();
+  const rsmProfile = await User.findById(rsmUserId).select("role asmType rsmType rsmId asmId").lean();
   if (!rsmProfile) return null;
 
-  const rsmTypeNorm = normalizeRsmTypeValue(rsmProfile.asmType || rsmProfile.rsmType);
-  const app = await Application.findById(applicationId).populate(
-    "rmId",
-    "personalAsmId businessAsmId homeLapAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId"
-  );
-  if (!app || !app.rmId) return null;
-
-  // RSM/ASM can ONLY access applications that are at DOC_COMPLETE or beyond
-  if (!RSM_ALLOWED_STATUSES.includes(app.status)) {
-    return null;
+  // Super Admin / Admin has universal access
+  if (rsmProfile.role === ROLES.SUPER_ADMIN || rsmProfile.role === ROLES.ADMIN) {
+    return Application.findById(applicationId);
   }
 
-  if (!loanTypeMatchesRsmRole(app.loanType, rsmTypeNorm)) return null;
+  const app = await Application.findById(applicationId).populate(
+    "rmId",
+    "personalAsmId businessAsmId homeLapAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId businessHomeAsmId"
+  );
+  if (!app) return null;
 
   const meStr = rsmObjectId.toString();
-  const assignedStr = app.asmId ? app.asmId.toString() : (app.rsmId ? app.rsmId.toString() : null);
+  const isDirectlyAssigned =
+    (app.asmId && app.asmId.toString() === meStr) ||
+    (app.rsmId && app.rsmId.toString() === meStr);
 
-  if (assignedStr === meStr) {
+  if (isDirectlyAssigned) {
     return app;
   }
 
-  const expected = expectedRsmIdForApplication(app);
-  const mappingSaysUs = expected?.toString() === meStr;
+  const rsmTypeNorm = normalizeRsmTypeValue(rsmProfile.asmType || rsmProfile.rsmType);
 
-  if (mappingSaysUs) {
-    app.asmId = rsmObjectId;
-    app.rsmId = rsmProfile.rsmId || rsmProfile.asmId || null;
+  // Check if RM mapping connects this app to this ASM/RSM
+  if (app.rmId) {
+    const rm = app.rmId;
+    let matchesRm = false;
+
+    if (rsmTypeNorm === RSM_TYPES.PERSONAL || app.loanType === "PERSONAL") {
+      matchesRm =
+        rm.personalAsmId?.toString() === meStr ||
+        rm.personalRsmId?.toString() === meStr;
+    } else if (rsmTypeNorm === RSM_TYPES.BUSINESS || app.loanType === "BUSINESS") {
+      matchesRm =
+        rm.businessAsmId?.toString() === meStr ||
+        rm.businessRsmId?.toString() === meStr ||
+        rm.businessHomeAsmId?.toString() === meStr ||
+        rm.businessHomeRsmId?.toString() === meStr;
+    } else {
+      matchesRm =
+        rm.homeLapAsmId?.toString() === meStr ||
+        rm.homeLapRsmId?.toString() === meStr ||
+        rm.businessHomeAsmId?.toString() === meStr ||
+        rm.businessHomeRsmId?.toString() === meStr;
+    }
+
+    if (matchesRm) {
+      if (rsmProfile.role === ROLES.ASM) {
+        app.asmId = rsmObjectId;
+        if (rsmProfile.rsmId) app.rsmId = rsmProfile.rsmId;
+      } else if (rsmProfile.role === ROLES.RSM) {
+        app.rsmId = rsmObjectId;
+      }
+      await app.save();
+      return app;
+    }
+  }
+
+  // Fallback: check eligible RMs under this hierarchy
+  const eligibleRmIds = await eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm);
+  if (app.rmId && eligibleRmIds.some(id => id.toString() === (app.rmId._id || app.rmId).toString())) {
+    if (rsmProfile.role === ROLES.ASM) {
+      app.asmId = rsmObjectId;
+      if (rsmProfile.rsmId) app.rsmId = rsmProfile.rsmId;
+    } else if (rsmProfile.role === ROLES.RSM) {
+      app.rsmId = rsmObjectId;
+    }
     await app.save();
     return app;
   }
@@ -503,7 +562,7 @@ router.post(
       if (!to)
         return res.status(400).json({ message: "Target status 'to' required" });
 
-      // ✅ RSM can handle processing statuses as well as unblocking/reverting to DOC_INCOMPLETE for RM
+      // ✅ RSM/ASM can handle processing statuses as well as unblocking/reverting to DOC_INCOMPLETE for RM
       const RSM_ALLOWED_STATUSES = [
         "LOGIN",
         "UNDER_REVIEW",
@@ -511,10 +570,11 @@ router.post(
         "AGREEMENT",
         "REJECTED",
         "DISBURSED",
+        "DOC_COMPLETE",
         "DOC_INCOMPLETE"
       ];
 
-      if (!RSM_ALLOWED_STATUSES.includes(to)) {
+      if (!RSM_ALLOWED_STATUSES.includes(to) && req.user.role !== ROLES.SUPER_ADMIN && req.user.role !== ROLES.ADMIN) {
         return res.status(403).json({
           message: `RSM can only transition to statuses: ${RSM_ALLOWED_STATUSES.join(", ")}.`
         });
@@ -559,23 +619,27 @@ router.post(
       // Validate status transition is allowed from current status
       const currentStatus = app.status;
       const allowedTransitions = {
-        // After RM marks DOC_COMPLETE, RSM can move to LOGIN or send back to DOC_INCOMPLETE
-        DOC_COMPLETE: ["LOGIN", "DOC_INCOMPLETE"],
-        LOGIN: ["UNDER_REVIEW", "DOC_INCOMPLETE"],
-        UNDER_REVIEW: ["APPROVED", "REJECTED", "DOC_INCOMPLETE"],
-        APPROVED: ["AGREEMENT", "DISBURSED", "DOC_INCOMPLETE", "REJECTED"],
-        AGREEMENT: ["DISBURSED", "DOC_INCOMPLETE", "REJECTED"],
-        REJECTED: ["DOC_INCOMPLETE"],
+        SUBMITTED: ["DOC_COMPLETE", "LOGIN", "UNDER_REVIEW", "DOC_INCOMPLETE", "REJECTED"],
+        DOC_INCOMPLETE: ["DOC_COMPLETE", "LOGIN", "UNDER_REVIEW", "REJECTED"],
+        DOC_COMPLETE: ["LOGIN", "UNDER_REVIEW", "DOC_INCOMPLETE", "REJECTED"],
+        LOGIN: ["UNDER_REVIEW", "APPROVED", "DOC_COMPLETE", "DOC_INCOMPLETE", "REJECTED"],
+        UNDER_REVIEW: ["APPROVED", "LOGIN", "AGREEMENT", "DISBURSED", "DOC_INCOMPLETE", "REJECTED"],
+        APPROVED: ["AGREEMENT", "DISBURSED", "UNDER_REVIEW", "DOC_INCOMPLETE", "REJECTED"],
+        AGREEMENT: ["DISBURSED", "APPROVED", "UNDER_REVIEW", "DOC_INCOMPLETE", "REJECTED"],
+        REJECTED: ["UNDER_REVIEW", "LOGIN", "DOC_COMPLETE", "DOC_INCOMPLETE", "APPROVED"],
+        DISBURSED: ["UNDER_REVIEW", "REJECTED"],
       };
 
-      if (!allowedTransitions[currentStatus]?.includes(to)) {
-        return res.status(400).json({
-          message: `Cannot transition from ${currentStatus} to ${to}. Allowed transitions: ${allowedTransitions[currentStatus]?.join(", ") || "none"
-            }`,
-        });
+      if (req.user.role !== ROLES.SUPER_ADMIN && req.user.role !== ROLES.ADMIN) {
+        if (!allowedTransitions[currentStatus]?.includes(to)) {
+          return res.status(400).json({
+            message: `Cannot transition from ${currentStatus} to ${to}. Allowed transitions: ${allowedTransitions[currentStatus]?.join(", ") || "none"
+              }`,
+          });
+        }
       }
 
-      if (currentStatus === "DISBURSED") {
+      if (currentStatus === "DISBURSED" && req.user.role !== ROLES.SUPER_ADMIN && req.user.role !== ROLES.ADMIN) {
         return res.status(400).json({
           message: "Cannot reject or change status after DISBURSED.",
         });
