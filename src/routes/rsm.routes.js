@@ -525,14 +525,31 @@ router.post(
 
       await repairDocCompleteRoutingForRsm(rsmId);
 
-      // Find application assigned to this RSM
-      const app = await Application.findOne({
-        _id: req.params.id,
-        rsmId: rsmId,
-      })
-        .populate("customerId")
-        .populate("rmId", "firstName lastName employeeId")
-        .populate("partnerId", "firstName lastName employeeId");
+      // Find application assigned to this RSM or ASM
+      let app = null;
+      if (req.user.role === ROLES.SUPER_ADMIN || req.user.role === ROLES.ADMIN) {
+        app = await Application.findById(req.params.id);
+      } else {
+        app = await loadApplicationForRsm(req.params.id, rsmId);
+        if (!app) {
+          const rsmObjectId = toObjectId(rsmId);
+          app = await Application.findOne({
+            _id: req.params.id,
+            $or: [
+              { asmId: rsmObjectId },
+              { rsmId: rsmObjectId },
+              { asmId: rsmId },
+              { rsmId: rsmId }
+            ]
+          });
+        }
+      }
+
+      if (app) {
+        await app.populate("customerId");
+        await app.populate("rmId", "firstName lastName employeeId");
+        await app.populate("partnerId", "firstName lastName employeeId");
+      }
 
       if (!app)
         return res
