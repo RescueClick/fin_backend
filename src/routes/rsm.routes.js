@@ -337,6 +337,27 @@ async function loadApplicationForRsm(applicationId, rsmUserId) {
     return app;
   }
 
+  // Senior RSM: allow access to applications under subordinate specialized ASMs
+  if (rsmProfile.role === ROLES.RSM) {
+    const subordinateAsms = await User.find({
+      role: ROLES.ASM,
+      $or: [{ rsmId: rsmObjectId }, { asmId: rsmObjectId }],
+    })
+      .select("_id")
+      .lean();
+    const subordinateAsmIds = new Set(subordinateAsms.map((a) => String(a._id)));
+    if (
+      (app.asmId && subordinateAsmIds.has(String(app.asmId))) ||
+      (app.rsmId && subordinateAsmIds.has(String(app.rsmId)))
+    ) {
+      if (!app.rsmId || String(app.rsmId) !== meStr) {
+        app.rsmId = rsmObjectId;
+        await app.save();
+      }
+      return app;
+    }
+  }
+
   return null;
 }
 
@@ -698,6 +719,16 @@ router.post(
         app.remarks = String(note).trim();
       }
 
+      // Reopen after reject: cancel scheduled soft-delete and record reopen note
+      const isReopenFromRejected = oldStatus === "REJECTED" && to !== "REJECTED";
+      if (isReopenFromRejected) {
+        app.deletedAt = null;
+        const reopenNote = note && String(note).trim()
+          ? String(note).trim()
+          : `File reopened to ${to}`;
+        app.remarks = reopenNote;
+      }
+
       // ✅ Auto-update document statuses based on application status change
       const now = new Date();
       if (to === "APPROVED" || to === "DISBURSED") {
@@ -728,6 +759,7 @@ router.post(
             oldStatus,
             newStatus: to,
             actionBy: rsmId,
+            reopened: isReopenFromRejected,
           });
 
           // Populate application for socket emission
@@ -756,10 +788,13 @@ router.post(
 
       // Send response immediately
       res.json({
-        message: "Application status updated successfully",
+        message: isReopenFromRejected
+          ? "Application reopened successfully"
+          : "Application status updated successfully",
         status: app.status,
         approvedLoanAmount: app.approvedLoanAmount,
         stageHistory: app.stageHistory,
+        reopened: isReopenFromRejected,
       });
 
       // ✅ If status = REJECTED → mark for auto-delete after 3 months (Application only)
@@ -2714,11 +2749,15 @@ router.get("/get-partners", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_
 
     const queryExtra = {
       role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
+      status: "ACTIVE",
       rmId: { $in: rmIds },
     };
     if (status && status !== "ALL") {
       if (String(status).toUpperCase() === "PENDING") {
+        return res.json([]);
+      }
+      if (String(status).toUpperCase() === "SUSPENDED" || String(status).toUpperCase() === "INACTIVE") {
+        // Suspended / soft-deleted partners belong on Admin Suspended tab only
         return res.json([]);
       }
       queryExtra.status = status.toUpperCase();

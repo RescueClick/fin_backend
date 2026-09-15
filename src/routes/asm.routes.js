@@ -513,11 +513,15 @@ router.get("/get-partners", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
 
     const queryExtra = {
       role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
+      status: "ACTIVE",
       rmId: { $in: rmIds },
     };
     if (status && status !== "ALL") {
       if (String(status).toUpperCase() === "PENDING") {
+        return res.json([]);
+      }
+      if (String(status).toUpperCase() === "SUSPENDED" || String(status).toUpperCase() === "INACTIVE") {
+        // Suspended / soft-deleted partners belong on Admin Suspended tab only
         return res.json([]);
       }
       queryExtra.status = status.toUpperCase();
@@ -788,31 +792,26 @@ router.get(
   async (req, res) => {
     try {
       const asmId = req.user.sub;
-      const _rsms = await User.find({ asmId, role: ROLES.RSM }).select("_id").lean();
-      const _rsmIds = _rsms.map((r) => r._id);
-      const _rmIds = await getRmIdsUnderAsm(asmId);
-      const _partners = await User.find({
-        rmId: { $in: _rmIds },
-        role: ROLES.PARTNER,
-      }).select("_id").lean();
-      const _partnerIds = _partners.map((p) => p._id);
-
       const manager = await User.findById(asmId).select("role asmType").lean();
+      const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(asmId);
       const allowedLoanTypes = manager?.role === ROLES.ASM ? loanTypesForAsmType(manager.asmType) : null;
 
-      const baseScope = [{ asmId }];
+      const baseScope = [{ asmId }, { rsmId: asmId }];
       if (manager?.role === ROLES.ASM && allowedLoanTypes?.length) {
         baseScope.push({
           loanType: { $in: allowedLoanTypes },
           $or: [
-            { rmId: { $in: _rmIds } },
-            { partnerId: { $in: _partnerIds } },
+            { rmId: { $in: rmIds } },
+            { partnerId: { $in: partnerIds } },
           ],
         });
       } else {
-        if (_rsmIds?.length) baseScope.push({ rsmId: { $in: _rsmIds } });
-        if (_rmIds?.length) baseScope.push({ rmId: { $in: _rmIds } });
-        if (_partnerIds?.length) baseScope.push({ partnerId: { $in: _partnerIds } });
+        if (rsmIds?.length) {
+          baseScope.push({ rsmId: { $in: rsmIds } });
+          baseScope.push({ asmId: { $in: rsmIds } });
+        }
+        if (rmIds?.length) baseScope.push({ rmId: { $in: rmIds } });
+        if (partnerIds?.length) baseScope.push({ partnerId: { $in: partnerIds } });
       }
 
       const filter = activeApplicationsFilter({ $or: baseScope });
@@ -4687,7 +4686,12 @@ router.get(
 
       const result = await Promise.all(
         rms.map(async (rm) => {
-          const partnerCount = await User.countDocuments({ role: ROLES.PARTNER, rmId: rm._id });
+          const partnerCount = await User.countDocuments({
+            role: ROLES.PARTNER,
+            rmId: rm._id,
+            status: "ACTIVE",
+            $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+          });
           const appCount = await Application.countDocuments({ rmId: rm._id, status: { $ne: "DRAFT" } });
           return {
             ...rm,
@@ -4975,6 +4979,21 @@ router.post(
         app.remarks = String(note).trim();
       }
 
+      // Reopen after reject: cancel scheduled soft-delete
+      const isReopenFromRejected = oldStatus === "REJECTED" && to !== "REJECTED";
+      if (isReopenFromRejected) {
+        app.deletedAt = null;
+        const reopenNote = note && String(note).trim()
+          ? String(note).trim()
+          : `File reopened to ${to}`;
+        app.remarks = reopenNote;
+      }
+
+      // Schedule soft-delete when rejecting (aligned with RSM transition)
+      if (to === "REJECTED") {
+        app.deletedAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+      }
+
       await app.save();
 
       try {
@@ -4987,11 +5006,14 @@ router.post(
       }
 
       return res.json({
-        message: `Application transitioned to ${to} successfully`,
+        message: isReopenFromRejected
+          ? "Application reopened successfully"
+          : `Application transitioned to ${to} successfully`,
         status: app.status,
         appNo: app.appNo,
         asmId: app.asmId,
         rsmId: app.rsmId,
+        reopened: isReopenFromRejected,
       });
     } catch (err) {
       console.error("ASM Application transition error:", err);
