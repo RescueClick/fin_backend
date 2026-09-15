@@ -69,8 +69,27 @@ import {
   deriveCurrentTargetContext,
   rebalanceHierarchyTargetsReplace,
 } from "../utils/targetRebalanceService.js";
+import {
+  isRmEditableApplicationStatus,
+  validateRmCompletePayload,
+  buildConditionalSections,
+  mergeDocsKeepExisting,
+  mapUploadedFilesToDocs,
+  applyCompleteFormToApplication,
+} from "../utils/rmCompleteLoanForm.js";
 
 const router = Router();
+
+async function findApplicationForRm(rmId, applicationId) {
+  const partners = await User.find({ rmId, role: ROLES.PARTNER })
+    .select("_id")
+    .lean();
+  const partnerIds = partners.map((p) => p._id);
+  return Application.findOne({
+    _id: applicationId,
+    $or: [{ rmId }, { partnerId: { $in: partnerIds } }],
+  });
+}
 
 /**
  * Assign RSM/asm when moving to DOC_COMPLETE (same rules as POST /applications/:id/transition).
@@ -4202,5 +4221,261 @@ router.get("/partners/targets", auth, requireRole(ROLES.RM), async (req, res) =>
     res.status(500).json({ message: "Server error", error: err.message });
   }
 });
+
+/**
+ * GET /rm/applications/:id/form-data
+ * Prefill payload so RM can complete a half-filled LEAD/DRAFT/DOC_INCOMPLETE form.
+ */
+router.get(
+  "/applications/:id/form-data",
+  auth,
+  requireRole(ROLES.RM),
+  async (req, res) => {
+    try {
+      const rmId = req.user.sub;
+      const app = await findApplicationForRm(rmId, req.params.id);
+      if (!app) {
+        return res.status(404).json({
+          message: "Application not found or not assigned to this RM",
+        });
+      }
+      if (!isRmEditableApplicationStatus(app.status)) {
+        return res.status(400).json({
+          message: `Cannot edit loan form while status is ${app.status}. Only LEAD / DRAFT / DOC_INCOMPLETE can be completed by RM.`,
+          status: app.status,
+        });
+      }
+
+      const customerUser = app.customerId
+        ? await User.findById(app.customerId)
+            .select("firstName middleName lastName email phone")
+            .lean()
+        : null;
+
+      return res.json({
+        id: app._id,
+        appNo: app.appNo,
+        status: app.status,
+        loanType: app.loanType,
+        leadSource: app.leadSource || null,
+        partnerId: app.partnerId || null,
+        customerId: app.customerId || null,
+        customer: {
+          ...(app.customer || {}),
+          firstName: app.customer?.firstName || customerUser?.firstName || "",
+          middleName: app.customer?.middleName || customerUser?.middleName || "",
+          lastName: app.customer?.lastName || customerUser?.lastName || "",
+          email: app.customer?.email || customerUser?.email || "",
+          phone: app.customer?.phone || customerUser?.phone || "",
+          hasRunningLoan:
+            app.customer?.hasRunningLoan || app.hasRunningLoan || "NO",
+          monthlyEmiPaying:
+            app.customer?.monthlyEmiPaying ?? app.monthlyEmiPaying ?? 0,
+          loanPurpose: app.customer?.loanPurpose || app.loanPurpose || "",
+        },
+        employmentInfo: app.employmentInfo || null,
+        businessInfo: app.businessInfo || null,
+        propertyInfo: app.propertyInfo || null,
+        coApplicant: app.coApplicant || null,
+        references: app.references || [],
+        docs: (app.docs || []).map((d) => ({
+          docType: d.docType,
+          url: d.url,
+          status: d.status,
+        })),
+      });
+    } catch (err) {
+      console.error("RM form-data error:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+/**
+ * POST /rm/applications/:id/complete-form
+ * RM completes remaining loan fields (+ optional docs) for a half-filled application.
+ */
+router.post(
+  "/applications/:id/complete-form",
+  auth,
+  requireRole(ROLES.RM),
+  upload.array("docs", 20),
+  async (req, res) => {
+    try {
+      const rmId = req.user.sub;
+      const app = await findApplicationForRm(rmId, req.params.id);
+      if (!app) {
+        if (req.files?.length) await deleteS3ObjectsForUploadedFiles(req.files);
+        return res.status(404).json({
+          message: "Application not found or not assigned to this RM",
+        });
+      }
+      if (!isRmEditableApplicationStatus(app.status)) {
+        if (req.files?.length) await deleteS3ObjectsForUploadedFiles(req.files);
+        return res.status(400).json({
+          message: `Cannot complete loan form while status is ${app.status}`,
+          status: app.status,
+        });
+      }
+
+      let parsedPayload = {};
+      try {
+        if (typeof req.body?.data === "string") {
+          parsedPayload = JSON.parse(req.body.data || "{}");
+        } else if (req.body?.data && typeof req.body.data === "object") {
+          parsedPayload = req.body.data;
+        } else if (req.body && typeof req.body === "object") {
+          parsedPayload = req.body;
+        }
+      } catch (parseErr) {
+        if (req.files?.length) await deleteS3ObjectsForUploadedFiles(req.files);
+        return res.status(400).json({ message: "Invalid form payload" });
+      }
+
+      const {
+        customer = {},
+        product = {},
+        loanType: bodyLoanType,
+        references,
+        coApplicant,
+      } = parsedPayload;
+
+      const loanType = String(bodyLoanType || app.loanType || "")
+        .trim()
+        .toUpperCase();
+
+      const validated = validateRmCompletePayload({
+        customer,
+        product,
+        loanType,
+        references,
+        coApplicant,
+      });
+
+      if (validated.errors.length > 0) {
+        if (req.files?.length) await deleteS3ObjectsForUploadedFiles(req.files);
+        return res.status(400).json({
+          message: "Validation failed",
+          errors: validated.errors,
+        });
+      }
+
+      const customerData = {
+        firstName: validated.customer.firstName,
+        middleName: validated.customer.middleName || "",
+        lastName: validated.customer.lastName || "",
+        email: validated.customer.email,
+        officialEmail: validated.customer.officialEmail || "",
+        phone: validated.customer.phone,
+        alternatePhone: validated.customer.alternatePhone || "",
+        mothersName: validated.customer.mothersName || "",
+        panNumber: validated.customer.panNumber || "",
+        dateOfBirth: validated.customer.dateOfBirth,
+        gender: validated.customer.gender,
+        maritalStatus: validated.customer.maritalStatus,
+        spouseName: validated.customer.spouseName || "",
+        currentAddress: validated.customer.currentAddress || "",
+        currentAddressLandmark: validated.customer.currentAddressLandmark || "",
+        currentAddressPinCode: validated.customer.currentAddressPinCode || "",
+        currentAddressHouseStatus:
+          validated.customer.currentAddressHouseStatus || "",
+        currentAddressOwnRented:
+          validated.customer.currentAddressOwnRented || "",
+        currentAddressStability:
+          validated.customer.currentAddressStability || "",
+        permanentAddress: validated.customer.permanentAddress || "",
+        permanentAddressLandmark:
+          validated.customer.permanentAddressLandmark || "",
+        permanentAddressPinCode:
+          validated.customer.permanentAddressPinCode || "",
+        permanentAddressHouseStatus:
+          validated.customer.permanentAddressHouseStatus || "",
+        permanentAddressOwnRented:
+          validated.customer.permanentAddressOwnRented || "",
+        permanentAddressStability:
+          validated.customer.permanentAddressStability || "",
+        stabilityOfResidency: validated.customer.stabilityOfResidency || "",
+        loanAmount: Number(validated.customer.loanAmount ?? 0),
+        bankStatementPassword: validated.customer.bankStatementPassword || "",
+        hasRunningLoan: validated.customer.hasRunningLoan || "NO",
+        monthlyEmiPaying: Number(validated.customer.monthlyEmiPaying ?? 0),
+        loanPurpose: validated.customer.loanPurpose || "",
+        partnerId: app.partnerId,
+        rmId: app.rmId || rmId,
+        asmId: app.asmId,
+      };
+
+      let newDocs = [];
+      try {
+        newDocs = await mapUploadedFilesToDocs(req, rmId);
+      } catch (uploadErr) {
+        return res.status(uploadErr.statusCode || 500).json({
+          message: uploadErr.message || "Document upload failed",
+        });
+      }
+
+      const docsToSave = mergeDocsKeepExisting(app.docs || [], newDocs);
+      const { employmentInfo, businessInfo, propertyInfo } =
+        buildConditionalSections(loanType, product);
+
+      const { missingDocs, prevStatus } = applyCompleteFormToApplication(app, {
+        customerData,
+        employmentInfo,
+        businessInfo,
+        propertyInfo,
+        coApplicant: validated.coApplicant || null,
+        references: validated.references,
+        docsToSave,
+        rmId,
+      });
+
+      await app.save();
+
+      try {
+        const io = global.io;
+        if (io && prevStatus !== app.status) {
+          await app.populate("partnerId", "firstName lastName email employeeId");
+          await app.populate(
+            "customerId",
+            "firstName middleName lastName email phone"
+          );
+          await app.populate("rmId", "firstName lastName email employeeId asmId");
+          await app.populate("asmId", "firstName lastName email employeeId");
+          await emitApplicationStatusChanged(
+            io,
+            app,
+            prevStatus,
+            app.status,
+            rmId
+          );
+        }
+      } catch (emitErr) {
+        console.warn("RM complete-form status emit failed:", emitErr.message);
+      }
+
+      return res.status(200).json({
+        message:
+          missingDocs.length > 0
+            ? "Application updated by RM. Some mandatory documents are still missing."
+            : "Application form completed by RM and submitted",
+        id: app._id,
+        appNo: app.appNo,
+        status: app.status,
+        missingDocs,
+        docs: app.docs,
+      });
+    } catch (err) {
+      console.error("RM complete-form error:", err);
+      if (req.files?.length) {
+        try {
+          await deleteS3ObjectsForUploadedFiles(req.files);
+        } catch (_) {
+          /* ignore cleanup errors */
+        }
+      }
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
 
 export default router;
