@@ -283,6 +283,14 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       // Per rule: LEADs stay with RM and do not route to ASM/RSM until DOC_COMPLETE
       app.asmId = null;
       app.rsmId = null;
+      app.formProgress = {
+        ...(app.formProgress || {}),
+        stepIndex: Math.max(Number(app.formProgress?.stepIndex) || 0, 0),
+        stepLabel: app.formProgress?.stepLabel || "Personal",
+        maxStepIndex: Math.max(Number(app.formProgress?.maxStepIndex) || 0, 0),
+        reachedDocuments: Boolean(app.formProgress?.reachedDocuments),
+        updatedAt: new Date(),
+      };
       app.updatedAt = new Date();
       await app.save();
     } else {
@@ -313,6 +321,13 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
               remarks: "",
               lastContactedAt: null,
               nextFollowUpDate: null,
+            },
+            formProgress: {
+              stepIndex: 0,
+              stepLabel: "Personal",
+              maxStepIndex: 0,
+              reachedDocuments: false,
+              updatedAt: new Date(),
             },
             status: "LEAD",
             stageHistory: [
@@ -374,6 +389,181 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
     return res.status(500).json({
       success: false,
       message: error.message || "Failed to capture lead",
+    });
+  }
+});
+
+/**
+ * POST /api/leads/:id/progress
+ * Persist partner wizard progress (address / employment / business / property)
+ * onto an existing LEAD so RM can see filled data before final submit.
+ * Keeps status as LEAD.
+ */
+router.post("/:id/progress", optionalAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid application id" });
+    }
+
+    const app = await Application.findOne({
+      _id: id,
+      status: { $in: ["LEAD", "DRAFT", "DOC_INCOMPLETE"] },
+      isArchived: { $ne: true },
+    });
+
+    if (!app) {
+      return res.status(404).json({ success: false, message: "Open lead not found" });
+    }
+
+    const {
+      stepIndex,
+      stepLabel,
+      maxStepIndex,
+      reachedDocuments,
+      customer,
+      employmentInfo,
+      businessInfo,
+      propertyInfo,
+      references,
+      hasRunningLoan,
+      monthlyEmiPaying,
+      loanPurpose,
+      requestedAmount,
+    } = req.body || {};
+
+    // Merge customer snapshot (non-file fields only)
+    if (customer && typeof customer === "object") {
+      const prev =
+        typeof app.customer?.toObject === "function"
+          ? app.customer.toObject()
+          : { ...(app.customer || {}) };
+      const next = { ...prev };
+      for (const [key, value] of Object.entries(customer)) {
+        if (value === undefined || value === null) continue;
+        if (typeof value === "string" && value.trim() === "" && next[key]) continue;
+        next[key] = value;
+      }
+      if (customer.loanAmount !== undefined) {
+        const amt = Number(customer.loanAmount) || 0;
+        next.loanAmount = amt;
+        app.requestedAmount = amt || app.requestedAmount || 0;
+      }
+      app.customer = next;
+    }
+
+    if (employmentInfo && typeof employmentInfo === "object") {
+      app.employmentInfo = {
+        ...(app.employmentInfo?.toObject?.() || app.employmentInfo || {}),
+        ...employmentInfo,
+      };
+    }
+
+    if (businessInfo && typeof businessInfo === "object") {
+      app.businessInfo = {
+        ...(app.businessInfo?.toObject?.() || app.businessInfo || {}),
+        ...businessInfo,
+      };
+    }
+
+    if (propertyInfo && typeof propertyInfo === "object") {
+      app.propertyInfo = {
+        ...(app.propertyInfo?.toObject?.() || app.propertyInfo || {}),
+        ...propertyInfo,
+      };
+    }
+
+    if (Array.isArray(references) && references.length) {
+      const cleaned = references
+        .filter((r) => r && (r.name || r.phone))
+        .map((r) => ({
+          name: String(r.name || "").trim() || "Reference",
+          phone: cleanPhone(r.phone),
+        }))
+        .filter((r) => r.phone);
+      if (cleaned.length) app.references = cleaned;
+    }
+
+    if (hasRunningLoan !== undefined) {
+      const raw = hasRunningLoan;
+      app.hasRunningLoan =
+        raw === "YES" || raw === "Yes" || raw === true || raw === "true" ? "YES" : "NO";
+      if (app.customer) app.customer.hasRunningLoan = app.hasRunningLoan;
+    }
+    if (monthlyEmiPaying !== undefined) {
+      app.monthlyEmiPaying = Number(monthlyEmiPaying) || 0;
+      if (app.customer) app.customer.monthlyEmiPaying = app.monthlyEmiPaying;
+    }
+    if (loanPurpose !== undefined) {
+      app.loanPurpose = String(loanPurpose || "").trim();
+      if (app.customer) app.customer.loanPurpose = app.loanPurpose;
+    }
+    if (requestedAmount !== undefined) {
+      app.requestedAmount = Number(requestedAmount) || app.requestedAmount || 0;
+    }
+
+    const prevProgress = app.formProgress || {};
+    const nextStepIndex =
+      stepIndex !== undefined && stepIndex !== null
+        ? Number(stepIndex)
+        : Number(prevProgress.stepIndex) || 0;
+    const nextMax = Math.max(
+      Number(prevProgress.maxStepIndex) || 0,
+      maxStepIndex !== undefined ? Number(maxStepIndex) : nextStepIndex,
+      nextStepIndex
+    );
+    const docsReached =
+      Boolean(reachedDocuments) ||
+      Boolean(prevProgress.reachedDocuments) ||
+      String(stepLabel || "").toLowerCase().includes("document");
+
+    app.formProgress = {
+      stepIndex: nextStepIndex,
+      stepLabel: stepLabel || prevProgress.stepLabel || "Personal",
+      maxStepIndex: nextMax,
+      reachedDocuments: docsReached,
+      updatedAt: new Date(),
+    };
+
+    if (docsReached && app.status === "LEAD") {
+      const follow = app.leadFollowUp || {};
+      if (!follow.status || follow.status === "NEW" || follow.status === "INTERESTED") {
+        app.leadFollowUp = {
+          ...follow,
+          status: "DOCUMENTS_PENDING",
+          remarks: follow.remarks || "Partner reached documents step",
+          lastContactedAt: follow.lastContactedAt || new Date(),
+        };
+      }
+    }
+
+    // LEADs stay with RM until DOC_COMPLETE
+    if (app.status === "LEAD") {
+      app.asmId = null;
+      app.rsmId = null;
+    }
+
+    app.markModified("customer");
+    app.markModified("formProgress");
+    if (employmentInfo) app.markModified("employmentInfo");
+    if (businessInfo) app.markModified("businessInfo");
+    if (propertyInfo) app.markModified("propertyInfo");
+
+    await app.save();
+
+    return res.json({
+      success: true,
+      message: "Lead progress saved",
+      applicationId: app._id,
+      appNo: app.appNo,
+      status: app.status,
+      formProgress: app.formProgress,
+    });
+  } catch (error) {
+    console.error("Error saving lead progress:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to save lead progress",
     });
   }
 });

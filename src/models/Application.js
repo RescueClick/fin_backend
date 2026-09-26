@@ -256,6 +256,14 @@ const ApplicationSchema = new mongoose.Schema(
       nextFollowUpDate: { type: Date },
       updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     },
+    /** Partner wizard progress while status is still LEAD (until final submit) */
+    formProgress: {
+      stepIndex: { type: Number, default: 0 },
+      stepLabel: { type: String, default: "Personal" },
+      maxStepIndex: { type: Number, default: 0 },
+      reachedDocuments: { type: Boolean, default: false },
+      updatedAt: { type: Date },
+    },
     // Workflow
     // Option A: new applications should not start in DRAFT
     status: { type: String, enum: APP_STATUSES, default: "SUBMITTED" },

@@ -2316,23 +2316,44 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
 
     const customers = applications.map((app) => {
       const payout = payoutMap[app._id.toString()];
+      const cust = app.customer || {};
+      const emp = app.employmentInfo || {};
+      const biz = app.businessInfo || {};
+      const prop = app.propertyInfo || {};
+      const progress = app.formProgress || {};
+      const docsCount = Array.isArray(app.docs) ? app.docs.length : 0;
       return {
         customerId: app.customerId?._id,
         customerEmployeeId: app.customerId?.employeeId || null,
-        customerName: `${app.customer?.firstName || app.customerId?.firstName || ""} ${
-          app.customer?.lastName || app.customerId?.lastName || ""
+        customerName: `${cust.firstName || app.customerId?.firstName || ""} ${
+          cust.lastName || app.customerId?.lastName || ""
         }`.trim(),
-        contact: app.customer?.phone || app.customerId?.phone || null,
-        email: app.customer?.email || app.customerId?.email || null,
+        contact: cust.phone || app.customerId?.phone || null,
+        email: cust.email || app.customerId?.email || null,
         loanType: app.loanType,
-        requestedAmount: app.customer?.loanAmount || app.requestedAmount || null,
+        requestedAmount: cust.loanAmount || app.requestedAmount || null,
         approvedAmount: app.approvedLoanAmount || null,
         status: app.status,
-        hasRunningLoan: app.hasRunningLoan || app.customer?.hasRunningLoan || "NO",
-        monthlyEmiPaying: app.monthlyEmiPaying ?? app.customer?.monthlyEmiPaying ?? 0,
-        loanPurpose: app.loanPurpose || app.customer?.loanPurpose || "",
+        hasRunningLoan: app.hasRunningLoan || cust.hasRunningLoan || "NO",
+        monthlyEmiPaying: app.monthlyEmiPaying ?? cust.monthlyEmiPaying ?? 0,
+        loanPurpose: app.loanPurpose || cust.loanPurpose || "",
         leadSource: app.leadSource || "PARTNER",
         leadFollowUp: app.leadFollowUp || { status: "NEW", remarks: "" },
+        formProgress: {
+          stepIndex: progress.stepIndex || 0,
+          stepLabel: progress.stepLabel || (app.status === "LEAD" ? "Personal" : ""),
+          maxStepIndex: progress.maxStepIndex || 0,
+          reachedDocuments: Boolean(progress.reachedDocuments),
+          updatedAt: progress.updatedAt || app.updatedAt,
+        },
+        addressSummary: cust.currentAddress || cust.permanentAddress || "",
+        pinCode: cust.currentAddressPinCode || cust.permanentAddressPinCode || "",
+        employerOrBusiness:
+          emp.companyName || biz.businessName || prop.propertyType || "",
+        designation: emp.designation || "",
+        monthlyIncome: emp.monthlySalary || emp.salaryInHand || biz.annualTurnoverInINR || "",
+        propertyAddress: prop.propertyAddress || "",
+        docsCount,
         payOutStatus: payout?.payOutStatus || "PENDING",
         payoutAmount: payout?.amount || 0,
         partner: {
@@ -2347,6 +2368,7 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
         applicationId: app._id,
         appNo: app.appNo,
         createdAt: app.createdAt,
+        updatedAt: app.updatedAt,
       };
     });
 
