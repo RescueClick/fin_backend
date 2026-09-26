@@ -174,10 +174,29 @@ async function eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm) {
   }).distinct("_id");
 }
 
+/** Statuses RSM can act on / that belong in the processing pipeline */
 const RSM_ALLOWED_STATUSES = [
   "DOC_COMPLETE",
   "LOGIN",
   "UNDER_REVIEW",
+  "APPROVED",
+  "AGREEMENT",
+  "DISBURSED",
+  "REJECTED",
+];
+
+/** Broader list so RSM/ASM can also filter early-stage leads in Applications */
+const RSM_LIST_STATUSES = [
+  "LEAD",
+  "DRAFT",
+  "SUBMITTED",
+  "DOC_INCOMPLETE",
+  "DOC_COMPLETE",
+  "DOC_SUBMITTED",
+  "LOGIN",
+  "UNDER_REVIEW",
+  "KYC_PENDING",
+  "KYC_COMPLETE",
   "APPROVED",
   "AGREEMENT",
   "DISBURSED",
@@ -876,8 +895,8 @@ router.get("/applications", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_
 
     const eligibleRmIds = await eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm);
     const statusFilter = status && status !== "All"
-      ? (RSM_ALLOWED_STATUSES.includes(status) ? { status } : { status: "__NONE__" })
-      : { status: { $in: RSM_ALLOWED_STATUSES } };
+      ? (RSM_LIST_STATUSES.includes(status) ? { status } : { status: "__NONE__" })
+      : { status: { $in: RSM_LIST_STATUSES } };
 
     const filter = {
       $and: [
