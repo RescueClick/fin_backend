@@ -1955,11 +1955,12 @@ export const emitPayoutCreated = async (io, payout, asmId) => {
     const { User } = await import("../models/User.js");
     const { createNotificationsForUsers } = await import("./notificationService.js");
     
-    const asm = await User.findById(asmId).select("firstName lastName").lean();
-    const asmName = asm ? `${asm.firstName || ""} ${asm.lastName || ""}`.trim() : "ASM";
+    const setter = await User.findById(asmId).select("firstName lastName role").lean();
+    const setterName = setter ? `${setter.firstName || ""} ${setter.lastName || ""}`.trim() : "Manager";
+    const roleLabel = setter?.role === "RSM" ? "RSM" : setter?.role === "ASM" ? "ASM" : "Manager";
     
     const amountText = typeof payout.amount === "number" ? `₹${payout.amount.toLocaleString("en-IN")}` : "";
-    const message = `Payout of ${amountText} requested by ASM ${asmName}. Please review.`;
+    const message = `Payout of ${amountText} set by ${roleLabel} ${setterName}. Please review and pay.`;
     
     const adminUsers = await User.find({
       role: { $in: ["ADMIN", "SUPER_ADMIN"] }
@@ -1982,7 +1983,8 @@ export const emitPayoutCreated = async (io, payout, asmId) => {
         applicationId: payout.application,
         partnerId: payout.partnerId,
         amount: payout.amount,
-        asmName,
+        asmName: setterName,
+        setByRole: roleLabel,
       },
       notificationId,
       timestamp: new Date(),

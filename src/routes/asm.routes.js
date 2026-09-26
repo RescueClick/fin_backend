@@ -39,6 +39,7 @@ import {
   isDateInRange,
 } from "../utils/asmHierarchy.js";
 import { loanTypesForAsmType } from "../utils/rmRsmHierarchy.js";
+import { parseDashboardPeriod } from "../utils/dashboardPeriod.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
@@ -867,10 +868,12 @@ router.get(
 router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const asmId = req.user.sub;
+    const period = parseDashboardPeriod(req.query);
 
     // Manager profile
     const asm = await User.findOne({ _id: asmId, role: { $in: [ROLES.RSM, ROLES.ASM] } }).lean();
     if (!asm) return res.status(404).json({ message: "Manager not found" });
+    const targetRole = asm.role === ROLES.RSM ? ROLES.RSM : ROLES.ASM;
 
     // ✅ HIERARCHY: RSM → ASM → RM → Partner
     const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
@@ -969,22 +972,27 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
       status: "REJECTED",
     });
 
-    // Revenue from disbursed loans
-    const revenueAgg = await Application.aggregate([
-      {
-        $match: {
-          ...appAsmMatch,
-          status: "DISBURSED",
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: { $ifNull: ["$approvedLoanAmount", 0] } },
-        },
-      },
-    ]);
-    const totalRevenue = revenueAgg[0]?.totalRevenue || 0;
+    // Revenue from disbursed loans — full hierarchy scope + getDisbursedAt for period
+    const disbursedApps = await Application.find({
+      ...appAsmMatch,
+      status: "DISBURSED",
+    })
+      .select("approvedLoanAmount disbursedAt disbursedDate stageHistory createdAt updatedAt status")
+      .lean();
+
+    let allTimeRevenue = 0;
+    let periodRevenue = 0;
+    let periodDisbursedFiles = 0;
+    for (const app of disbursedApps) {
+      const amt = Number(app.approvedLoanAmount || 0);
+      allTimeRevenue += amt;
+      const dAt = getDisbursedAt(app);
+      if (!period.isFiltered || isDateInRange(dAt, period.startDate, period.endDate)) {
+        periodRevenue += amt;
+        periodDisbursedFiles += 1;
+      }
+    }
+    const totalRevenue = period.isFiltered ? periodRevenue : allTimeRevenue;
 
     // Avg rating of partners
     const ratings = partners.map((p) => p.rating || 0);
@@ -992,77 +1000,53 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
       ? (ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1)
       : 0;
 
-    // Current Month Target (ASM's hierarchical target)
-    const now = new Date();
-    const currentMonth = now.getMonth() + 1;
-    const currentYear = now.getFullYear();
+    // Target month/year: selected period month, or current calendar month
+    const targetMonth =
+      period.hasMonth && period.month !== "all" ? Number(period.month) : period.currentMonth;
+    const targetYear =
+      period.hasYear && period.year !== "all" ? Number(period.year) : period.currentYear;
 
-    // Get ASM's current month target (hierarchical - sum of RSM targets)
     const asmTarget = await Target.findOne({
       assignedTo: asmOid,
-      role: ROLES.ASM,
-      month: currentMonth,
-      year: currentYear,
+      role: targetRole,
+      month: targetMonth,
+      year: targetYear,
     }).lean();
 
-    // Calculate current month achievements (disbursed applications)
-    const currentMonthStart = new Date(currentYear, currentMonth - 1, 1);
-    const currentMonthEnd = new Date(currentYear, currentMonth, 1);
+    let currentMonthAchievedDisbursement = 0;
+    let currentMonthAchievedFileCount = 0;
+    const periodStart = period.isFiltered
+      ? period.startDate
+      : new Date(targetYear, targetMonth - 1, 1);
+    const periodEnd = period.isFiltered
+      ? period.endDate
+      : new Date(targetYear, targetMonth, 1);
 
-    const currentMonthDisbursed = await Application.aggregate([
-      {
-        $match: {
-          ...appAsmMatch,
-          status: "DISBURSED",
-          updatedAt: {
-            $gte: currentMonthStart,
-            $lt: currentMonthEnd,
-          },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalDisbursement: { $sum: { $toDouble: "$approvedLoanAmount" } },
-          totalFiles: { $sum: 1 },
-        },
-      },
-    ]);
+    for (const app of disbursedApps) {
+      const dAt = getDisbursedAt(app);
+      if (isDateInRange(dAt, periodStart, periodEnd)) {
+        currentMonthAchievedDisbursement += Number(app.approvedLoanAmount || 0);
+        currentMonthAchievedFileCount += 1;
+      }
+    }
 
-    const currentMonthAchievedDisbursement = currentMonthDisbursed[0]?.totalDisbursement || 0;
-    const currentMonthAchievedFileCount = currentMonthDisbursed[0]?.totalFiles || 0;
-
-    // 12-Month Target (ASM's hierarchical targets)
-    const startOfYear = new Date(currentYear, 0, 1);
-
+    // 12-Month Target for selected / current year
     const monthlyTarget = await Target.find({
       assignedTo: asmOid,
-      role: ROLES.ASM,
-      year: currentYear,
+      role: targetRole,
+      year: targetYear,
     }).lean();
 
-    // 12-Month Achieved (via RSMs → RMs → Partners)
-    const monthlyAchieved = await Application.aggregate([
-      {
-        $match: {
-          ...appAsmMatch,
-          status: { $ne: "DRAFT" },
-          updatedAt: { $gte: startOfYear },
-        },
-      },
-      {
-        $group: {
-          _id: { month: { $month: "$updatedAt" } },
-          totalAchieved: {
-            $sum: {
-              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0]
-            }
-          },
-          totalFiles: { $sum: 1 },
-        },
-      },
-      { $sort: { "_id.month": 1 } },
-    ]);
+    const monthlyAchievedMap = {};
+    for (const app of disbursedApps) {
+      const dAt = getDisbursedAt(app);
+      if (!dAt) continue;
+      if (dAt.getFullYear() !== targetYear) continue;
+      const m = dAt.getMonth() + 1;
+      if (!monthlyAchievedMap[m]) monthlyAchievedMap[m] = { totalAchieved: 0, totalFiles: 0 };
+      monthlyAchievedMap[m].totalAchieved += Number(app.approvedLoanAmount || 0);
+      monthlyAchievedMap[m].totalFiles += 1;
+    }
 
     const monthNames = [
       "January",
@@ -1083,14 +1067,13 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
       const month = i + 1;
       const targetDoc = monthlyTarget.find((t) => t.month === month);
       const t = targetDoc?.disbursementTarget || 0;
-      const a =
-        monthlyAchieved.find((m) => m._id.month === month)?.totalAchieved || 0;
+      const a = monthlyAchievedMap[month]?.totalAchieved || 0;
       return {
         month: monthNames[i],
         target: t,
         achieved: a,
         fileCountTarget: targetDoc?.fileCountTarget || 0,
-        achievedFileCount: monthlyAchieved.find((m) => m._id.month === month)?.totalFiles || 0,
+        achievedFileCount: monthlyAchievedMap[month]?.totalFiles || 0,
       };
     });
 
@@ -1180,11 +1163,20 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
         inactivePartners,
         totalCustomers,
         totalRevenue,
+        allTimeRevenue,
+        periodRevenue,
+        periodDisbursedFiles,
         avgRating,
         totalApplications,
         inProcessApplications,
         disbursedApplications,
         rejectedApplications,
+      },
+      filter: {
+        year: period.year,
+        month: period.month,
+        isFiltered: period.isFiltered,
+        yearForBreakdown: targetYear,
       },
       // Current month target and achievement
       currentMonthTarget: {
@@ -1932,59 +1924,12 @@ router.get("/payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN
 });
 
 // POST /api/asm/payouts/approve
-// ASM approves a payout (changes status from PENDING to DONE)
+// Disabled for RSM/ASM — only Admin can mark payouts DONE / pay partners
 router.post("/payouts/approve", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
-  try {
-    const { payoutId } = req.body;
-
-    if (!payoutId) {
-      return res.status(400).json({ message: "payoutId is required" });
-    }
-
-    const payout = await Payout.findById(payoutId);
-    if (!payout) {
-      return res.status(404).json({ message: "Payout not found" });
-    }
-
-    // Verify payout belongs to ASM's hierarchy
-    const asmId = req.user.sub;
-    const partners = await User.find({ role: ROLES.PARTNER }).lean();
-    const partnerIds = partners.map((p) => p._id);
-
-    // Get all RSMs under this ASM
-    const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
-    const rsmIds = rsms.map((rsm) => rsm._id);
-    const rms = await User.find({
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: { $in: rsmIds } },
-        { businessRsmId: { $in: rsmIds } },
-        { homeLapRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } }
-      ]
-    }).lean();
-    const rmIds = rms.map((rm) => rm._id);
-    const asmPartners = await User.find({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-    }).lean();
-    const asmPartnerIds = asmPartners.map((p) => p._id);
-
-    if (!asmPartnerIds.includes(payout.partnerId.toString())) {
-      return res.status(403).json({ message: "Payout does not belong to your hierarchy" });
-    }
-
-    payout.payOutStatus = "DONE";
-    await payout.save();
-
-    res.json({
-      message: "Payout approved successfully",
-      payout,
-    });
-  } catch (error) {
-    console.error("Error approving payout:", error);
-    res.status(500).json({ message: "Server error" });
-  }
+  return res.status(403).json({
+    message:
+      "RSM/ASM can only set payout amounts. Admin must approve and pay the partner.",
+  });
 });
 
 // POST /api/asm/payouts/create
@@ -2372,7 +2317,7 @@ router.get("/customer/:customerId/partners-payout", auth, requireRole(ROLES.RSM,
 });
 
 // POST /api/asm/set-payouts
-// ASM creates/updates payout for disbursed application
+// RSM/ASM sets payout amount only (always PENDING) — Admin pays / marks DONE
 router.post("/set-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const {
@@ -2381,7 +2326,6 @@ router.post("/set-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
       payoutPercentage,
       payoutAmount: directPayoutAmount,
       note,
-      payOutStatus,
     } = req.body;
 
     // Validate ObjectId
@@ -2389,49 +2333,28 @@ router.post("/set-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
       return res.status(400).json({ message: "Invalid application ID" });
     }
 
-    const asmId = req.user.sub;
+    const managerId = req.user.sub;
+    const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(managerId);
 
-    // Get all RSMs under this ASM
-    const rsms = await User.find({ asmId, role: ROLES.RSM }).lean();
-    const rsmIds = rsms.map((rsm) => rsm._id);
-
-    // Get all RMs under these RSMs
-    const rms = await User.find({
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: { $in: rsmIds } },
-        { businessRsmId: { $in: rsmIds } },
-        { homeLapRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } }
-      ]
-    }).lean();
-    const rmIds = rms.map((rm) => rm._id);
-
-    // Get all partners under these RMs
-    const partners = await User.find({
-      rmId: { $in: rmIds },
-      role: ROLES.PARTNER,
-    }).select("_id").lean();
-    const partnerIds = partners.map(p => p._id);
-
-    // Fetch application and verify it belongs to this ASM hierarchy
+    // Fetch application and verify it belongs to this manager hierarchy
     const application = await Application.findOne({
       _id: applicationId,
       $or: [
+        { asmId: managerId },
         { rsmId: { $in: rsmIds } },
         { rmId: { $in: rmIds } },
-        { partnerId: { $in: partnerIds } }
-      ]
-    }).select("approvedLoanAmount partnerId rmId");
+        { partnerId: { $in: partnerIds } },
+      ],
+    }).select("approvedLoanAmount partnerId rmId status");
 
     if (!application) {
-      return res.status(404).json({ message: "Application not found or not assigned to this ASM" });
+      return res.status(404).json({ message: "Application not found or not assigned to your hierarchy" });
     }
 
     const partnerId = inputPartnerId || application.partnerId?.toString();
 
     // Ensure partner matches
-    if (application.partnerId && application.partnerId.toString() !== partnerId) {
+    if (application.partnerId && application.partnerId.toString() !== String(partnerId)) {
       return res
         .status(400)
         .json({ message: "Application does not belong to this partner" });
@@ -2451,36 +2374,42 @@ router.post("/set-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
       partnerId,
     });
 
+    // Never allow RSM/ASM to change a payout that Admin already paid
+    if (payout && payout.payOutStatus === "DONE") {
+      return res.status(403).json({
+        message: "This payout is already paid by Admin and cannot be changed",
+      });
+    }
+
     if (payout) {
-      // ✅ Update existing payout (ASM can only change amount/note, NOT final status)
+      // Update existing proposed payout — always stay PENDING for Admin
       payout.amount = payoutAmount || payout.amount;
       payout.note = note || payout.note;
-      // Force ASM-created payouts to stay in PENDING status
       payout.payOutStatus = "PENDING";
       await payout.save();
     } else {
-      // ✅ Create new payout (always PENDING when created by ASM)
+      // Create new payout proposal for Admin
       payout = await Payout.create({
         application: applicationId,
         partnerId,
         amount: payoutAmount,
         note,
         payOutStatus: "PENDING",
-        addedBy: req.user.sub, // ASM user
+        addedBy: managerId,
       });
     }
 
     try {
       const io = global.io;
       if (io) {
-        await emitPayoutCreated(io, payout, asmId);
+        await emitPayoutCreated(io, payout, managerId);
       }
     } catch (socketErr) {
       console.error("Error emitting payout socket notification:", socketErr);
     }
 
     return res.status(201).json({
-      message: "Payout saved successfully",
+      message: "Payout set successfully — sent to Admin for payment",
       payout,
     });
   } catch (err) {
