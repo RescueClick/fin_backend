@@ -930,7 +930,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
     const totalRMs = rmIds.length;
     const totalPartners = partners.length;
     const activePartners = partners.filter((p) => p.status === "ACTIVE").length;
-    const inactivePartners = partners.filter((p) => p.status === "INACTIVE").length;
+    const inactivePartners = partners.filter((p) => p.status === "SUSPENDED").length;
 
     const appAsmMatch = activeApplicationsFilter({
       $or: [

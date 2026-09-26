@@ -1257,7 +1257,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
     const totalRMs = rms.length;
     const totalPartners = partners.length;
     const activePartners = partners.filter((p) => p.status === "ACTIVE").length;
-    const inactivePartners = partners.filter((p) => p.status === "INACTIVE").length;
+    const inactivePartners = partners.filter((p) => p.status === "SUSPENDED").length;
 
     const customers = await Application.distinct("customerId", appScope);
     const totalCustomers = customers.length;
