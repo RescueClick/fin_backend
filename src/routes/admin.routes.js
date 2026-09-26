@@ -67,6 +67,7 @@ import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
 import { bulkMovePartnersToRm } from "../utils/bulkMovePartnersToRm.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
+import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
 import {
@@ -1726,16 +1727,34 @@ router.get(
         .lean();
       const placeholderRmIds = placeholderOwners.map((u) => u._id);
 
+      // Live partners (not soft-deleted) + soft-deleted suspended (Admin Suspended tab).
+      // Soft-deleted must NOT stay hidden — they belong in Suspended, not RM lists.
+      const rmIdFilter = {
+        $exists: true,
+        $ne: null,
+        ...(placeholderRmIds.length ? { $nin: placeholderRmIds } : {}),
+      };
+
       const query = {
         role: ROLES.PARTNER,
-        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-        // Unverified / unassigned partners belong only in Admin Partner queue
-        status: { $ne: "PENDING" },
-        rmId: {
-          $exists: true,
-          $ne: null,
-          ...(placeholderRmIds.length ? { $nin: placeholderRmIds } : {}),
-        },
+        rmId: rmIdFilter,
+        $and: [
+          // Unverified / unassigned partners belong only in Admin Partner queue
+          { status: { $ne: "PENDING" } },
+          {
+            $or: [
+              // Normal live partners (active or suspended without soft-delete)
+              {
+                $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+              },
+              // Soft-deleted partners → Suspended list
+              {
+                deletedAt: { $exists: true, $ne: null },
+                status: { $in: ["SUSPENDED", "INACTIVE"] },
+              },
+            ],
+          },
+        ],
       };
       if (status && status !== "ALL") {
         if (status.toUpperCase() === "PENDING") {
@@ -1743,9 +1762,28 @@ router.get(
           return res.json([]);
         }
         if (status.toUpperCase() === "SUSPENDED" || status.toUpperCase() === "INACTIVE") {
-          query.status = { $in: ["SUSPENDED", "INACTIVE"] };
+          // Include soft-deleted + live suspended/inactive
+          query.$and = [
+            {
+              $or: [
+                {
+                  status: { $in: ["SUSPENDED", "INACTIVE"] },
+                  $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+                },
+                {
+                  deletedAt: { $exists: true, $ne: null },
+                  status: { $in: ["SUSPENDED", "INACTIVE"] },
+                },
+              ],
+            },
+          ];
+        } else if (status.toUpperCase() === "ACTIVE") {
+          query.$and = [
+            { status: "ACTIVE" },
+            { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
+          ];
         } else {
-          query.status = status.toUpperCase();
+          query.$and.push({ status: status.toUpperCase() });
         }
       }
       const list = await User.find(query)
@@ -1780,21 +1818,30 @@ router.get(
         .lean();
 
       const formatted = list
-        .filter((partner) => partner.rmId?.role === ROLES.RM)
+        .filter((partner) => partner.rmId?.role === ROLES.RM || partner.deletedAt)
         .map((partner) => {
-          const rm = partner.rmId;
-          const asm =
-            rm?.asmId ||
-            rm?.personalRsmId?.asmId ||
-            rm?.businessRsmId?.asmId ||
-            rm?.homeLapRsmId?.asmId ||
-            rm?.businessHomeRsmId?.asmId ||
-            null;
+          const rm = partner.rmId?.role === ROLES.RM ? partner.rmId : null;
+          const asm = rm
+            ? rm?.asmId ||
+              rm?.personalRsmId?.asmId ||
+              rm?.businessRsmId?.asmId ||
+              rm?.homeLapRsmId?.asmId ||
+              rm?.businessHomeRsmId?.asmId ||
+              null
+            : null;
 
           delete partner.rmId;
 
+          // Soft-deleted partners always surface as SUSPENDED in admin UI
+          const status =
+            partner.deletedAt && partner.status === "ACTIVE"
+              ? "SUSPENDED"
+              : partner.status;
+
           return {
             ...partner,
+            status,
+            isSoftDeleted: Boolean(partner.deletedAt),
             rmName: rm ? `${rm.firstName} ${rm.lastName}` : null,
             rmEmployeeId: rm ? rm.employeeId : null,
             rmId: rm ? rm._id : null,
@@ -2166,16 +2213,22 @@ router.post(
     try {
       const { id } = req.params;
 
-      const partner = await User.findOne({ _id: id, role: ROLES.PARTNER });
+      const partner = await User.findOneAndUpdate(
+        { _id: id, role: ROLES.PARTNER },
+        {
+          $set: {
+            status: "ACTIVE",
+            inactiveReason: null,
+            canReuploadDocs: false,
+            rejectedDocTypes: [],
+          },
+          $unset: { deletedAt: 1 },
+        },
+        { new: true }
+      );
       if (!partner) {
         return res.status(404).json({ message: "Partner not found" });
       }
-
-      partner.status = "ACTIVE";
-      partner.inactiveReason = null;
-      partner.canReuploadDocs = false;
-      partner.rejectedDocTypes = [];
-      await partner.save();
 
       return res.json({
         message: "Partner activated successfully.",
@@ -2321,16 +2374,20 @@ router.get(
 );
 
 // Get partners under a specific RM (Admin)
+// Soft-deleted / suspended partners stay on Admin Suspended tab — not on RM lists.
 router.get(
   "/rm/:rmId/get-partners",
   auth,
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const list = await User.find({
-        role: ROLES.PARTNER,
-        rmId: req.params.rmId,
-      })
+      const list = await User.find(
+        activeUsersFilter({
+          role: ROLES.PARTNER,
+          rmId: req.params.rmId,
+          status: "ACTIVE",
+        })
+      )
         .select("-passwordHash -__v")
         .populate({
           path: "rmId", // populate RM details
@@ -3579,7 +3636,14 @@ router.get(
 
       const result = await Promise.all(
         rms.map(async (rm) => {
-          const partnerCount = await User.countDocuments({ role: ROLES.PARTNER, rmId: rm._id });
+          // Only ACTIVE, non-soft-deleted partners count toward RM list totals
+          const partnerCount = await User.countDocuments(
+            activeUsersFilter({
+              role: ROLES.PARTNER,
+              rmId: rm._id,
+              status: "ACTIVE",
+            })
+          );
           const appCount = await Application.countDocuments({ rmId: rm._id, status: { $ne: "DRAFT" } });
           return {
             ...rm,
@@ -4174,7 +4238,7 @@ router.post(
 
       const partner = await User.findByIdAndUpdate(
         partnerId,
-        { status: "ACTIVE" },
+        { $set: { status: "ACTIVE" }, $unset: { deletedAt: 1, inactiveReason: 1 } },
         { new: true }
       );
 
@@ -5947,6 +6011,7 @@ function formatPayoutApplicationRow(app, payout, isDoneEndpoint = false) {
   const partnerIfscCode = app.partnerId?.ifscCode || "";
   const partnerAccountHolderName =
     app.partnerId?.accountHolderName || partnerName;
+  const partnerChannelType = app.partnerId?.partnerChannelType || null;
 
   const disbursedAt = getDisbursedAt(app);
   const payoutAmount = payout?.amount != null ? Number(payout.amount) : 0;
@@ -6016,6 +6081,7 @@ function formatPayoutApplicationRow(app, payout, isDoneEndpoint = false) {
     partnerPan,
     partnerCode,
     partnerEmployeeId,
+    partnerChannelType,
     partnerBankName,
     partnerAccountNumber,
     partnerIfscCode,
@@ -6030,6 +6096,7 @@ function formatPayoutApplicationRow(app, payout, isDoneEndpoint = false) {
       lastName: partnerLast,
       email: partnerEmail,
       phone: partnerPhone,
+      partnerChannelType,
       bankName: partnerBankName,
       accountNumber: partnerAccountNumber,
       ifscCode: partnerIfscCode,
@@ -6051,7 +6118,7 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.SUPER_ADMIN), a
       .populate("customerId", "employeeId firstName lastName email phone")
       .populate(
         "partnerId",
-        "employeeId firstName lastName email phone bankName accountNumber ifscCode accountHolderName panNumber partnerCode panCard"
+        "employeeId firstName lastName email phone bankName accountNumber ifscCode accountHolderName panNumber partnerCode panCard partnerChannelType"
       )
       .lean();
 
@@ -6094,7 +6161,7 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.SUPER_ADMIN), asyn
       .populate("customerId", "employeeId firstName lastName email phone")
       .populate(
         "partnerId",
-        "employeeId firstName lastName email phone bankName accountNumber ifscCode accountHolderName panNumber partnerCode panCard"
+        "employeeId firstName lastName email phone bankName accountNumber ifscCode accountHolderName panNumber partnerCode panCard partnerChannelType"
       )
       .lean();
 
@@ -6141,7 +6208,7 @@ router.get("/application/:applicationId/payout-detail", auth, requireRole(ROLES.
       .populate("customerId", "employeeId firstName lastName email phone")
       .populate(
         "partnerId",
-        "employeeId firstName lastName email phone bankName accountNumber ifscCode accountHolderName panNumber partnerCode panCard"
+        "employeeId firstName lastName email phone bankName accountNumber ifscCode accountHolderName panNumber partnerCode panCard partnerChannelType"
       )
       .lean();
 
@@ -6703,6 +6770,13 @@ router.get("/payout-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, r
       LAP_SALARIED: 1.0,
       LAP_SELF_EMPLOYED: 1.0,
       DEFAULT: 2.0,
+      // Channel payout multipliers (rickshaw gets 50% of base rate)
+      channelMultipliers: {
+        RICKSHAW: 0.5,
+        NET_CAFE: 1.0,
+        KIRANA: 1.0,
+        OTHER: 1.0,
+      },
       // TDS Settings (Section 194T default)
       tdsApplicable: true,
       tdsSection: "194T",
@@ -6728,6 +6802,10 @@ router.get("/payout-policy", auth, requireRole(ROLES.SUPER_ADMIN), async (req, r
       config.value = {
         ...industrialDefaults,
         ...config.value,
+        channelMultipliers: {
+          ...industrialDefaults.channelMultipliers,
+          ...(config.value.channelMultipliers || {}),
+        },
       };
     }
 

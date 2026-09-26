@@ -343,7 +343,7 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
           await createNotification(String(assignedRmId), {
             title: `New Lead: ${firstName} ${lastName}`,
             message: `New ${normalizedLoanType} lead captured (₹${loanAmount.toLocaleString("en-IN")}). Running Loan: ${hasRunningLoan}, EMI: ₹${monthlyEmiPaying}, Purpose: ${loanPurpose || "N/A"}. Source: ${leadSource}.`,
-            type: "APPLICATION",
+            type: "application",
             meta: {
               applicationId: app._id,
               appNo: app.appNo,
@@ -609,7 +609,7 @@ router.post("/:id/nudge-partner", auth, requireRole(ROLES.RM), async (req, res) 
 
 /**
  * GET /api/leads/hierarchy
- * ASM / RSM monitor view of open LEADs under their RMs (no ownership transfer).
+ * ASM / RSM monitor view of pipeline under their RMs (filterable by status on FE).
  */
 router.get(
   "/hierarchy",
@@ -632,9 +632,26 @@ router.get(
         return res.json({ summary: { openLeads: 0, partnerLeads: 0, agingOver48h: 0 }, items: [] });
       }
 
+      const PIPELINE_STATUSES = [
+        "LEAD",
+        "DRAFT",
+        "SUBMITTED",
+        "DOC_INCOMPLETE",
+        "DOC_COMPLETE",
+        "DOC_SUBMITTED",
+        "LOGIN",
+        "KYC_PENDING",
+        "KYC_COMPLETE",
+        "UNDER_REVIEW",
+        "APPROVED",
+        "AGREEMENT",
+        "DISBURSED",
+        "REJECTED",
+      ];
+
       const leads = await Application.find(
         activeApplicationsFilter({
-          status: "LEAD",
+          status: { $in: PIPELINE_STATUSES },
           rmId: { $in: rmIds },
         })
       )
@@ -646,12 +663,14 @@ router.get(
 
       const items = leads.map(formatHierarchyLead);
       const now = Date.now();
+      const openItems = items.filter((i) => i.status === "LEAD");
       const summary = {
-        openLeads: items.length,
-        partnerLeads: items.filter((i) => i.leadSource === "PARTNER").length,
-        agingOver48h: items.filter(
+        openLeads: openItems.length,
+        partnerLeads: openItems.filter((i) => i.leadSource === "PARTNER").length,
+        agingOver48h: openItems.filter(
           (i) => now - new Date(i.createdAt).getTime() > 48 * 60 * 60 * 1000
         ).length,
+        totalPipeline: items.length,
       };
 
       return res.json({ summary, items });
@@ -731,45 +750,80 @@ router.post(
 
 /**
  * GET /api/leads/admin
- * Admin/Super Admin view of all leads across all RMs & partners.
+ * Admin/Super Admin view of full pipeline across all RMs & partners.
  */
 router.get("/admin", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
   try {
-    const leads = await Application.find(activeApplicationsFilter({ status: "LEAD" }))
+    const PIPELINE_STATUSES = [
+      "LEAD",
+      "DRAFT",
+      "SUBMITTED",
+      "DOC_INCOMPLETE",
+      "DOC_COMPLETE",
+      "DOC_SUBMITTED",
+      "LOGIN",
+      "KYC_PENDING",
+      "KYC_COMPLETE",
+      "UNDER_REVIEW",
+      "APPROVED",
+      "AGREEMENT",
+      "DISBURSED",
+      "REJECTED",
+    ];
+
+    const leads = await Application.find(
+      activeApplicationsFilter({ status: { $in: PIPELINE_STATUSES } })
+    )
       .populate("customerId", "employeeId firstName lastName email phone")
-      .populate("partnerId", "firstName lastName email phone partnerCode")
+      .populate("partnerId", "firstName lastName email phone partnerCode referralCode")
       .populate("rmId", "firstName lastName email phone employeeId")
       .sort({ updatedAt: -1 })
       .lean();
 
     const formattedLeads = leads.map((app) => ({
+      _id: app._id,
       id: app._id,
       appNo: app.appNo,
-      customerName: `${app.customer?.firstName || app.customerId?.firstName || ""} ${
-        app.customer?.lastName || app.customerId?.lastName || ""
-      }`.trim(),
-      email: app.customer?.email || app.customerId?.email || "",
-      phone: app.customer?.phone || app.customerId?.phone || "",
+      status: app.status,
+      createdAt: app.createdAt,
       loanType: app.loanType,
-      requestedAmount: app.customer?.loanAmount || app.requestedAmount || 0,
+      loanAmount: app.loanAmount || app.customer?.loanAmount || 0,
+      approvedAmount: app.approvedLoanAmount || app.approvedAmount,
       hasRunningLoan: app.hasRunningLoan || app.customer?.hasRunningLoan || "NO",
       monthlyEmiPaying: app.monthlyEmiPaying ?? app.customer?.monthlyEmiPaying ?? 0,
       loanPurpose: app.loanPurpose || app.customer?.loanPurpose || "",
       leadSource: app.leadSource || "PARTNER",
       leadFollowUp: app.leadFollowUp || { status: "NEW", remarks: "" },
-      status: app.status,
-      createdAt: app.createdAt,
-      partner: {
-        name: `${app.partnerId?.firstName || ""} ${app.partnerId?.lastName || ""}`.trim(),
-        code: app.partnerId?.partnerCode || "",
+      customer: {
+        firstName: app.customer?.firstName || app.customerId?.firstName || "",
+        lastName: app.customer?.lastName || app.customerId?.lastName || "",
+        email: app.customer?.email || app.customerId?.email || "",
+        phone: app.customer?.phone || app.customerId?.phone || "",
+        loanAmount: app.customer?.loanAmount || app.loanAmount || 0,
+        hasRunningLoan: app.customer?.hasRunningLoan || app.hasRunningLoan || "NO",
+        monthlyEmiPaying: app.customer?.monthlyEmiPaying ?? app.monthlyEmiPaying ?? 0,
+        loanPurpose: app.customer?.loanPurpose || app.loanPurpose || "",
       },
-      rm: {
+      partner: {
+        firstName: app.partnerId?.firstName || "",
+        lastName: app.partnerId?.lastName || "",
+        partnerName: `${app.partnerId?.firstName || ""} ${app.partnerId?.lastName || ""}`.trim(),
+        partnerCode: app.partnerId?.partnerCode || "",
+        referralCode: app.partnerId?.referralCode || "",
+        email: app.partnerId?.email || "",
+        phone: app.partnerId?.phone || "",
+      },
+      assignedRM: {
+        firstName: app.rmId?.firstName || "",
+        lastName: app.rmId?.lastName || "",
         name: `${app.rmId?.firstName || ""} ${app.rmId?.lastName || ""}`.trim(),
+        phone: app.rmId?.phone || "",
         employeeId: app.rmId?.employeeId || "",
+        rmCode: app.rmId?.employeeId || "",
       },
     }));
 
-    return res.json(formattedLeads);
+    return res.json({ leads: formattedLeads });
   } catch (error) {
     console.error("Error fetching admin leads:", error);
     return res.status(500).json({ message: "Failed to fetch leads" });

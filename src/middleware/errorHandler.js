@@ -55,9 +55,23 @@ export function errorHandler(err, req, res, _next) {
     if (err.code === "LIMIT_FILE_SIZE") {
       message =
         "File exceeds the maximum size allowed for this upload. Use a smaller or compressed file.";
+    } else if (err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_UNEXPECTED_FILE") {
+      message = "Too many files in this upload. Remove optional documents and try again.";
+    } else if (err.code === "LIMIT_PART_COUNT" || err.code === "LIMIT_FIELD_VALUE") {
+      message = "Upload payload is too large. Try again with fewer or smaller documents.";
     } else {
       message = err.message || "File upload error";
     }
+  } else if (
+    /ECONNRESET|ETIMEDOUT|TimeoutError|RequestTimeout|socket hang up/i.test(
+      String(err?.code || "") + " " + String(err?.message || "")
+    )
+  ) {
+    // Surface transport failures as 504 so the app gets JSON instead of a dead socket when possible.
+    statusCode = 504;
+    code = "UPLOAD_TIMEOUT";
+    message =
+      "Upload timed out on the server. Please retry with a stable connection, or upload fewer/smaller PDFs.";
   }
 
   if (!isProd) {

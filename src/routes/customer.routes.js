@@ -473,7 +473,7 @@ router.post(
               userId: appPartnerId,
               title: "New Customer Loan Application",
               message: `${customer.firstName} ${customer.lastName || ""} submitted a ${loanType} application (App No: ${app.appNo}).`,
-              type: "APPLICATION_SUBMITTED",
+              type: "application",
               applicationId: app._id,
               metadata: { appNo: app.appNo, loanType, customerName: `${customer.firstName} ${customer.lastName || ""}` },
             });

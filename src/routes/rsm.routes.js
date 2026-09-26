@@ -47,6 +47,8 @@ import {
   rmReportingLineMatch,
 } from "../utils/rmRsmHierarchy.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
+import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
+import { parseDashboardPeriod } from "../utils/dashboardPeriod.js";
 import {
   parseFollowUpPeriod,
   latestFollowUpsByTargets,
@@ -1169,6 +1171,7 @@ router.get(
 router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
     const rsmId = req.user.sub;
+    const period = parseDashboardPeriod(req.query);
 
     // RSM/ASM profile
     const rsm = await User.findOne({ _id: rsmId, role: { $in: [ROLES.ASM, ROLES.RSM] } }).lean();
@@ -1178,6 +1181,8 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
     await repairDocCompleteRoutingForRsm(rsmId);
     const ltFilter = loanTypeFilterForRsmType(rsmTypeNorm);
     const rsmObjectId = toObjectId(rsmId);
+    // Target rows are stored under the caller's actual role (ASM or RSM)
+    const targetRole = rsm.role === ROLES.ASM ? ROLES.ASM : ROLES.RSM;
 
     let rmScope = {};
     if (rsm.role === ROLES.RSM) {
@@ -1279,23 +1284,40 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
       status: "REJECTED",
     });
 
-    // Revenue from disbursed loans
-    const revenueAgg = await Application.aggregate([
-      {
-        $match: {
-          rsmId: new mongoose.Types.ObjectId(rsmId),
-          status: "DISBURSED",
-          ...ltFilter,
+    // Revenue from disbursed loans — same scope as app counts (asmId OR rsmId OR RM hierarchy)
+    // (Previously only matched rsmId, so specialized ASMs saw ₹0 Total Disbursed)
+    const disbursedMatch = activeApplicationsFilter({
+      $and: [
+        {
+          $or: [
+            { asmId: rsmObjectId },
+            { rsmId: rsmObjectId },
+            ...(rmIds.length ? [{ rmId: { $in: rmIds }, ...ltFilter }] : []),
+            ...(partnerIds.length ? [{ partnerId: { $in: partnerIds } }] : []),
+          ],
         },
-      },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: { $ifNull: ["$approvedLoanAmount", 0] } },
-        },
-      },
-    ]);
-    const totalRevenue = revenueAgg[0]?.total || 0;
+        ltFilter,
+        { status: "DISBURSED" },
+      ],
+    });
+
+    const disbursedApps = await Application.find(disbursedMatch)
+      .select("approvedLoanAmount disbursedAt disbursedDate stageHistory createdAt updatedAt status")
+      .lean();
+
+    let allTimeRevenue = 0;
+    let periodRevenue = 0;
+    let periodDisbursedFiles = 0;
+    for (const app of disbursedApps) {
+      const amt = Number(app.approvedLoanAmount || 0);
+      allTimeRevenue += amt;
+      const dAt = getDisbursedAt(app);
+      if (!period.isFiltered || isDateInRange(dAt, period.startDate, period.endDate)) {
+        periodRevenue += amt;
+        periodDisbursedFiles += 1;
+      }
+    }
+    const totalRevenue = period.isFiltered ? periodRevenue : allTimeRevenue;
 
     // Avg rating of partners
     const ratings = partners.map((p) => p.rating || 0);
@@ -1303,83 +1325,58 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
       ? (ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1)
       : 0;
 
-    // Current Month Target (RSM's hierarchical target - sum of RM targets)
-    const now = new Date();
-    const currentMonth = now.getMonth() + 1;
-    const currentYear = now.getFullYear();
+    // Target month/year: selected period month, or current calendar month
+    const targetMonth =
+      period.hasMonth && period.month !== "all" ? Number(period.month) : period.currentMonth;
+    const targetYear =
+      period.hasYear && period.year !== "all" ? Number(period.year) : period.currentYear;
 
-    // Get RSM's current month target (hierarchical - sum of RM targets)
+    // Get manager's target for selected / current month
     const rsmTarget = await Target.findOne({
       assignedTo: new mongoose.Types.ObjectId(rsmId),
-      role: ROLES.RSM,
-      month: currentMonth,
-      year: currentYear,
+      role: targetRole,
+      month: targetMonth,
+      year: targetYear,
     }).lean();
 
-    // Calculate current month achievements (disbursed applications)
-    const currentMonthStart = new Date(currentYear, currentMonth - 1, 1);
-    const currentMonthEnd = new Date(currentYear, currentMonth, 1);
+    // Period achievement from getDisbursedAt (not updatedAt)
+    let currentMonthAchievedDisbursement = 0;
+    let currentMonthAchievedFileCount = 0;
+    const periodStart = period.isFiltered
+      ? period.startDate
+      : new Date(targetYear, targetMonth - 1, 1);
+    const periodEnd = period.isFiltered
+      ? period.endDate
+      : new Date(targetYear, targetMonth, 1);
 
-    const currentMonthDisbursed = await Application.aggregate([
-      {
-        $match: {
-          rsmId: new mongoose.Types.ObjectId(rsmId),
-          status: { $ne: "DRAFT" },
-          ...ltFilter,
-          updatedAt: {
-            $gte: currentMonthStart,
-            $lt: currentMonthEnd,
-          },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalDisbursement: {
-            $sum: {
-              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0]
-            }
-          },
-          totalFiles: { $sum: 1 },
-        },
-      },
-    ]);
+    for (const app of disbursedApps) {
+      const dAt = getDisbursedAt(app);
+      if (isDateInRange(dAt, periodStart, periodEnd)) {
+        currentMonthAchievedDisbursement += Number(app.approvedLoanAmount || 0);
+        currentMonthAchievedFileCount += 1;
+      }
+    }
 
-    const currentMonthAchievedDisbursement = currentMonthDisbursed[0]?.totalDisbursement || 0;
-    const currentMonthAchievedFileCount = currentMonthDisbursed[0]?.totalFiles || 0;
-
-    // 12-Month Target (RSM's hierarchical targets)
-    const startOfYear = new Date(currentYear, 0, 1);
+    // 12-Month Target
+    const startOfYear = new Date(targetYear, 0, 1);
+    const endOfYear = new Date(targetYear + 1, 0, 1);
 
     const monthlyTarget = await Target.find({
       assignedTo: new mongoose.Types.ObjectId(rsmId),
-      role: ROLES.RSM,
-      year: currentYear,
+      role: targetRole,
+      year: targetYear,
     }).lean();
 
-    // 12-Month Achieved
-    const monthlyAchieved = await Application.aggregate([
-      {
-        $match: {
-          rsmId: new mongoose.Types.ObjectId(rsmId),
-          status: { $ne: "DRAFT" },
-          ...ltFilter,
-          updatedAt: { $gte: startOfYear },
-        },
-      },
-      {
-        $group: {
-          _id: { month: { $month: "$updatedAt" } },
-          totalAchieved: {
-            $sum: {
-              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: { $ifNull: ["$approvedLoanAmount", 0] } }, 0]
-            }
-          },
-          totalFiles: { $sum: 1 },
-        },
-      },
-      { $sort: { "_id.month": 1 } },
-    ]);
+    // 12-Month Achieved via getDisbursedAt
+    const monthlyAchievedMap = {};
+    for (const app of disbursedApps) {
+      const dAt = getDisbursedAt(app);
+      if (!dAt || !isDateInRange(dAt, startOfYear, endOfYear)) continue;
+      const m = dAt.getMonth() + 1;
+      if (!monthlyAchievedMap[m]) monthlyAchievedMap[m] = { totalAchieved: 0, totalFiles: 0 };
+      monthlyAchievedMap[m].totalAchieved += Number(app.approvedLoanAmount || 0);
+      monthlyAchievedMap[m].totalFiles += 1;
+    }
 
     const monthNames = [
       "January", "February", "March", "April", "May", "June",
@@ -1390,14 +1387,13 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
       const month = i + 1;
       const targetDoc = monthlyTarget.find((t) => t.month === month);
       const t = targetDoc?.disbursementTarget || 0;
-      const a =
-        monthlyAchieved.find((m) => m._id.month === month)?.totalAchieved || 0;
+      const a = monthlyAchievedMap[month]?.totalAchieved || 0;
       return {
         month: monthNames[i],
         target: t,
         achieved: a,
         fileCountTarget: targetDoc?.fileCountTarget || 0,
-        achievedFileCount: monthlyAchieved.find((m) => m._id.month === month)?.totalFiles || 0,
+        achievedFileCount: monthlyAchievedMap[month]?.totalFiles || 0,
       };
     });
 
@@ -1508,6 +1504,9 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
         inactivePartners,
         totalCustomers,
         totalRevenue,
+        allTimeRevenue,
+        periodRevenue,
+        periodDisbursedFiles,
         avgRating,
         totalApplications,
         inProcessApplications,
@@ -1515,7 +1514,13 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
         disbursedApplications,
         rejectedApplications,
       },
-      // Current month target and achievement
+      filter: {
+        year: period.year,
+        month: period.month,
+        isFiltered: period.isFiltered,
+        yearForBreakdown: targetYear,
+      },
+      // Selected / current month target and achievement
       currentMonthTarget: {
         fileCountTarget: rsmTarget?.fileCountTarget || 0,
         disbursementTarget: rsmTarget?.disbursementTarget || 0,

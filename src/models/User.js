@@ -51,10 +51,21 @@ const userSchema = new mongoose.Schema(
     },
     address: { type: String },
     region: { type: String },
+    city: { type: String, trim: true },
     pincode: { type: String },
     homeType: { type: String },
     addressStability: { type: String },
     landmark: { type: String },
+
+    // Partner channel (rickshaw / net cafe etc. — drives payout tier later)
+    partnerChannelType: {
+      type: String,
+      enum: ["RICKSHAW", "NET_CAFE", "KIRANA", "OTHER"],
+    },
+    /** Set true when RM/admin verifies the self-declared channel type */
+    partnerChannelVerified: { type: Boolean, default: false },
+    /** Denormalized pre-printed QR serial bound to this partner */
+    assignedQrSerial: { type: String, trim: true, uppercase: true, sparse: true },
 
     // Employment & Bank info
     employmentType: { type: String },

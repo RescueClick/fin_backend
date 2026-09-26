@@ -21,6 +21,11 @@ import referralBannerRoutes from "./src/routes/referralBanner.routes.js";
 import cibilRoutes from "./src/routes/cibil.routes.js";
 import chatRoutes from "./src/routes/chat.routes.js";
 import leadRoutes from "./src/routes/lead.routes.js";
+import qrPublicRoutes, {
+  adminQrRouter,
+  partnerQrRouter,
+  rmQrRouter,
+} from "./src/routes/qrSticker.routes.js";
 import { connectDB } from "./src/db/db.js";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -43,6 +48,13 @@ requiredEnv.forEach((key) => {
 
 const app = express();
 const server = createServer(app);
+
+// Play Store app uploads many loan PDFs in one multipart request (often 50–150MB).
+// Without long timeouts the socket closes mid-upload and the app shows "Network Error".
+server.requestTimeout = Number(process.env.HTTP_REQUEST_TIMEOUT_MS) || 15 * 60 * 1000; // 15 min
+server.headersTimeout = Number(process.env.HTTP_HEADERS_TIMEOUT_MS) || 2 * 60 * 1000; // 2 min
+server.keepAliveTimeout = Number(process.env.HTTP_KEEPALIVE_TIMEOUT_MS) || 75 * 1000;
+server.timeout = Number(process.env.HTTP_SOCKET_TIMEOUT_MS) || 15 * 60 * 1000;
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -167,7 +179,11 @@ app.use("/api/asm", rsmRoutes); // RSM fallback on /api/asm
 app.use("/api/rsm", rsmRoutes); // RSM endpoints priority on /api/rsm
 app.use("/api/rsm", asmRoutes); // ASM fallback on /api/rsm
 app.use("/api/rm", rmRoutes);
+app.use("/api/rm/qr-stickers", rmQrRouter);
+app.use("/api/partner/qr-sticker", partnerQrRouter);
 app.use("/api/partner", partnerRoutes);
+app.use("/api/qr", qrPublicRoutes);
+app.use("/api/admin/qr-stickers", adminQrRouter);
 app.use("/api/customer", customerRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/notifications", notificationRoutes);

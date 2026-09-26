@@ -312,7 +312,7 @@ router.get("/public-partner-info/:partnerCode", async (req, res) => {
       role: ROLES.PARTNER,
       status: "ACTIVE",
     })
-      .select("firstName middleName lastName partnerCode employeeId phone email region pincode selfie partnerLevel isPartnerOfTheMonth createdAt status docs")
+      .select("firstName middleName lastName partnerCode employeeId phone email region city partnerChannelType pincode selfie partnerLevel isPartnerOfTheMonth createdAt status docs")
       .lean();
 
     if (!partner) {
@@ -349,6 +349,8 @@ router.get("/public-partner-info/:partnerCode", async (req, res) => {
         phone: partner.phone ? String(partner.phone).replace(/(\d{2})\d{4}(\d{4})/, "$1****$2") : "",
         rawPhone: partner.phone ? String(partner.phone).replace(/\D/g, "") : "",
         region: partner.region || "Maharashtra",
+        city: partner.city || "",
+        partnerChannelType: partner.partnerChannelType || null,
         pincode: partner.pincode || "",
         selfie: selfieUrl || null,
         partnerLevel: partner.partnerLevel || "BRONZE",
@@ -447,6 +449,8 @@ router.post(
         aadharNumber,
         panNumber,
         region,
+        city,
+        partnerChannelType: rawChannelType,
         pincode,
         employmentType,
         address,
@@ -459,6 +463,13 @@ router.post(
         password,
         joinDate,
       } = partnerData;
+
+      const ALLOWED_CHANNEL_TYPES = ["RICKSHAW", "NET_CAFE", "KIRANA", "OTHER"];
+      const partnerChannelType = ALLOWED_CHANNEL_TYPES.includes(
+        String(rawChannelType || "").toUpperCase()
+      )
+        ? String(rawChannelType).toUpperCase()
+        : undefined;
 
       // Validate and format date of birth
       const formatDate = (dateString) => {
@@ -669,6 +680,9 @@ router.post(
         aadharNumber,
         panNumber,
         region,
+        city: city ? String(city).trim() : undefined,
+        partnerChannelType,
+        partnerChannelVerified: false,
         pincode,
         employmentType,
         address,
@@ -3511,13 +3525,17 @@ router.get("/profile", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       email: partner.email,
       phone: partner.phone,
       partnershipDate: partner.createdAt,
-      partnerType: partner.partnerType,
+      partnerType: partner.partnerChannelType || partner.partnerType || null,
+      partnerChannelType: partner.partnerChannelType || null,
+      partnerChannelVerified: !!partner.partnerChannelVerified,
+      assignedQrSerial: partner.assignedQrSerial || null,
       dob: partner.dob,
       aadharNumber: partner.aadharNumber,
       panNumber: partner.panNumber,
       address: partner.address,
       experience: partner.experience,
       region: partner.region,
+      city: partner.city || null,
       verification: partner.verification,
       partnerCode: displayPublicCode,
       referralCode: displayPublicCode,
@@ -3667,6 +3685,8 @@ router.patch(
         address,
         experience,
         region,
+        city,
+        partnerChannelType: rawChannelType,
         bankName,
         accountNumber,
         ifscCode,
@@ -3674,6 +3694,13 @@ router.patch(
       } = req.body;
 
       const partnerId = req.user.sub;
+
+      const ALLOWED_CHANNEL_TYPES = ["RICKSHAW", "NET_CAFE", "KIRANA", "OTHER"];
+      const partnerChannelType = ALLOWED_CHANNEL_TYPES.includes(
+        String(rawChannelType || "").toUpperCase()
+      )
+        ? String(rawChannelType).toUpperCase()
+        : undefined;
 
       const updateData = {
         firstName,
@@ -3683,6 +3710,8 @@ router.patch(
         address,
         experience,
         region,
+        city,
+        partnerChannelType,
         bankName,
         accountNumber,
         ifscCode,

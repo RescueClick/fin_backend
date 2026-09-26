@@ -354,7 +354,8 @@ ApplicationSchema.methods.areAllDocumentsVerified = function () {
 ApplicationSchema.methods.transition = function (to, byUserId, note) {
   const allowed = {
     LEAD: ["SUBMITTED", "DOC_INCOMPLETE", "DOC_COMPLETE", "DRAFT", "REJECTED"],
-    DRAFT: ["SUBMITTED", "LEAD", "REJECTED"],
+    // DRAFT apps (half-filled / RM-completed) must be able to reach ASM via DOC_COMPLETE
+    DRAFT: ["SUBMITTED", "DOC_INCOMPLETE", "DOC_COMPLETE", "LEAD", "REJECTED"],
     SUBMITTED: ["DOC_COMPLETE", "LOGIN", "UNDER_REVIEW", "DOC_INCOMPLETE", "REJECTED", "LEAD"],
     DOC_INCOMPLETE: ["DOC_COMPLETE", "LOGIN", "UNDER_REVIEW", "REJECTED", "LEAD"],
     // RSM/ASM/RM operational stages

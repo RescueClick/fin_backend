@@ -47,7 +47,12 @@ const fileFilter = (req, file, cb) => {
 export const upload = multer({
   storage,
   fileFilter,
-  limits: { 
-    fileSize: 20 * 1024 * 1024, // 20MB
+  limits: {
+    fileSize: 20 * 1024 * 1024, // 20MB per file
+    // Application JSON lives in FormData field `data` — allow room for large forms.
+    fieldSize: 10 * 1024 * 1024, // 10MB
+    // Personal / home / LAP can send many docs in one request from the Play Store app.
+    files: 20,
+    parts: 60,
   },
 });

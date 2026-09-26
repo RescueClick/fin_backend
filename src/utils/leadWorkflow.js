@@ -56,7 +56,7 @@ export async function notifyPartnerToCompleteLeadForm(app, { askedByRole = "RM",
       (amount ? ` (₹${amount.toLocaleString("en-IN")})` : "") +
       `. App: ${app.appNo || "—"}.` +
       (note ? ` Note: ${note}` : ""),
-    type: "APPLICATION",
+    type: "application",
     meta: {
       reason: "COMPLETE_FORM",
       applicationId: app._id,
@@ -95,7 +95,7 @@ export async function notifyRmToProgressLeads(rmId, {
       ` and get them to complete loan forms for ${leadPhrase}.` +
       (appNo ? ` Focus: ${appNo}.` : "") +
       (remarks ? ` Remarks: ${remarks}` : ""),
-    type: "APPLICATION",
+    type: "application",
     meta: {
       reason: "LEAD_PROGRESS_NUDGE",
       applicationId,

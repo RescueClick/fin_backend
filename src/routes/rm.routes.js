@@ -51,6 +51,8 @@ import { sendMail } from "../utils/sendMail.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendApplicationStatusEmail, sendDocumentStatusEmail } from "../utils/emailService.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
+import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
+import { parseDashboardPeriod } from "../utils/dashboardPeriod.js";
 import axios from "axios";
 import { emitDocumentStatusChanged, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
 import { getReferralWebBaseUrl, appendPartnerShareUtm } from "../config/branding.js";
@@ -153,7 +155,7 @@ async function assignRsmForDocComplete(app, rmId) {
 async function syncApplicationStatusAfterDocUpdate(app, rmId) {
   const oldStatus = app.status;
 
-  if (!(app.status === "SUBMITTED" || app.status === "DOC_INCOMPLETE" || app.status === "LEAD")) {
+  if (!(app.status === "SUBMITTED" || app.status === "DOC_INCOMPLETE" || app.status === "LEAD" || app.status === "DRAFT")) {
     return { statusChanged: false, oldStatus, newStatus: oldStatus };
   }
 
@@ -163,7 +165,7 @@ async function syncApplicationStatusAfterDocUpdate(app, rmId) {
   // Disabled automatic transition to DOC_COMPLETE as per user request.
   // The RM must manually transition the application to DOC_COMPLETE.
 
-  if (anyRejected && (oldStatus === "SUBMITTED" || oldStatus === "LEAD")) {
+  if (anyRejected && (oldStatus === "SUBMITTED" || oldStatus === "LEAD" || oldStatus === "DRAFT")) {
     app.transition("DOC_INCOMPLETE", rmId, "Document rejected — re-upload required");
     return { statusChanged: true, oldStatus, newStatus: "DOC_INCOMPLETE" };
   }
@@ -212,6 +214,8 @@ router.post(
         joinDate,
         email,
         region,
+        city,
+        partnerChannelType: rawChannelType,
         aadharNumber,
         panNumber,
         pincode,
@@ -225,6 +229,13 @@ router.post(
         ifscCode,
         password,
       } = partnerData;
+
+      const ALLOWED_CHANNEL_TYPES = ["RICKSHAW", "NET_CAFE", "KIRANA", "OTHER"];
+      const partnerChannelType = ALLOWED_CHANNEL_TYPES.includes(
+        String(rawChannelType || "").toUpperCase()
+      )
+        ? String(rawChannelType).toUpperCase()
+        : undefined;
 
       // Required fields validation
       if (!firstName || !lastName || !phone || !email) {
@@ -288,6 +299,9 @@ router.post(
         aadharNumber,
         panNumber,
         region,
+        city: city ? String(city).trim() : undefined,
+        partnerChannelType,
+        partnerChannelVerified: !!partnerChannelType,
         pincode,
         employmentType,
         address,
@@ -394,7 +408,8 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
     const partners = await User.find({
       role: ROLES.PARTNER,
       rmId,
-      status: { $ne: "PENDING" },
+      status: "ACTIVE",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
     })
       .select("-passwordHash")
       .lean();
@@ -770,6 +785,10 @@ router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
         email: partner.email,
         phone: partner.phone,
         region: partner.region || null,
+        city: partner.city || null,
+        partnerCode: partner.partnerCode || null,
+        partnerChannelType: partner.partnerChannelType || null,
+        assignedQrSerial: partner.assignedQrSerial || null,
         employeeId: partner.employeeId || null,
         createdAt: partner.createdAt || null,
         status: partner.status,
@@ -968,7 +987,9 @@ router.get(
       const partners = await User.find({
         role: ROLES.PARTNER,
         rmId,
-        // Include PENDING so loan counts match Manage Loans (same partner set)
+        status: "ACTIVE",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        // Active RM follow-up list only — suspended partners are Admin Suspended tab
       })
         .select("employeeId firstName lastName phone email status partnerCode")
         .lean();
@@ -1836,6 +1857,7 @@ router.get("/active/partner", async (req, res) => {
 router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
     const rmId = req.user.sub; // RM ID from token
+    const period = parseDashboardPeriod(req.query);
 
     // RM Details with RSM population
     const rm = await User.findOne({ _id: rmId, role: ROLES.RM })
@@ -1858,19 +1880,19 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       .lean();
     if (!rm) return res.status(404).json({ message: "RM not found" });
 
-    // Partners under RM (approved, non-deleted)
+    // Partners under RM (active only — suspended belong on Admin Suspended tab)
     const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
     const partners = await User.find({
       rmId,
       role: ROLES.PARTNER,
-      status: { $ne: "PENDING" },
+      status: "ACTIVE",
       ...userBase,
     }).lean();
     const partnerIds = partners.map((p) => p._id);
 
     const totalPartners = partners.length;
-    const activePartners = partners.filter((p) => p.status === "ACTIVE").length;
-    const inactivePartners = partners.filter((p) => p.status === "INACTIVE").length;
+    const activePartners = partners.length;
+    const inactivePartners = 0;
 
     const rmScopeFilter = {
       $or: [
@@ -1919,26 +1941,33 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       })
     );
 
-    // Revenue (including from partners)
+    // Revenue (including from partners) — getDisbursedAt for month filter
     const rmObjectId = new mongoose.Types.ObjectId(rmId);
-    const revenueAgg = await Application.aggregate([
-      {
-        $match: activeApplicationsFilter({
-          $or: [
-            { partnerId: { $in: partnerIds }, status: "DISBURSED" },
-            { partnerId: null, rmId: rmObjectId, status: "DISBURSED" },
-            { partnerId: { $exists: false }, rmId: rmObjectId, status: "DISBURSED" }
-          ]
-        }),
-      },
-      {
-        $group: {
-          _id: null,
-          total: { $sum: { $ifNull: ["$approvedLoanAmount", 0] } },
-        },
-      },
-    ]);
-    const totalRevenue = revenueAgg[0]?.total || 0;
+    const disbursedMatch = activeApplicationsFilter({
+      $or: [
+        { partnerId: { $in: partnerIds }, status: "DISBURSED" },
+        { partnerId: null, rmId: rmObjectId, status: "DISBURSED" },
+        { partnerId: { $exists: false }, rmId: rmObjectId, status: "DISBURSED" },
+      ],
+    });
+
+    const disbursedApps = await Application.find(disbursedMatch)
+      .select("approvedLoanAmount disbursedAt disbursedDate stageHistory createdAt updatedAt status")
+      .lean();
+
+    let allTimeRevenue = 0;
+    let periodRevenue = 0;
+    let periodDisbursedFiles = 0;
+    for (const app of disbursedApps) {
+      const amt = Number(app.approvedLoanAmount || 0);
+      allTimeRevenue += amt;
+      const dAt = getDisbursedAt(app);
+      if (!period.isFiltered || isDateInRange(dAt, period.startDate, period.endDate)) {
+        periodRevenue += amt;
+        periodDisbursedFiles += 1;
+      }
+    }
+    const totalRevenue = period.isFiltered ? periodRevenue : allTimeRevenue;
 
     // Avg partner rating
     const ratings = partners.map((p) => p.rating || 0);
@@ -1946,85 +1975,52 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       ? (ratings.reduce((a, b) => a + b, 0) / ratings.length).toFixed(1)
       : 0;
 
-    // Current Month Target (RM's hierarchical target - sum of partner targets)
-    const now = new Date();
-    const currentMonth = now.getMonth() + 1;
-    const currentYear = now.getFullYear();
+    const targetMonth =
+      period.hasMonth && period.month !== "all" ? Number(period.month) : period.currentMonth;
+    const targetYear =
+      period.hasYear && period.year !== "all" ? Number(period.year) : period.currentYear;
 
-    // Get RM's current month target (hierarchical - sum of partner targets)
     const rmTarget = await Target.findOne({
       assignedTo: rm._id,
       role: ROLES.RM,
-      month: currentMonth,
-      year: currentYear,
+      month: targetMonth,
+      year: targetYear,
     }).lean();
 
-    // Calculate current month achievements (disbursed applications)
-    const currentMonthStart = new Date(currentYear, currentMonth - 1, 1);
-    const currentMonthEnd = new Date(currentYear, currentMonth, 1);
+    let currentMonthAchievedDisbursement = 0;
+    let currentMonthAchievedFileCount = 0;
+    const periodStart = period.isFiltered
+      ? period.startDate
+      : new Date(targetYear, targetMonth - 1, 1);
+    const periodEnd = period.isFiltered
+      ? period.endDate
+      : new Date(targetYear, targetMonth, 1);
 
-    const currentMonthDisbursed = await Application.aggregate([
-      {
-        $match: {
-          $or: [
-    { partnerId: { $in: partnerIds }, status: "DISBURSED" },
-    { partnerId: null, rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
-    { partnerId: { $exists: false }, rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" }
-  ],
-          updatedAt: {
-            $gte: currentMonthStart,
-            $lt: currentMonthEnd,
-          },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          totalDisbursement: { $sum: { $toDouble: "$approvedLoanAmount" } },
-          totalFiles: { $sum: 1 },
-        },
-      },
-    ]);
+    for (const app of disbursedApps) {
+      const dAt = getDisbursedAt(app);
+      if (isDateInRange(dAt, periodStart, periodEnd)) {
+        currentMonthAchievedDisbursement += Number(app.approvedLoanAmount || 0);
+        currentMonthAchievedFileCount += 1;
+      }
+    }
 
-    const currentMonthAchievedDisbursement = currentMonthDisbursed[0]?.totalDisbursement || 0;
-    const currentMonthAchievedFileCount = currentMonthDisbursed[0]?.totalFiles || 0;
-
-    // 12-month RM targets and achieved
-    const startOfYear = new Date(currentYear, 0, 1);
-
-    // RM's own monthly targets (hierarchical)
+    // 12-month RM targets and achieved for selected year
     const monthlyTarget = await Target.find({
       assignedTo: rm._id,
       role: ROLES.RM,
-      year: currentYear,
+      year: targetYear,
     }).lean();
 
-    // Monthly Achieved from Applications under RM (including from partners)
-    const monthlyAchieved = await Application.aggregate([
-      {
-        $match: {
-          $or: [
-    { partnerId: { $in: partnerIds } },
-    { partnerId: null, rmId: new mongoose.Types.ObjectId(rmId) },
-    { partnerId: { $exists: false }, rmId: new mongoose.Types.ObjectId(rmId) }
-  ],
-          status: { $ne: "DRAFT" },
-          updatedAt: { $gte: startOfYear },
-        },
-      },
-      {
-        $group: {
-          _id: { month: { $month: "$updatedAt" } },
-          totalAchieved: { 
-            $sum: { 
-              $cond: [{ $eq: ["$status", "DISBURSED"] }, { $toDouble: "$approvedLoanAmount" }, 0] 
-            } 
-          },
-          totalFiles: { $sum: 1 },
-        },
-      },
-      { $sort: { "_id.month": 1 } },
-    ]);
+    const monthlyAchievedMap = {};
+    for (const app of disbursedApps) {
+      const dAt = getDisbursedAt(app);
+      if (!dAt) continue;
+      if (dAt.getFullYear() !== targetYear) continue;
+      const m = dAt.getMonth() + 1;
+      if (!monthlyAchievedMap[m]) monthlyAchievedMap[m] = { totalAchieved: 0, totalFiles: 0 };
+      monthlyAchievedMap[m].totalAchieved += Number(app.approvedLoanAmount || 0);
+      monthlyAchievedMap[m].totalFiles += 1;
+    }
 
     const monthNames = [
       "January", "February", "March", "April", "May", "June",
@@ -2035,14 +2031,13 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       const month = i + 1;
       const targetDoc = monthlyTarget.find((t) => t.month === month);
       const t = targetDoc?.disbursementTarget || 0;
-      const a =
-        monthlyAchieved.find((m) => m._id.month === month)?.totalAchieved || 0;
-      return { 
-        month: monthNames[i], 
-        target: t, 
+      const a = monthlyAchievedMap[month]?.totalAchieved || 0;
+      return {
+        month: monthNames[i],
+        target: t,
         achieved: a,
         fileCountTarget: targetDoc?.fileCountTarget || 0,
-        achievedFileCount: monthlyAchieved.find((m) => m._id.month === month)?.totalFiles || 0,
+        achievedFileCount: monthlyAchievedMap[month]?.totalFiles || 0,
       };
     });
 
@@ -2210,6 +2205,9 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
         inactivePartners,
         totalCustomers,
         totalRevenue,
+        allTimeRevenue,
+        periodRevenue,
+        periodDisbursedFiles,
         avgRating,
         totalApplications,
         inProcessApplications,
@@ -2217,6 +2215,12 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
         rejectedApplications,
         partnersNeedingMoreInfo,
         formsFilledTotal: totalApplications,
+      },
+      filter: {
+        year: period.year,
+        month: period.month,
+        isFiltered: period.isFiltered,
+        yearForBreakdown: targetYear,
       },
       // Current month target and achievement
       currentMonthTarget: {
@@ -4056,8 +4060,13 @@ router.get("/partner-reports", auth, requireRole(ROLES.RM), async (req, res) => 
   try {
     const rmId = req.user.sub;
 
-    // Fetch partners under RM
-    const partners = await User.find({ rmId, role: ROLES.PARTNER }).lean();
+    // Fetch active partners under RM only (suspended are Admin Suspended tab)
+    const partners = await User.find({
+      rmId,
+      role: ROLES.PARTNER,
+      status: "ACTIVE",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    }).lean();
     const now = new Date();
     const month = now.getMonth() + 1;
     const year = now.getFullYear();
@@ -4142,10 +4151,12 @@ router.get("/partners/targets", auth, requireRole(ROLES.RM), async (req, res) =>
     const rmId = req.user.sub;
     const { year, month } = req.query;
 
-    // Get all partners under this RM
+    // Get active partners under this RM (suspended belong on Admin Suspended tab)
     const partners = await User.find({
       role: ROLES.PARTNER,
       rmId: rmId,
+      status: "ACTIVE",
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
     }).select("firstName lastName employeeId email phone rmId").lean();
 
     const partnerIds = partners.map((p) => p._id);
