@@ -778,16 +778,32 @@ rmQrRouter.post(
       if (sticker.status === "DISABLED") {
         return res.status(400).json({ message: "This QR is disabled" });
       }
+
+      // If QR is already on another partner: allow transfer only within this RM's team
       if (
         sticker.status === "ASSIGNED" &&
         sticker.partnerId &&
         String(sticker.partnerId) !== String(partnerId)
       ) {
-        return res.status(409).json({
-          message: "QR already assigned to another partner",
-        });
+        const previousOwner = await User.findOne({
+          _id: sticker.partnerId,
+          role: ROLES.PARTNER,
+          rmId,
+        }).select("_id partnerCode");
+
+        if (!previousOwner) {
+          return res.status(409).json({
+            message: "QR already assigned to another RM’s partner",
+          });
+        }
+
+        await User.updateOne(
+          { _id: previousOwner._id, assignedQrSerial: serial },
+          { $unset: { assignedQrSerial: 1 } }
+        );
       }
 
+      // Partner already has a different QR → free the old sticker
       if (partner.assignedQrSerial && partner.assignedQrSerial !== serial) {
         await QrSticker.updateOne(
           { serial: partner.assignedQrSerial, partnerId: partner._id },
@@ -811,10 +827,18 @@ rmQrRouter.post(
       }
       await User.updateOne({ _id: partner._id }, { $set: updates });
 
+      const replaced = Boolean(
+        partner.assignedQrSerial && partner.assignedQrSerial !== serial
+      );
+
       return res.json({
         success: true,
-        message: `QR ${serial} assigned to ${partner.partnerCode}`,
+        message: replaced
+          ? `QR ${serial} replaced previous sticker on ${partner.partnerCode}`
+          : `QR ${serial} assigned to ${partner.partnerCode}`,
         serial,
+        replaced,
+        previousSerial: replaced ? partner.assignedQrSerial : null,
         scanUrl: publicScanUrl(serial),
         redirectUrl: partnerShareUrl(partner.partnerCode),
       });

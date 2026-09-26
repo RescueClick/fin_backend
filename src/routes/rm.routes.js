@@ -51,6 +51,7 @@ import { sendMail } from "../utils/sendMail.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { sendApplicationStatusEmail, sendDocumentStatusEmail } from "../utils/emailService.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
+import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { parseDashboardPeriod } from "../utils/dashboardPeriod.js";
 import axios from "axios";
@@ -404,13 +405,20 @@ router.post(
 router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
     const rmId = req.user.sub;
+    const rmObjectId = mongoose.Types.ObjectId.isValid(rmId)
+      ? new mongoose.Types.ObjectId(rmId)
+      : null;
+    if (!rmObjectId) {
+      return res.status(400).json({ message: "Invalid RM id" });
+    }
 
-    const partners = await User.find({
-      role: ROLES.PARTNER,
-      rmId,
-      status: "ACTIVE",
-      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-    })
+    const partners = await User.find(
+      activeUsersFilter({
+        role: ROLES.PARTNER,
+        status: "ACTIVE",
+        $or: [{ rmId: rmObjectId }, { rmId }],
+      })
+    )
       .select("-passwordHash")
       .lean();
 
@@ -1880,25 +1888,34 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       .lean();
     if (!rm) return res.status(404).json({ message: "RM not found" });
 
-    // Partners under RM (active only — suspended belong on Admin Suspended tab)
-    const userBase = { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] };
-    const partners = await User.find({
-      rmId,
-      role: ROLES.PARTNER,
-      status: "ACTIVE",
-      ...userBase,
-    }).lean();
+    // Partners under RM (non-pending, non-deleted) — period filter must NOT affect this count
+    const rmObjectId = mongoose.Types.ObjectId.isValid(rmId)
+      ? new mongoose.Types.ObjectId(rmId)
+      : null;
+    if (!rmObjectId) {
+      return res.status(400).json({ message: "Invalid RM id" });
+    }
+
+    const partners = await User.find(
+      activeUsersFilter({
+        role: ROLES.PARTNER,
+        status: { $in: ["ACTIVE", "SUSPENDED"] },
+        $or: [{ rmId: rmObjectId }, { rmId }],
+      })
+    ).lean();
     const partnerIds = partners.map((p) => p._id);
 
-    const totalPartners = partners.length;
-    const activePartners = partners.length;
-    const inactivePartners = 0;
+    const activePartnersList = partners.filter((p) => p.status === "ACTIVE");
+    const totalPartners = activePartnersList.length;
+    const activePartners = activePartnersList.length;
+    const inactivePartners = partners.filter((p) => p.status === "SUSPENDED").length;
 
     const rmScopeFilter = {
       $or: [
-        { rmId: rmId },
-        { partnerId: { $in: partnerIds } }
-      ]
+        { rmId: rmObjectId },
+        { rmId },
+        ...(partnerIds.length ? [{ partnerId: { $in: partnerIds } }] : []),
+      ],
     };
 
     // Customers under RM (including from partners)
@@ -1941,13 +1958,13 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       })
     );
 
-    // Revenue (including from partners) — getDisbursedAt for month filter
-    const rmObjectId = new mongoose.Types.ObjectId(rmId);
+    // Revenue (including from partners) — getDisbursedAt for month filter only
     const disbursedMatch = activeApplicationsFilter({
       $or: [
-        { partnerId: { $in: partnerIds }, status: "DISBURSED" },
+        ...(partnerIds.length ? [{ partnerId: { $in: partnerIds }, status: "DISBURSED" }] : []),
         { partnerId: null, rmId: rmObjectId, status: "DISBURSED" },
         { partnerId: { $exists: false }, rmId: rmObjectId, status: "DISBURSED" },
+        { rmId: rmObjectId, status: "DISBURSED" },
       ],
     });
 
@@ -2045,9 +2062,10 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
     const highValueCustomers = await Application.aggregate([
       { $match: { 
         $or: [
-    { partnerId: { $in: partnerIds }, status: "DISBURSED" },
-    { partnerId: null, rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" },
-    { partnerId: { $exists: false }, rmId: new mongoose.Types.ObjectId(rmId), status: "DISBURSED" }
+    ...(partnerIds.length ? [{ partnerId: { $in: partnerIds }, status: "DISBURSED" }] : []),
+    { partnerId: null, rmId: rmObjectId, status: "DISBURSED" },
+    { partnerId: { $exists: false }, rmId: rmObjectId, status: "DISBURSED" },
+    { rmId: rmObjectId, status: "DISBURSED" },
   ]
       } },
       { $group: { _id: "$customerId", maxLoan: { $max: { $toDouble: "$approvedLoanAmount" } }, latestApp: { $first: "$$ROOT" } } },
@@ -2070,9 +2088,10 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
     const salesPipeline = await Application.aggregate([
       { $match: { 
         $or: [
-    { partnerId: { $in: partnerIds }, status: "UNDER_REVIEW" },
-    { partnerId: null, rmId: new mongoose.Types.ObjectId(rmId), status: "UNDER_REVIEW" },
-    { partnerId: { $exists: false }, rmId: new mongoose.Types.ObjectId(rmId), status: "UNDER_REVIEW" }
+    ...(partnerIds.length ? [{ partnerId: { $in: partnerIds }, status: "UNDER_REVIEW" }] : []),
+    { partnerId: null, rmId: rmObjectId, status: "UNDER_REVIEW" },
+    { partnerId: { $exists: false }, rmId: rmObjectId, status: "UNDER_REVIEW" },
+    { rmId: rmObjectId, status: "UNDER_REVIEW" },
   ]
       } },
       { $addFields: { requestedAmountNum: { $ifNull: ["$customer.loanAmount", 0] } } },
@@ -2092,8 +2111,9 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       }
     ]);
 
-    const monthStartDash = new Date(currentYear, currentMonth - 1, 1);
-    const monthEndDash = new Date(currentYear, currentMonth, 1);
+    // Use selected period month/year (falls back to calendar current via targetMonth/targetYear)
+    const monthStartDash = new Date(targetYear, targetMonth - 1, 1);
+    const monthEndDash = new Date(targetYear, targetMonth, 1);
 
     const [disbursedByPartner, payoutByPartner, dealsMonthByPartner] =
       partnerIds.length === 0
@@ -2154,7 +2174,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       dealsMonthByPartner.map((d) => [d._id.toString(), d.deals])
     );
 
-    const partnerPayoutSummary = partners
+    const partnerPayoutSummary = activePartnersList
       .map((p) => {
         const id = p._id.toString();
         return {
@@ -2174,11 +2194,17 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
       )
       .slice(0, 8);
 
-    // Enrich partner snapshot with forms + pending docs
-    const [appCountsDash, pendingDash] = await Promise.all([
-      applicationCountsByPartner(partnerIds, null),
-      partnerPendingDocStats(partnerIds),
-    ]);
+    // Enrich partner snapshot with forms + pending docs (never fail the whole dashboard)
+    let appCountsDash = new Map();
+    let pendingDash = new Map();
+    try {
+      [appCountsDash, pendingDash] = await Promise.all([
+        applicationCountsByPartner(partnerIds, null),
+        partnerPendingDocStats(partnerIds),
+      ]);
+    } catch (enrichErr) {
+      console.error("RM dashboard partner enrich failed:", enrichErr);
+    }
     for (const row of partnerPayoutSummary) {
       const st = pendingDash.get(row.id) || {
         applicationCountNeedingInfo: 0,
@@ -2221,6 +2247,8 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
         month: period.month,
         isFiltered: period.isFiltered,
         yearForBreakdown: targetYear,
+        // Partner / forms / pipeline counts are always all-time; only disbursement is period-scoped
+        countsAreAllTime: true,
       },
       // Current month target and achievement
       currentMonthTarget: {
