@@ -1010,11 +1010,23 @@ router.post(
   requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     const { id } = req.params;
-    const { bankId, email, ccMe = true, note } = req.body || {};
+    const { bankId, email, ccMe = true, cc: ccInput, note } = req.body || {};
     const to = String(email || "").trim().toLowerCase();
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    if (!EMAIL_RE.test(to)) {
       return res.status(400).json({ message: "Valid bank RM email is required" });
+    }
+
+    const extraCc = (Array.isArray(ccInput) ? ccInput : String(ccInput || "").split(/[,;\s]+/))
+      .map((e) => String(e || "").trim().toLowerCase())
+      .filter(Boolean);
+    const invalidCc = extraCc.filter((e) => !EMAIL_RE.test(e));
+    if (invalidCc.length) {
+      return res.status(400).json({ message: `Invalid CC email: ${invalidCc.join(", ")}` });
+    }
+    if (extraCc.length > 10) {
+      return res.status(400).json({ message: "You can add up to 10 CC emails" });
     }
 
     try {
@@ -1036,7 +1048,9 @@ router.post(
       const sender = await User.findById(req.user.sub)
         .select("firstName lastName email phone")
         .lean();
-      const cc = ccMe && sender?.email && sender.email.toLowerCase() !== to ? sender.email : "";
+      const ccList = [...extraCc];
+      if (ccMe && sender?.email) ccList.push(sender.email.toLowerCase());
+      const cc = [...new Set(ccList)].filter((e) => e !== to).join(", ");
 
       const record = {
         bankId: bank?._id,
