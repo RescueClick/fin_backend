@@ -13,6 +13,11 @@ import { requireRole } from "../middleware/requireRole.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { getAsmScopeIds } from "../utils/asmHierarchy.js";
 import {
+  blockerResponse,
+  findCustomerApplyBlocker,
+  resolveCustomerFile,
+} from "../utils/loanReapplyPolicy.js";
+import {
   notifyPartnerToCompleteLeadForm,
   notifyRmToProgressLeads,
   formatHierarchyLead,
@@ -259,19 +264,37 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       });
     }
 
-    if (!app) {
-      // Check for a recent LEAD application (within last 7 days) by same customer for same loan type
-      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      app = await Application.findOne({
-        customerId: customerUser._id,
-        loanType: normalizedLoanType,
-        status: "LEAD",
-        isArchived: { $ne: true },
-        createdAt: { $gte: sevenDaysAgo },
-      }).sort({ updatedAt: -1 });
+    const blocked = (blocker) =>
+      res.status(400).json({ success: false, ...blockerResponse(blocker) });
+
+    if (app) {
+      const otherFile = await findCustomerApplyBlocker(customerUser._id, { excludeAppId: app._id });
+      if (otherFile) return blocked(otherFile);
+    } else {
+      // One customer = one file: continue their open lead/draft (any loan type) or refuse
+      const resolved = await resolveCustomerFile(customerUser._id, {
+        partnerId: assignedPartner._id,
+      });
+      if (resolved.blocker) return blocked(resolved.blocker);
+      if (resolved.app && resolved.app.status !== "LEAD") {
+        return res.status(200).json({
+          success: true,
+          message: "Customer already has a loan file in progress",
+          applicationId: resolved.app._id,
+          appNo: resolved.app.appNo,
+          status: resolved.app.status,
+          assignedPartner: {
+            id: assignedPartner._id,
+            name: `${assignedPartner.firstName || ""} ${assignedPartner.lastName || ""}`.trim(),
+            code: assignedPartner.partnerCode,
+          },
+        });
+      }
+      app = resolved.app || null;
     }
 
     if (app) {
+      app.loanType = normalizedLoanType;
       // Update existing LEAD
       app.customer = { ...app.customer?.toObject?.(), ...customerPayload };
       app.hasRunningLoan = hasRunningLoan;

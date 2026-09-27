@@ -49,7 +49,7 @@ import { createNotification, createNotificationsForUsers } from "../utils/notifi
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { Config } from "../models/Config.js";
 import { sanitizeHeroConfig, DEFAULT_HERO_CONFIG } from "./admin.routes.js";
-import { findCustomerApplyBlocker } from "../utils/loanReapplyPolicy.js";
+import { blockerResponse, resolveCustomerFile } from "../utils/loanReapplyPolicy.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import {
   getReferralWebBaseUrl,
@@ -192,24 +192,18 @@ router.get("/check-customer", auth, requireRole(ROLES.PARTNER), async (req, res)
 
     const existingUser = await User.findOne({ $or: query });
 
-    // Customer created by this partner's own in-progress lead (early doc upload / step 1 capture)
-    // must not block the partner from continuing the same form.
+    // One customer = one file: continue their open lead/draft, or explain why they can't apply
     if (existingUser && existingUser.role === ROLES.CUSTOMER) {
-      const ownOpenLead = await Application.findOne({
-        customerId: existingUser._id,
-        partnerId: req.user.sub,
-        status: { $in: ["LEAD", "DRAFT", "DOC_INCOMPLETE"] },
-        isArchived: { $ne: true },
-        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-      })
-        .select("_id loanType status")
-        .lean();
-      if (ownOpenLead) {
+      const resolved = await resolveCustomerFile(existingUser._id, { partnerId: req.user.sub });
+      if (resolved.app) {
         return res.json({
           exists: false,
-          resumableApplicationId: ownOpenLead._id,
-          resumableLoanType: ownOpenLead.loanType,
+          resumableApplicationId: resolved.app._id,
+          resumableLoanType: resolved.app.loanType,
         });
+      }
+      if (resolved.blocker) {
+        return res.json({ exists: true, ...blockerResponse(resolved.blocker) });
       }
     }
 
@@ -1222,26 +1216,14 @@ router.post(
           ? [references]
           : [];
 
-      // Draft/incomplete can be updated; REJECTED history kept — reapply only after 3 months
-      let existingApp = await Application.findOne({
-        customerId: customerUser._id,
-        status: { $in: ["DRAFT", "DOC_INCOMPLETE"] },
-        isArchived: { $ne: true },
-        $or: [{ deletedAt: null }, { deletedAt: { $gt: new Date() } }],
-      }).sort({ updatedAt: -1 });
-
-      if (!existingApp) {
-        const blocker = await findCustomerApplyBlocker(customerUser._id);
-        if (blocker) {
-          return res.status(400).json({
-            message: blocker.message,
-            reason: blocker.type,
-            existingAppNo: blocker.app?.appNo,
-            existingStatus: blocker.app?.status,
-            canApplyAfter: blocker.unlockAt || null,
-          });
-        }
+      // One customer = one file: continue an open lead/draft (any loan type) or refuse
+      const resolved = await resolveCustomerFile(customerUser._id, {
+        partnerId: assignedPartnerId,
+      });
+      if (resolved.blocker) {
+        return res.status(400).json(blockerResponse(resolved.blocker));
       }
+      const existingApp = resolved.app || null;
 
       const customerData = {
         firstName: customer.firstName,
@@ -1278,7 +1260,7 @@ router.post(
 
       if (
         existingApp &&
-        ["DRAFT", "DOC_INCOMPLETE"].includes(existingApp.status)
+        ["DRAFT", "DOC_INCOMPLETE", "LEAD"].includes(existingApp.status)
       ) {
         // Partner resubmission with files replaces docs. Empty DRAFT shell
         // (mobile resilient fallback) must KEEP existing docs so we don't wipe
@@ -1299,6 +1281,7 @@ router.post(
           }
         }
         existingApp.docs = docsToSave;
+        existingApp.loanType = loanType;
         existingApp.customer = { ...existingApp.customer, ...customerData };
         existingApp.employmentInfo = employmentInfo;
         existingApp.businessInfo = businessInfo;
@@ -1768,27 +1751,14 @@ router.post(
           ? [references]
           : [];
 
-      // Draft/incomplete/lead can be updated; REJECTED history kept — reapply only after 3 months
-      let existingApp = await Application.findOne({
-        customerId: customerUser._id,
-        loanType,
-        status: { $in: ["DRAFT", "DOC_INCOMPLETE", "LEAD"] },
-        isArchived: { $ne: true },
-        $or: [{ deletedAt: null }, { deletedAt: { $gt: new Date() } }],
-      }).sort({ updatedAt: -1 });
-
-      if (!existingApp) {
-        const blocker = await findCustomerApplyBlocker(customerUser._id);
-        if (blocker) {
-          return res.status(400).json({
-            message: blocker.message,
-            reason: blocker.type,
-            existingAppNo: blocker.app?.appNo,
-            existingStatus: blocker.app?.status,
-            canApplyAfter: blocker.unlockAt || null,
-          });
-        }
+      // One customer = one file: continue an open lead/draft (any loan type) or refuse
+      const resolved = await resolveCustomerFile(customerUser._id, {
+        partnerId: assignedPartnerId,
+      });
+      if (resolved.blocker) {
+        return res.status(400).json(blockerResponse(resolved.blocker));
       }
+      const existingApp = resolved.app || null;
 
       const customerData = {
         firstName: customer.firstName,
@@ -1850,6 +1820,7 @@ router.post(
           }
         }
         existingApp.docs = docsToSave;
+        existingApp.loanType = loanType;
         existingApp.customer = { ...existingApp.customer, ...customerData };
         existingApp.hasRunningLoan = customerData.hasRunningLoan;
         existingApp.monthlyEmiPaying = customerData.monthlyEmiPaying;
@@ -2177,6 +2148,25 @@ router.post(
             assignedAsmId = rmDoc.asmId;
           }
         }
+      }
+
+      const resolved = await resolveCustomerFile(customerUser._id, { partnerId });
+      if (resolved.blocker) {
+        return res.status(400).json(blockerResponse(resolved.blocker));
+      }
+      if (resolved.app) {
+        const existing = resolved.app;
+        existing.loanType = loanType;
+        existing.partnerId = partnerId;
+        existing.rmId = assignedRmId;
+        await existing.save();
+        return res.status(200).json({
+          message: "Continuing the customer's existing loan file",
+          id: existing._id,
+          appNo: existing.appNo,
+          status: existing.status,
+          customerLogin: { email: customerUser.email, password: null },
+        });
       }
 
       // Create application skeleton
