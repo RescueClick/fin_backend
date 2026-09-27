@@ -1057,3 +1057,136 @@ export const sendPartnerPayoutInvoiceEmail = async ({
 /** Alias for incentive invoice emails (same formal Sec 194T template as payouts) */
 export const sendPartnerIncentiveInvoiceEmail = (args) =>
   sendPartnerPayoutInvoiceEmail({ ...args, invoiceType: "INCENTIVE" });
+
+const escapeHtml = (v) =>
+  String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+const formatDate = (d) => {
+  if (!d) return "";
+  const dt = new Date(d);
+  return Number.isNaN(dt.getTime()) ? "" : dt.toLocaleDateString("en-IN");
+};
+
+const formatInr = (n) =>
+  n === undefined || n === null || n === "" ? "" : `₹${Number(n).toLocaleString("en-IN")}`;
+
+const infoSection = (title, rows) => {
+  const filled = rows.filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== "");
+  if (!filled.length) return "";
+  return `
+    <div class="info-box">
+      <h3 style="margin-top: 0; color: #12B99C;">${escapeHtml(title)}</h3>
+      ${filled
+        .map(
+          ([label, value]) => `
+        <div class="info-row">
+          <span class="label">${escapeHtml(label)}:</span>
+          <span class="value">${escapeHtml(value)}</span>
+        </div>`
+        )
+        .join("")}
+    </div>`;
+};
+
+/**
+ * Email customer info + all documents to a bank RM ("Send to Bank").
+ * `pkg` comes from packageApplicationDocs(): zip attachment or download links.
+ */
+export const sendBankRmEmail = async ({ app, bankName, rmName, to, cc, sender, note, pkg }) => {
+  const c = app.customer || {};
+  const fullName = [c.firstName, c.middleName, c.lastName].filter(Boolean).join(" ");
+  const amount = c.loanAmount || app.approvedLoanAmount;
+  const senderName = [sender?.firstName, sender?.lastName].filter(Boolean).join(" ");
+
+  const docsHtml =
+    pkg.delivery === "ATTACHMENT"
+      ? `<div class="alert alert-info"><strong>Documents:</strong> ${pkg.docsCount} file(s) attached as <b>${escapeHtml(
+          pkg.attachments[0]?.filename
+        )}</b> (${escapeHtml(pkg.docTypes.join(", "))}).</div>`
+      : `<div class="info-box">
+          <h3 style="margin-top: 0; color: #12B99C;">Documents (links valid for 7 days)</h3>
+          ${pkg.links
+            .map(
+              (l) =>
+                `<div class="info-row"><span class="label">${escapeHtml(l.docType)}:</span> <a href="${escapeHtml(
+                  l.href
+                )}">Download</a></div>`
+            )
+            .join("")}
+        </div>`;
+
+  const content = `
+    <h2>Dear ${escapeHtml(rmName || `${bankName} Team`)},</h2>
+    <p>Please find below the customer details and documents for file login with <b>${escapeHtml(bankName)}</b>.</p>
+    ${note ? `<div class="alert alert-info"><strong>Note:</strong> ${escapeHtml(note)}</div>` : ""}
+    ${infoSection("Application", [
+      ["Application No", app.appNo],
+      ["Loan Type", app.loanType],
+      ["Loan Amount", formatInr(amount)],
+      ["Loan Purpose", app.loanPurpose || c.loanPurpose],
+    ])}
+    ${infoSection("Customer", [
+      ["Name", fullName],
+      ["Phone", c.phone],
+      ["Alternate Phone", c.alternatePhone],
+      ["Email", c.email],
+      ["Official Email", c.officialEmail],
+      ["PAN", c.panNumber],
+      ["Date of Birth", formatDate(c.dateOfBirth)],
+      ["Gender", c.gender],
+      ["Marital Status", c.maritalStatus],
+      ["Spouse Name", c.spouseName],
+      ["Mother's Name", c.mothersName],
+      ["Current Address", [c.currentAddress, c.currentAddressLandmark, c.currentAddressPinCode].filter(Boolean).join(", ")],
+      ["Residence", c.currentAddressOwnRented || c.currentAddressHouseStatus],
+      ["Permanent Address", [c.permanentAddress, c.permanentAddressLandmark, c.permanentAddressPinCode].filter(Boolean).join(", ")],
+      ["Running Loan", app.hasRunningLoan || c.hasRunningLoan],
+      ["Monthly EMI", formatInr(app.monthlyEmiPaying || c.monthlyEmiPaying || "")],
+    ])}
+    ${infoSection("Employment", [
+      ["Company", app.employmentInfo?.companyName],
+      ["Designation", app.employmentInfo?.designation],
+      ["Company Address", app.employmentInfo?.companyAddress],
+      ["Monthly Salary", app.employmentInfo?.monthlySalary],
+      ["Salary In Hand", app.employmentInfo?.salaryInHand],
+      ["Total Experience", app.employmentInfo?.totalExperience],
+      ["Current Experience", app.employmentInfo?.currentExperience],
+    ])}
+    ${infoSection("Business", [
+      ["Business Name", app.businessInfo?.businessName],
+      ["Business Address", app.businessInfo?.businessAddress],
+      ["GST Number", app.businessInfo?.gstNumber],
+      ["Annual Turnover", app.businessInfo?.annualTurnoverInINR],
+      ["Business Vintage", app.businessInfo?.businessVintage || app.businessInfo?.yearsInBusiness],
+    ])}
+    ${infoSection("Property", [
+      ["Property Type", app.propertyInfo?.propertyType],
+      ["Property Value", formatInr(app.propertyInfo?.propertyValue)],
+      ["Property Address", app.propertyInfo?.propertyAddress],
+    ])}
+    ${infoSection("Co-Applicant", [["Phone", app.coApplicant?.phone]])}
+    ${infoSection(
+      "References",
+      (app.references || []).map((r, i) => [`Reference ${i + 1}`, `${r.name} – ${r.phone}`])
+    )}
+    ${docsHtml}
+    ${infoSection("Sent By", [
+      ["Name", senderName],
+      ["Phone", sender?.phone],
+      ["Email", sender?.email],
+    ])}
+  `;
+
+  await sendMail({
+    to,
+    cc: cc || undefined,
+    replyTo: sender?.email || undefined,
+    subject: `File Login – ${fullName} – ${app.appNo} – ${app.loanType}${amount ? ` – ${formatInr(amount)}` : ""}`,
+    html: getEmailTemplate(`File Login – ${bankName}`, content),
+    attachments: pkg.attachments,
+  });
+};

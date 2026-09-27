@@ -191,6 +191,23 @@ const ReferenceSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// 🏦 "Send to Bank" email history (customer info + docs emailed to bank RM)
+const BankSendSchema = new mongoose.Schema(
+  {
+    bankId: { type: mongoose.Schema.Types.ObjectId, ref: "BankMaster" },
+    bankName: { type: String },
+    email: { type: String },
+    cc: { type: String },
+    delivery: { type: String, enum: ["ATTACHMENT", "LINKS"] },
+    docsCount: { type: Number, default: 0 },
+    status: { type: String, enum: ["SENT", "FAILED"], default: "SENT" },
+    error: { type: String },
+    sentBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    sentAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 const CoApplicantSchema = new mongoose.Schema(
   {
     phone: { type: String },
@@ -268,6 +285,7 @@ const ApplicationSchema = new mongoose.Schema(
     // Option A: new applications should not start in DRAFT
     status: { type: String, enum: APP_STATUSES, default: "SUBMITTED" },
     stageHistory: [StageSchema],
+    bankSends: [BankSendSchema],
     deletedAt: { type: Date },
     isArchived: { type: Boolean, default: false }
   },

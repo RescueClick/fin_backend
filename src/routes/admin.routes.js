@@ -194,6 +194,8 @@ router.post(
         portalLoginId,
         portalPassword,
         portalLink,
+        rmName,
+        rmEmail,
         rsmTypes, // can be string or array from frontend
         serviceablePincodes, // stringified array
       } = req.body || {};
@@ -318,6 +320,8 @@ router.post(
         portalLoginId,
         portalPassword,
         portalLink,
+        rmName: String(rmName || "").trim(),
+        rmEmail: String(rmEmail || "").trim().toLowerCase(),
         rsmTypes: normalizedRsmTypes,
         serviceablePincodes: parsedPincodes,
         createdBy: req.user.sub,
@@ -355,6 +359,8 @@ router.put(
         portalLoginId,
         portalPassword,
         portalLink,
+        rmName,
+        rmEmail,
         rsmTypes,
         serviceablePincodes,
         isActive,
@@ -489,6 +495,8 @@ router.put(
       existing.portalLoginId = nextPortalLoginId;
       existing.portalPassword = nextPortalPassword;
       existing.portalLink = nextPortalLink;
+      if (rmName !== undefined) existing.rmName = String(rmName || "").trim();
+      if (rmEmail !== undefined) existing.rmEmail = String(rmEmail || "").trim().toLowerCase();
       existing.rsmTypes = normalizedRsmTypes;
       existing.serviceablePincodes = nextPincodes;
       existing.updatedBy = req.user.sub;

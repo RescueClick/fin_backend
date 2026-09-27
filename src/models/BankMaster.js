@@ -13,6 +13,10 @@ const bankMasterSchema = new mongoose.Schema(
     portalPassword: { type: String, required: true, trim: true },
     portalLink: { type: String, required: true, trim: true },
 
+    // Bank RM who receives "Send to Bank" emails (customer info + docs)
+    rmName: { type: String, trim: true, default: "" },
+    rmEmail: { type: String, trim: true, lowercase: true, default: "" },
+
     /**
      * Which ASM type(s) can see/use this bank.
      * - PERSONAL

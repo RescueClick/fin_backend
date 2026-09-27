@@ -11,7 +11,12 @@ import { BankRm } from "../models/BankRm.js";
 import { Payout } from "../models/Payout.js";
 import { Incentive } from "../models/Incentive.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
-import { sendUserAccountEmail, sendApplicationStatusEmail } from "../utils/emailService.js";
+import {
+  sendUserAccountEmail,
+  sendApplicationStatusEmail,
+  sendBankRmEmail,
+} from "../utils/emailService.js";
+import { packageApplicationDocs } from "../utils/applicationDocsPackage.js";
 import { sendMail } from "../utils/sendMail.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { emitApplicationStatusChanged } from "../utils/socketEmitter.js";
@@ -996,6 +1001,87 @@ router.get("/applications/:id", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SU
     return res.status(500).json({ message: "Error fetching application details" });
   }
 });
+
+// POST /api/rsm/applications/:id/send-to-bank
+// ASM/RSM manually emails customer info + all docs to the selected bank's RM
+router.post(
+  "/applications/:id/send-to-bank",
+  auth,
+  requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    const { id } = req.params;
+    const { bankId, email, ccMe = true, note } = req.body || {};
+    const to = String(email || "").trim().toLowerCase();
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+      return res.status(400).json({ message: "Valid bank RM email is required" });
+    }
+
+    try {
+      let app = await loadApplicationForRsm(id, req.user.sub);
+      if (!app) {
+        const me = toObjectId(req.user.sub);
+        app = await Application.findOne({ _id: id, $or: [{ asmId: me }, { rsmId: me }] });
+      }
+      if (!app) {
+        return res.status(404).json({ message: "Application not found or not assigned to you" });
+      }
+
+      const bank = bankId ? await BankMaster.findById(bankId).lean() : null;
+      if (bankId && !bank) {
+        return res.status(404).json({ message: "Bank not found" });
+      }
+      const bankName = bank?.bankName || "Bank";
+
+      const sender = await User.findById(req.user.sub)
+        .select("firstName lastName email phone")
+        .lean();
+      const cc = ccMe && sender?.email && sender.email.toLowerCase() !== to ? sender.email : "";
+
+      const record = {
+        bankId: bank?._id,
+        bankName,
+        email: to,
+        cc,
+        sentBy: req.user.sub,
+        sentAt: new Date(),
+      };
+
+      try {
+        const pkg = await packageApplicationDocs(app);
+        await sendBankRmEmail({
+          app: app.toObject ? app.toObject() : app,
+          bankName,
+          rmName: bank?.rmEmail === to ? bank?.rmName : "",
+          to,
+          cc,
+          sender,
+          note: String(note || "").trim(),
+          pkg,
+        });
+        Object.assign(record, {
+          delivery: pkg.delivery,
+          docsCount: pkg.docsCount,
+          status: "SENT",
+        });
+        await Application.updateOne({ _id: app._id }, { $push: { bankSends: record } });
+        return res.json({
+          message: `Sent to ${bankName} (${to})`,
+          bankSend: record,
+          failedDocs: pkg.failed.map((f) => f.docType),
+        });
+      } catch (sendErr) {
+        console.error("Send to bank email failed:", sendErr);
+        Object.assign(record, { status: "FAILED", error: String(sendErr.message || sendErr).slice(0, 300) });
+        await Application.updateOne({ _id: app._id }, { $push: { bankSends: record } });
+        return res.status(502).json({ message: "Email could not be sent. Please try again.", bankSend: record });
+      }
+    } catch (err) {
+      console.error("Send to bank error:", err);
+      return res.status(500).json({ message: "Error sending to bank" });
+    }
+  }
+);
 
 // GET /api/rsm/applications/:id/docs/:docType/download
 // RSM downloads a document from an application

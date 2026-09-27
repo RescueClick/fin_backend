@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
 import { COMPANY_NAME } from "../config/branding.js";
 
-export const sendMail = async ({ to, subject, html }) => {
+export const sendMail = async ({ to, subject, html, cc, replyTo, attachments }) => {
   const EMAIL_USER = String(process.env.EMAIL_USER || "").trim();
   const EMAIL_PASS = String(process.env.EMAIL_PASS || "").trim();
 
@@ -44,16 +44,21 @@ export const sendMail = async ({ to, subject, html }) => {
     socketTimeout: 30000,
   };
 
+  const message = {
+    from: `"${COMPANY_NAME}" <${EMAIL_USER}>`,
+    to,
+    subject,
+    html,
+    ...(cc ? { cc } : {}),
+    ...(replyTo ? { replyTo } : {}),
+    ...(Array.isArray(attachments) && attachments.length ? { attachments } : {}),
+  };
+
   // Try primary config first (port 587 - known to work)
   try {
     const transporter = nodemailer.createTransport(primaryConfig);
 
-    const info = await transporter.sendMail({
-      from: `"${COMPANY_NAME}" <${EMAIL_USER}>`,
-      to,
-      subject,
-      html,
-    });
+    const info = await transporter.sendMail(message);
 
     console.log(`✅ Email sent successfully to ${to} via port 587 (TLS) - Message ID: ${info.messageId}`);
     return info;
@@ -71,12 +76,7 @@ export const sendMail = async ({ to, subject, html }) => {
         console.log(`🔄 Trying fallback SMTP (port 465)...`);
         const transporter = nodemailer.createTransport(fallbackConfig);
 
-        const info = await transporter.sendMail({
-          from: `"${COMPANY_NAME}" <${EMAIL_USER}>`,
-          to,
-          subject,
-          html,
-        });
+        const info = await transporter.sendMail(message);
 
         console.log(`✅ Email sent successfully to ${to} via port 465 (SSL) - Message ID: ${info.messageId}`);
         return info;
