@@ -3089,6 +3089,7 @@ router.get(
         pendingPartners,
         totalCustomers,
         totalCustomerAccounts,
+        periodCustomers: isDateFiltered ? customerIdsInPeriod.size : totalCustomers,
 
         // Period user activity
         newPartnersInPeriod,
