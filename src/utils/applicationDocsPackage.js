@@ -1,15 +1,13 @@
 import fs from "fs";
 import path from "path";
 import axios from "axios";
-import archiver from "archiver";
 import mime from "mime-types";
-import { PassThrough } from "stream";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { s3, BUCKET_NAME } from "../config/s3.js";
 import { extractS3KeyFromUrl } from "./docUploadLimits.js";
 
-// Hostinger SMTP rejects messages above ~25 MB; base64 adds ~33%, so keep the zip under 18 MB.
+// Hostinger SMTP rejects messages above ~25 MB; base64 adds ~33%, so keep each email's attachments under 18 MB.
 export const MAX_ATTACHMENT_BYTES = 18 * 1024 * 1024;
 // SigV4 presigned URLs cannot exceed 7 days.
 const LINK_EXPIRY_SECONDS = 7 * 24 * 60 * 60;
@@ -54,19 +52,6 @@ const fetchDocBuffer = async (url) => {
   return { buffer, contentType: mime.lookup(filePath) || undefined };
 };
 
-const zipFiles = (files) =>
-  new Promise((resolve, reject) => {
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    const sink = new PassThrough();
-    const chunks = [];
-    sink.on("data", (c) => chunks.push(c));
-    sink.on("end", () => resolve(Buffer.concat(chunks)));
-    archive.on("error", reject);
-    archive.pipe(sink);
-    files.forEach((f) => archive.append(f.buffer, { name: f.name }));
-    archive.finalize();
-  });
-
 const uniqueName = (name, used) => {
   if (!used.has(name)) {
     used.add(name);
@@ -81,15 +66,31 @@ const uniqueName = (name, used) => {
   return next;
 };
 
+const downloadLink = async (url) => {
+  if (isS3Url(url)) {
+    return getSignedUrl(
+      s3,
+      new GetObjectCommand({ Bucket: BUCKET_NAME, Key: extractS3KeyFromUrl(url) }),
+      { expiresIn: LINK_EXPIRY_SECONDS }
+    );
+  }
+  const backendUrl = (process.env.BACKEND_URL || "").replace(/\/+$/, "");
+  if (!/^https?:\/\//.test(url) && backendUrl) {
+    return `${backendUrl}/${url.replace(/^\/+/, "")}`;
+  }
+  return url;
+};
+
 /**
- * Packages all application docs for emailing.
- * Returns either a single zip attachment or a list of expiring download links.
+ * Packages all application docs for emailing as individual attachments.
+ * Files are grouped into batches that each fit in one email; a single file
+ * too large for any email is sent as an expiring download link instead.
  */
 export async function packageApplicationDocs(app) {
   const docs = (app.docs || []).filter((d) => d?.url && d.status !== "REJECTED");
-  const zipName = `${app.appNo || `APP-${String(app._id).slice(-6)}`}_Documents.zip`;
 
   const files = [];
+  const links = [];
   const failed = [];
   const used = new Set();
 
@@ -97,55 +98,40 @@ export async function packageApplicationDocs(app) {
     const url = resolveDocUrl(doc.url);
     try {
       const { buffer, contentType } = await fetchDocBuffer(url);
+      if (buffer.length > MAX_ATTACHMENT_BYTES) {
+        links.push({ docType: doc.docType, href: await downloadLink(url) });
+        continue;
+      }
       files.push({
         docType: doc.docType,
-        url,
-        buffer,
-        name: uniqueName(`${doc.docType}${extFor(url, contentType)}`, used),
+        filename: uniqueName(`${doc.docType}${extFor(url, contentType)}`, used),
+        content: buffer,
+        ...(contentType ? { contentType } : {}),
       });
     } catch (err) {
       failed.push({ docType: doc.docType, url, error: err.message });
     }
   }
 
-  const totalRaw = files.reduce((sum, f) => sum + f.buffer.length, 0);
-  if (files.length && totalRaw <= MAX_ATTACHMENT_BYTES * 1.5) {
-    const zip = await zipFiles(files);
-    if (zip.length <= MAX_ATTACHMENT_BYTES) {
-      return {
-        delivery: "ATTACHMENT",
-        docsCount: files.length,
-        docTypes: files.map((f) => f.docType),
-        attachments: [{ filename: zipName, content: zip, contentType: "application/zip" }],
-        links: [],
-        failed,
-      };
+  const batches = [];
+  let current = [];
+  let currentSize = 0;
+  for (const f of files) {
+    if (current.length && currentSize + f.content.length > MAX_ATTACHMENT_BYTES) {
+      batches.push(current);
+      current = [];
+      currentSize = 0;
     }
+    current.push(f);
+    currentSize += f.content.length;
   }
-
-  const backendUrl = (process.env.BACKEND_URL || "").replace(/\/+$/, "");
-  const links = [];
-  for (const doc of docs) {
-    const url = resolveDocUrl(doc.url);
-    let href = url;
-    if (isS3Url(url)) {
-      href = await getSignedUrl(
-        s3,
-        new GetObjectCommand({ Bucket: BUCKET_NAME, Key: extractS3KeyFromUrl(url) }),
-        { expiresIn: LINK_EXPIRY_SECONDS }
-      );
-    } else if (!/^https?:\/\//.test(url) && backendUrl) {
-      href = `${backendUrl}/${url.replace(/^\/+/, "")}`;
-    }
-    links.push({ docType: doc.docType, href });
-  }
+  if (current.length) batches.push(current);
 
   return {
-    delivery: "LINKS",
-    docsCount: links.length,
-    docTypes: links.map((l) => l.docType),
-    attachments: [],
+    delivery: files.length || !links.length ? "ATTACHMENT" : "LINKS",
+    docsCount: files.length + links.length,
+    batches,
     links,
-    failed: [],
+    failed,
   };
 }

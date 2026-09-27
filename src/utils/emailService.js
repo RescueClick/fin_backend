@@ -1094,7 +1094,8 @@ const infoSection = (title, rows) => {
 
 /**
  * Email customer info + all documents to a bank RM ("Send to Bank").
- * `pkg` comes from packageApplicationDocs(): zip attachment or download links.
+ * `pkg` comes from packageApplicationDocs(): each document is attached as its own file;
+ * if they don't fit in one email, the rest follow in "Part 2 of N" emails.
  */
 export const sendBankRmEmail = async ({ app, bankName, rmName, to, cc, sender, note, pkg }) => {
   const c = app.customer || {};
@@ -1102,22 +1103,35 @@ export const sendBankRmEmail = async ({ app, bankName, rmName, to, cc, sender, n
   const amount = c.loanAmount || app.approvedLoanAmount;
   const senderName = [sender?.firstName, sender?.lastName].filter(Boolean).join(" ");
 
-  const docsHtml =
-    pkg.delivery === "ATTACHMENT"
-      ? `<div class="alert alert-info"><strong>Documents:</strong> ${pkg.docsCount} file(s) attached as <b>${escapeHtml(
-          pkg.attachments[0]?.filename
-        )}</b> (${escapeHtml(pkg.docTypes.join(", "))}).</div>`
-      : `<div class="info-box">
-          <h3 style="margin-top: 0; color: #12B99C;">Documents (links valid for 7 days)</h3>
-          ${pkg.links
-            .map(
-              (l) =>
-                `<div class="info-row"><span class="label">${escapeHtml(l.docType)}:</span> <a href="${escapeHtml(
-                  l.href
-                )}">Download</a></div>`
-            )
-            .join("")}
-        </div>`;
+  const batches = pkg.batches.length ? pkg.batches : [[]];
+  const totalParts = batches.length;
+  const baseSubject = `File Login – ${fullName} – ${app.appNo} – ${app.loanType}${amount ? ` – ${formatInr(amount)}` : ""}`;
+
+  const attachedListHtml = (files) =>
+    files.length
+      ? `<div class="alert alert-info"><strong>Attached documents (${files.length}):</strong><br/>${files
+          .map((f) => escapeHtml(f.filename))
+          .join("<br/>")}</div>`
+      : "";
+
+  const linksHtml = pkg.links.length
+    ? `<div class="info-box">
+        <h3 style="margin-top: 0; color: #12B99C;">Large documents (download links valid for 7 days)</h3>
+        ${pkg.links
+          .map(
+            (l) =>
+              `<div class="info-row"><span class="label">${escapeHtml(l.docType)}:</span> <a href="${escapeHtml(
+                l.href
+              )}">Download</a></div>`
+          )
+          .join("")}
+      </div>`
+    : "";
+
+  const partNote =
+    totalParts > 1
+      ? `<div class="alert alert-info">Documents are sent in <b>${totalParts} emails</b> because of email size limits. This is part 1 of ${totalParts}.</div>`
+      : "";
 
   const content = `
     <h2>Dear ${escapeHtml(rmName || `${bankName} Team`)},</h2>
@@ -1173,7 +1187,9 @@ export const sendBankRmEmail = async ({ app, bankName, rmName, to, cc, sender, n
       "References",
       (app.references || []).map((r, i) => [`Reference ${i + 1}`, `${r.name} – ${r.phone}`])
     )}
-    ${docsHtml}
+    ${partNote}
+    ${attachedListHtml(batches[0])}
+    ${linksHtml}
     ${infoSection("Sent By", [
       ["Name", senderName],
       ["Phone", sender?.phone],
@@ -1181,12 +1197,29 @@ export const sendBankRmEmail = async ({ app, bankName, rmName, to, cc, sender, n
     ])}
   `;
 
-  await sendMail({
-    to,
-    cc: cc || undefined,
-    replyTo: sender?.email || undefined,
-    subject: `File Login – ${fullName} – ${app.appNo} – ${app.loanType}${amount ? ` – ${formatInr(amount)}` : ""}`,
-    html: getEmailTemplate(`File Login – ${bankName}`, content),
-    attachments: pkg.attachments,
-  });
+  for (let i = 0; i < totalParts; i++) {
+    const part = i + 1;
+    const html =
+      part === 1
+        ? content
+        : `
+    <h2>Dear ${escapeHtml(rmName || `${bankName} Team`)},</h2>
+    <p>Remaining documents for <b>${escapeHtml(fullName)}</b> (Application No <b>${escapeHtml(app.appNo)}</b>).
+       This is part ${part} of ${totalParts}; customer details are in part 1.</p>
+    ${attachedListHtml(batches[i])}
+  `;
+
+    await sendMail({
+      to,
+      cc: cc || undefined,
+      replyTo: sender?.email || undefined,
+      subject: totalParts > 1 ? `${baseSubject} (Part ${part} of ${totalParts})` : baseSubject,
+      html: getEmailTemplate(`File Login – ${bankName}`, html),
+      attachments: batches[i].map(({ filename, content: fileContent, contentType }) => ({
+        filename,
+        content: fileContent,
+        ...(contentType ? { contentType } : {}),
+      })),
+    });
+  }
 };
