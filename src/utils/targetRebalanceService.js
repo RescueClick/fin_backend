@@ -5,6 +5,9 @@ import { ROLES } from "../config/roles.js";
 
 const num = (v) => Number(v || 0);
 
+// Superseded by salesTargetService (Admin → RSM → ASM → RM, manual splits, no partner targets).
+const legacyRebalanceEnabled = () => process.env.LEGACY_TARGET_REBALANCE === "true";
+
 export async function deriveCurrentTargetContext(month, year) {
   const [asmTargets, partnerTargets, policy] = await Promise.all([
     Target.find({ role: ROLES.ASM, month, year }).lean(),
@@ -36,6 +39,7 @@ export async function rebalanceHierarchyTargetsReplace({
   partnerFileCountTarget,
   assignedBy,
 }) {
+  if (!legacyRebalanceEnabled()) return { assignments: [], distributionSummary: null };
   const targetMonth = Number(month);
   const targetYear = Number(year);
   const totalTarget = num(totalCompanyTarget);
@@ -318,6 +322,7 @@ export async function rebalanceHierarchyTargetsAdd({
   partnerFileCountTarget,
   assignedBy,
 }) {
+  if (!legacyRebalanceEnabled()) return { assignments: [], distributionSummary: null };
   const targetMonth = Number(month);
   const targetYear = Number(year);
   const totalTarget = num(totalCompanyTarget);

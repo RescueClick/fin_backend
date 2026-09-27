@@ -21,6 +21,8 @@ import referralBannerRoutes from "./src/routes/referralBanner.routes.js";
 import cibilRoutes from "./src/routes/cibil.routes.js";
 import chatRoutes from "./src/routes/chat.routes.js";
 import leadRoutes from "./src/routes/lead.routes.js";
+import salesTargetRoutes from "./src/routes/salesTarget.routes.js";
+import { lockMonth } from "./src/utils/salesTargetService.js";
 import qrPublicRoutes, {
   adminQrRouter,
   partnerQrRouter,
@@ -193,6 +195,7 @@ app.use("/api/referral-banners", referralBannerRoutes); // Referral benefit bann
 app.use("/api/cibil", cibilRoutes); // CIBIL checks and payments
 app.use("/api/chat", chatRoutes); // Internal Staff Chat (Admin, ASM, RSM, RM)
 app.use("/api/leads", leadRoutes); // Lead capture & RM follow-up
+app.use("/api/targets", salesTargetRoutes); // Admin → RSM → ASM → RM monthly targets
 
 
 
@@ -264,6 +267,19 @@ connectDB(process.env.MONGO_URI)
         await Notification.cleanupOldNotifications(30); // Keep notifications for 30 days
       } catch (error) {
         console.error("Error cleaning up old notifications:", error);
+      }
+    });
+
+    // Freeze last month's sales target achievement on the 1st
+    cron.schedule("30 0 1 * *", async () => {
+      const now = new Date();
+      const month = now.getMonth() === 0 ? 12 : now.getMonth();
+      const year = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+      try {
+        const { locked } = await lockMonth({ month, year });
+        console.log(`Locked ${locked} sales targets for ${month}/${year}`);
+      } catch (error) {
+        console.error("Error locking sales targets:", error);
       }
     });
   })
