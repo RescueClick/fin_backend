@@ -775,7 +775,7 @@ router.post("/reset-password/request", async (req, res) => {
     const { email } = req.body || {};
     if (!email) return res.status(400).json({ message: "Email required" });
 
-    const user = await User.findOne({ email: email.toLowerCase() });
+    const user = await User.findOne({ email: String(email).trim().toLowerCase() });
     if (!user) {
       return res.json({ message: "If an account exists, reset link sent" });
     }
@@ -788,7 +788,7 @@ router.post("/reset-password/request", async (req, res) => {
     await user.save();
 
     // Reset link only needs token + email
-    const resetLink = `${getClientBaseUrl()}/reset-password/confirm?token=${resetToken}&email=${user.email}`;
+    const resetLink = `${getClientBaseUrl()}/reset-password/confirm?token=${resetToken}&email=${encodeURIComponent(user.email)}`;
 
     // Ensure mailer is configured to prevent 500s on missing env
     if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
@@ -807,7 +807,7 @@ router.post("/reset-password/request", async (req, res) => {
         subject: "Password Reset Request",
         html: `
           <h2>Password Reset</h2>
-          <p>Hello ${user.name || "User"},</p>
+          <p>Hello ${user.firstName || "User"},</p>
           <p>Click below to reset your password:</p>
           <a href="${resetLink}">Reset Password</a>
           <p>If you didn’t request this, ignore this email.</p>
@@ -843,7 +843,7 @@ router.post("/reset-password/confirm/:token", async (req, res) => {
 
     // Find user by email + token
     const user = await User.findOne({
-      email: email.toLowerCase(),
+      email: String(email).trim().toLowerCase(),
       resetToken: token,
       resetTokenExpiry: { $gt: Date.now() },
     });

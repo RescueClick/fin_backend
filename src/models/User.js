@@ -157,6 +157,10 @@ const userSchema = new mongoose.Schema(
     otpCode:   { type: String },
     otpExpiry: { type: Date },
 
+    /** Token-link password reset (web dashboard) */
+    resetToken: { type: String },
+    resetTokenExpiry: { type: Date },
+
     /** Pending email change (dual verification via old+new email links) */
     pendingEmail: { type: String, lowercase: true, sparse: true, trim: true },
     emailChangeToken: { type: String, sparse: true }, // legacy

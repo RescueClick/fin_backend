@@ -192,6 +192,27 @@ router.get("/check-customer", auth, requireRole(ROLES.PARTNER), async (req, res)
 
     const existingUser = await User.findOne({ $or: query });
 
+    // Customer created by this partner's own in-progress lead (early doc upload / step 1 capture)
+    // must not block the partner from continuing the same form.
+    if (existingUser && existingUser.role === ROLES.CUSTOMER) {
+      const ownOpenLead = await Application.findOne({
+        customerId: existingUser._id,
+        partnerId: req.user.sub,
+        status: { $in: ["LEAD", "DRAFT", "DOC_INCOMPLETE"] },
+        isArchived: { $ne: true },
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      })
+        .select("_id loanType status")
+        .lean();
+      if (ownOpenLead) {
+        return res.json({
+          exists: false,
+          resumableApplicationId: ownOpenLead._id,
+          resumableLoanType: ownOpenLead.loanType,
+        });
+      }
+    }
+
     if (existingUser) {
       const matchField = email && existingUser.email === String(email).trim().toLowerCase() ? "Email" : "Phone number";
       return res.json({
@@ -4690,7 +4711,47 @@ router.post(
       // (RM will review and change status accordingly)
       // If document was UPDATED and partner re-uploads, it stays UPDATED for RM review
 
+      const isEarlyLeadUpload = ["LEAD", "DRAFT"].includes(application.status);
+      const isFirstEarlyDoc =
+        isEarlyLeadUpload &&
+        !isUpdate &&
+        application.docs.filter((d) => d?.url).length === 1;
+
+      if (application.status === "LEAD") {
+        application.formProgress = {
+          ...(application.formProgress?.toObject?.() || application.formProgress || {}),
+          reachedDocuments: true,
+          updatedAt: now,
+        };
+        const follow = application.leadFollowUp || {};
+        if (!follow.status || follow.status === "NEW") {
+          application.leadFollowUp = {
+            ...(follow.toObject?.() || follow),
+            status: "DOCUMENTS_PENDING",
+            remarks: follow.remarks || "Partner started uploading documents (form not submitted yet)",
+            lastContactedAt: follow.lastContactedAt || now,
+          };
+        }
+      }
+
       await application.save();
+
+      if (isFirstEarlyDoc && application.rmId) {
+        const custName = `${application.customer?.firstName || ""} ${application.customer?.lastName || ""}`.trim() || "Customer";
+        createNotification(String(application.rmId), {
+          title: `Documents uploaded: ${custName}`,
+          message: `Partner uploaded ${docType.toUpperCase()} for ${application.loanType} lead ${application.appNo}. Form is not submitted yet — you can follow up and view the documents.`,
+          type: "application",
+          meta: {
+            applicationId: application._id,
+            appNo: application.appNo,
+            customerName: custName,
+            phone: application.customer?.phone || "",
+          },
+        }).catch((notifErr) =>
+          console.warn("Could not notify RM of early document upload:", notifErr.message)
+        );
+      }
 
       console.log('Document uploaded successfully:', {
         docType: newDoc.docType,
