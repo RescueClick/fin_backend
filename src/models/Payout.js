@@ -33,6 +33,16 @@ const payoutSchema = new mongoose.Schema(
     payoutPercentage: {
       type: Number,
     }, // Commission rate % on loan
+    // Internal: commission % DhanSource receives from the bank. Hidden by default so
+    // partner-facing queries never return it; admin queries must select it explicitly.
+    companyPercentage: {
+      type: Number,
+      select: false,
+    },
+    companyRevenue: {
+      type: Number,
+      select: false,
+    },
     tdsApplicable: {
       type: Boolean,
       default: true,

@@ -2896,6 +2896,44 @@ router.get(
         });
       }
 
+      // DhanSource revenue = bank commission % entered by admin on each loan payout,
+      // attributed to the month the loan was disbursed.
+      const revenuePayouts = await Payout.find({
+        application: { $ne: null },
+        companyRevenue: { $ne: null },
+      })
+        .select("application companyRevenue grossAmount amount")
+        .lean();
+      const revenueByApp = new Map();
+      revenuePayouts.forEach((p) => {
+        revenueByApp.set(p.application.toString(), {
+          revenue: Number(p.companyRevenue) || 0,
+          partnerCost: Number(p.grossAmount) || Number(p.amount) || 0,
+        });
+      });
+
+      let allTimeCompanyRevenue = 0;
+      let allTimeRevenuePartnerCost = 0;
+      let periodCompanyRevenue = 0;
+      let periodRevenuePartnerCost = 0;
+      let periodLoansMissingCompanyPct = 0;
+
+      allApps.forEach((app) => {
+        if (String(app.status || "").toUpperCase() !== "DISBURSED") return;
+        const rev = revenueByApp.get(app._id.toString());
+        const inPeriod = !isDateFiltered || isDateInRange(getDisbursedAt(app), startDate, endDate);
+        if (rev) {
+          allTimeCompanyRevenue += rev.revenue;
+          allTimeRevenuePartnerCost += rev.partnerCost;
+          if (inPeriod) {
+            periodCompanyRevenue += rev.revenue;
+            periodRevenuePartnerCost += rev.partnerCost;
+          }
+        } else if (inPeriod) {
+          periodLoansMissingCompanyPct += 1;
+        }
+      });
+
       // Calculate milestone cash bonus liability unlocked under active slabs
       const activeSlabs = await getActiveIncentiveSlabs();
       let monthlyBonusUnlocked = 0;
@@ -3028,10 +3066,20 @@ router.get(
       // Period user registrations
       let newPartnersInPeriod = 0;
       let newCustomersInPeriod = 0;
+      let newASMInPeriod = totalASM;
+      let newRMInPeriod = totalRM;
+      let newRSMInPeriod = totalRSM;
       if (isDateFiltered) {
+        const createdInPeriod = { $gte: startDate, $lt: endDate };
+        [newASMInPeriod, newRMInPeriod, newRSMInPeriod] = await Promise.all([
+          User.countDocuments({ role: ROLES.ASM, createdAt: createdInPeriod, ...userBase }),
+          User.countDocuments({ role: ROLES.RM, createdAt: createdInPeriod, ...userBase }),
+          User.countDocuments({ role: ROLES.RSM, createdAt: createdInPeriod, ...userBase }),
+        ]);
         newPartnersInPeriod = await User.countDocuments({
           role: ROLES.PARTNER,
-          createdAt: { $gte: startDate, $lt: endDate },
+          status: { $ne: "PENDING" },
+          createdAt: createdInPeriod,
           ...userBase,
         });
         newCustomersInPeriod = await User.countDocuments({
@@ -3066,6 +3114,13 @@ router.get(
         allTimeRevenue,
         monthlyRevenue: periodRevenue,
 
+        // DhanSource earnings (bank commission) and net after partner commission
+        companyRevenue: periodCompanyRevenue,
+        companyNetRevenue: periodCompanyRevenue - periodRevenuePartnerCost,
+        allTimeCompanyRevenue,
+        allTimeCompanyNetRevenue: allTimeCompanyRevenue - allTimeRevenuePartnerCost,
+        loansMissingCompanyPct: periodLoansMissingCompanyPct,
+
         // Bonus unlocked
         monthlyBonusUnlocked,
         partnersWithBonus,
@@ -3094,6 +3149,9 @@ router.get(
         // Period user activity
         newPartnersInPeriod,
         newCustomersInPeriod,
+        newASMInPeriod,
+        newRMInPeriod,
+        newRSMInPeriod,
         activePartnersInPeriod: partnerIdsInPeriod.size,
 
         // All-Time metrics for reference
@@ -6070,6 +6128,8 @@ function formatPayoutApplicationRow(app, payout, isDoneEndpoint = false) {
     payOutStatus: payout?.payOutStatus || (isDoneEndpoint ? "DONE" : "PENDING"),
     payoutAmount: netAmount || payoutAmount,
     payoutPercentage,
+    companyPercentage: payout?.companyPercentage != null ? Number(payout.companyPercentage) : null,
+    companyRevenue: payout?.companyRevenue != null ? Number(payout.companyRevenue) : null,
     grossAmount,
     tdsApplicable,
     tdsSection,
@@ -6133,7 +6193,7 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.SUPER_ADMIN), a
 
     const appIds = applications.map((app) => app._id);
     const payouts = await Payout.find({ application: { $in: appIds } })
-      .select("application amount grossAmount payoutPercentage tdsApplicable tdsSection tdsPercentage tdsAmount netAmount invoiceNumber invoiceDate invoiceSentAt invoiceSentTo invoiceNotes payOutStatus note")
+      .select("application amount grossAmount payoutPercentage companyPercentage companyRevenue tdsApplicable tdsSection tdsPercentage tdsAmount netAmount invoiceNumber invoiceDate invoiceSentAt invoiceSentTo invoiceNotes payOutStatus note")
       .lean();
 
     const doneAppIds = new Set(
@@ -6180,7 +6240,7 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.SUPER_ADMIN), asyn
       application: { $in: appIds },
       payOutStatus: "DONE",
     })
-      .select("application amount grossAmount payoutPercentage tdsApplicable tdsSection tdsPercentage tdsAmount netAmount invoiceNumber invoiceDate invoiceSentAt invoiceSentTo invoiceNotes payOutStatus note")
+      .select("application amount grossAmount payoutPercentage companyPercentage companyRevenue tdsApplicable tdsSection tdsPercentage tdsAmount netAmount invoiceNumber invoiceDate invoiceSentAt invoiceSentTo invoiceNotes payOutStatus note")
       .lean();
 
     const doneMap = {};
@@ -6225,7 +6285,9 @@ router.get("/application/:applicationId/payout-detail", auth, requireRole(ROLES.
       return res.status(404).json({ message: "Application not found" });
     }
 
-    const payout = await Payout.findOne({ application: applicationId }).lean();
+    const payout = await Payout.findOne({ application: applicationId })
+      .select("+companyPercentage +companyRevenue")
+      .lean();
     const formatted = formatPayoutApplicationRow(app, payout);
 
     return res.json({
@@ -6332,6 +6394,7 @@ router.post("/set-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
       invoiceDate: inputInvoiceDate,
       invoiceNotes: inputInvoiceNotes,
       sendInvoiceEmail: inputSendInvoiceEmail,
+      companyPercentage: inputCompanyPercentage,
       note,
       payOutStatus,
     } = req.body;
@@ -6389,6 +6452,14 @@ router.post("/set-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
     const finalNetAmt = inputNetAmount != null ? Number(inputNetAmount) : (calc.netAmount || finalGross);
     const finalPct = payoutPercentage != null ? Number(payoutPercentage) : calc.payoutPercentage;
 
+    const hasCompanyPct =
+      inputCompanyPercentage !== undefined &&
+      inputCompanyPercentage !== null &&
+      inputCompanyPercentage !== "" &&
+      !isNaN(Number(inputCompanyPercentage));
+    const companyPct = hasCompanyPct ? Number(inputCompanyPercentage) : null;
+    const companyRev = hasCompanyPct ? Number(((approved * companyPct) / 100).toFixed(2)) : null;
+
     const appNo = application.appNo || (application._id ? `TLF${application._id.toString().slice(-4).toUpperCase()}` : "APP");
 
     // Check if payout already exists
@@ -6415,6 +6486,10 @@ router.post("/set-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
       payout.invoiceNumber = invoiceNum;
       payout.invoiceDate = invoiceDt;
       payout.invoiceNotes = invoiceNt;
+      if (hasCompanyPct) {
+        payout.companyPercentage = companyPct;
+        payout.companyRevenue = companyRev;
+      }
       if (note !== undefined) {
         payout.note = note;
       }
@@ -6438,6 +6513,7 @@ router.post("/set-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
         invoiceNumber: invoiceNum,
         invoiceDate: invoiceDt,
         invoiceNotes: invoiceNt,
+        ...(hasCompanyPct ? { companyPercentage: companyPct, companyRevenue: companyRev } : {}),
         note: note || "",
         payOutStatus:
           payOutStatus && ["PENDING", "DONE", "REJECTED"].includes(payOutStatus)
