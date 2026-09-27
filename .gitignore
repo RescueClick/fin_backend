@@ -1,3 +1,18 @@
 node_modules/
 .env
 uploads/
+# Local one-off scripts
+scratch/audit_partners_without_rm.js
+scratch/audit_rsm_partner_rmname.js
+scratch/count_suspended_partners.cjs
+scratch/dry_run_assign_hl_asm.cjs
+scratch/execute_assign_hl_asm.cjs
+scratch/explain_partner_count_gap.cjs
+scratch/list_superadmin_partners.js
+scratch/move_placeholder_partners_to_pending.js
+scratch/partner_total_recipes.cjs
+scratch/per_rm_partner_counts.cjs
+scratch/smoke_asm_rsm.cjs
+scratch/test_query_rms.cjs
+scratch/verify_partner_rmname_fix.js
+scratch/verify_suspended_soft_deleted.cjs
