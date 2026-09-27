@@ -40,6 +40,7 @@ import {
 } from "../utils/asmHierarchy.js";
 import { loanTypesForAsmType } from "../utils/rmRsmHierarchy.js";
 import { parseDashboardPeriod } from "../utils/dashboardPeriod.js";
+import { computeDashboardFileStats } from "../utils/dashboardFileStats.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
@@ -994,6 +995,11 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
     }
     const totalRevenue = period.isFiltered ? periodRevenue : allTimeRevenue;
 
+    const fileStats = await computeDashboardFileStats(appAsmMatch, period, {
+      partners,
+      subordinates: rsms,
+    });
+
     // Avg rating of partners
     const ratings = partners.map((p) => p.rating || 0);
     const avgRating = ratings.length
@@ -1172,6 +1178,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADM
         disbursedApplications,
         rejectedApplications,
       },
+      fileStats,
       filter: {
         year: period.year,
         month: period.month,

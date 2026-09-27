@@ -54,6 +54,7 @@ import {
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { parseDashboardPeriod } from "../utils/dashboardPeriod.js";
+import { computeDashboardFileStats } from "../utils/dashboardFileStats.js";
 import {
   parseFollowUpPeriod,
   latestFollowUpsByTargets,
@@ -1438,6 +1439,12 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
     }
     const totalRevenue = period.isFiltered ? periodRevenue : allTimeRevenue;
 
+    const fileStats = await computeDashboardFileStats(appScope, period, {
+      partners,
+      subordinates: rsm.role === ROLES.RSM ? asms : rms,
+      disbursedScope: disbursedMatch,
+    });
+
     // Avg rating of partners
     const ratings = partners.map((p) => p.rating || 0);
     const avgRating = ratings.length
@@ -1633,6 +1640,7 @@ router.get("/dashboard", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADM
         disbursedApplications,
         rejectedApplications,
       },
+      fileStats,
       filter: {
         year: period.year,
         month: period.month,

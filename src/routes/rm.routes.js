@@ -54,6 +54,7 @@ import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { parseDashboardPeriod } from "../utils/dashboardPeriod.js";
+import { computeDashboardFileStats } from "../utils/dashboardFileStats.js";
 import axios from "axios";
 import { emitDocumentStatusChanged, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
 import { getReferralWebBaseUrl, appendPartnerShareUtm } from "../config/branding.js";
@@ -1986,6 +1987,11 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
     }
     const totalRevenue = period.isFiltered ? periodRevenue : allTimeRevenue;
 
+    const fileStats = await computeDashboardFileStats(activeApplicationsFilter(rmScopeFilter), period, {
+      partners,
+      disbursedScope: disbursedMatch,
+    });
+
     // Avg partner rating
     const ratings = partners.map((p) => p.rating || 0);
     const avgRating = ratings.length
@@ -2242,6 +2248,7 @@ router.get("/dashboard", auth, requireRole(ROLES.RM), async (req, res) => {
         partnersNeedingMoreInfo,
         formsFilledTotal: totalApplications,
       },
+      fileStats,
       filter: {
         year: period.year,
         month: period.month,
