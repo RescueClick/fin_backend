@@ -58,6 +58,39 @@ function cleanEmail(val) {
 /** Default company partner code */
 const DEFAULT_COMPANY_PARTNER_CODE = "PT-SG772096";
 
+/** Company partner for public leads when the form has no valid partner code. Never "first partner in the database". */
+async function resolveDefaultCompanyPartner() {
+  try {
+    const { Config } = await import("../models/Config.js");
+    const doc = await Config.findOne({ key: "PUBLIC_LOAN_DEFAULT_PARTNER_CODE" }).lean();
+    if (doc?.value?.partnerId && mongoose.Types.ObjectId.isValid(String(doc.value.partnerId))) {
+      const p = await User.findOne({
+        _id: doc.value.partnerId,
+        role: ROLES.PARTNER,
+        status: "ACTIVE",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      });
+      if (p) return p;
+    }
+    if (doc?.value?.partnerCode) {
+      const p = await User.findOne({
+        partnerCode: String(doc.value.partnerCode).trim(),
+        role: ROLES.PARTNER,
+        status: "ACTIVE",
+      });
+      if (p) return p;
+    }
+  } catch (err) {
+    console.error("resolveDefaultCompanyPartner:", err?.message);
+  }
+
+  return User.findOne({
+    partnerCode: process.env.DEFAULT_COMPANY_PARTNER_CODE || DEFAULT_COMPANY_PARTNER_CODE,
+    role: ROLES.PARTNER,
+    status: "ACTIVE",
+  });
+}
+
 /**
  * POST /api/leads/capture-step1
  * Captures Step 1 (Personal Info + Financial Info) as a LEAD immediately when user clicks "Next".
@@ -140,29 +173,20 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
     } else if (partnerReferralCode && typeof partnerReferralCode === "string" && partnerReferralCode.trim()) {
       leadSource = "PUBLIC_REFERRAL";
       const cleanRef = partnerReferralCode.trim();
+      const codeMatch = new RegExp(`^${cleanRef.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
       assignedPartner = await User.findOne({
-        $or: [{ partnerCode: cleanRef }, { referralCode: cleanRef }],
         role: ROLES.PARTNER,
         status: "ACTIVE",
-        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        $and: [
+          { $or: [{ partnerCode: codeMatch }, { referralCode: codeMatch }] },
+          { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
+        ],
       });
     }
 
-    // If partner not resolved yet, fallback to default company partner PT-SG772096
+    // No code, or the code does not match an active partner: company default (admin setting), not the first partner in the database.
     if (!assignedPartner) {
-      assignedPartner = await User.findOne({
-        partnerCode: DEFAULT_COMPANY_PARTNER_CODE,
-        role: ROLES.PARTNER,
-      });
-
-      // If specific code not found, fallback to any active partner with an RM
-      if (!assignedPartner) {
-        assignedPartner = await User.findOne({
-          role: ROLES.PARTNER,
-          rmId: { $ne: null },
-          status: "ACTIVE",
-        });
-      }
+      assignedPartner = await resolveDefaultCompanyPartner();
     }
 
     if (!assignedPartner) {
