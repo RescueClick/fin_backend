@@ -52,7 +52,7 @@ import {
   rmReportingLineMatch,
 } from "../utils/rmRsmHierarchy.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
-import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
+import { getDisbursedAt, getRmIdsUnderRsm, isDateInRange } from "../utils/asmHierarchy.js";
 import { parseDashboardPeriod } from "../utils/dashboardPeriod.js";
 import { computeDashboardFileStats } from "../utils/dashboardFileStats.js";
 import {
@@ -880,7 +880,7 @@ router.get("/applications", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_
     const { status } = req.query;
     const rsmObjectId = toObjectId(rsmId);
 
-    const rsm = await User.findById(rsmId).select("asmType rsmType").lean();
+    const rsm = await User.findById(rsmId).select("role asmType rsmType").lean();
     if (!rsm) {
       return res.status(404).json({ message: "Manager not found" });
     }
@@ -899,20 +899,19 @@ router.get("/applications", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_
     // Fix all rows: missing or wrong asmId vs RM mapping (for completed documents)
     await repairDocCompleteRoutingForRsm(rsmId);
 
-    const eligibleRmIds = await eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm);
+    const eligibleRmIds = rsm.role === ROLES.RSM
+      ? await getRmIdsUnderRsm(rsmObjectId)
+      : await eligibleRmIdsForRsmHierarchy(rsmObjectId, rsmTypeNorm);
     const statusFilter = status && status !== "All"
       ? (RSM_LIST_STATUSES.includes(status) ? { status } : { status: "__NONE__" })
       : { status: { $in: RSM_LIST_STATUSES } };
 
+    // Match the RM's current reporting line. A stored asmId/rsmId can be left
+    // behind after the partner or RM changes, so it must not pull the file
+    // onto the wrong manager.
     const filter = {
       $and: [
-        {
-          $or: [
-            { asmId: rsmObjectId },
-            { rsmId: rsmObjectId },
-            ...(eligibleRmIds.length ? [{ rmId: { $in: eligibleRmIds }, ...loanTypeFilter }] : []),
-          ],
-        },
+        { rmId: { $in: eligibleRmIds } },
         loanTypeFilter,
         statusFilter,
       ],

@@ -6,7 +6,12 @@ import { Application, APP_STATUSES, LOAN_TYPES } from "../models/Application.js"
 import { ROLES } from "../config/roles.js";
 import { verifyAccessToken } from "../utils/jwt.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
-import { resolveSpecializedAsmForLoanType } from "../utils/rmRsmHierarchy.js";
+import {
+  hierarchyFromRm,
+  loanAmountError,
+  RM_HIERARCHY_FIELDS,
+  stampLoanHierarchy,
+} from "../utils/loanFileRules.js";
 import { createNotification } from "../utils/notificationService.js";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
@@ -158,6 +163,10 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
     ).trim();
 
     const loanAmount = Number(customer.loanAmount) || 0;
+    const amountError = loanAmountError(loanAmount);
+    if (amountError) {
+      return res.status(400).json({ success: false, message: amountError });
+    }
 
     // 2. Resolve Partner & Lead Source
     let leadSource = "CUSTOMER_DIRECT";
@@ -196,30 +205,21 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       });
     }
 
-    // 3. Resolve RM, ASM, and RSM Hierarchy
+    // 3. Partner, RM, specialized ASM, and senior RSM stay on one chain.
     let assignedRmId = assignedPartner.rmId || null;
-    let assignedAsmId = null;
-    let assignedRsmId = null;
+    let hierarchy = { rmId: assignedRmId, asmId: null, rsmId: null };
 
     if (assignedRmId) {
-      const rmDoc = await User.findById(assignedRmId)
-        .select("rsmId asmId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
-        .lean();
-
-      if (rmDoc) {
-        assignedAsmId = resolveSpecializedAsmForLoanType(rmDoc, normalizedLoanType);
-        if (normalizedLoanType === "PERSONAL") {
-          assignedRsmId = rmDoc.personalRsmId || rmDoc.rsmId || null;
-        } else if (normalizedLoanType === "BUSINESS") {
-          assignedRsmId = rmDoc.businessRsmId || rmDoc.businessHomeRsmId || rmDoc.rsmId || null;
-        } else {
-          assignedRsmId = rmDoc.homeLapRsmId || rmDoc.businessHomeRsmId || rmDoc.rsmId || null;
-        }
-      }
+      const rmDoc = await User.findById(assignedRmId).select(RM_HIERARCHY_FIELDS).lean();
+      if (rmDoc) hierarchy = hierarchyFromRm(rmDoc, normalizedLoanType);
     } else {
-      // Fallback: assign to first active RM in system
-      const fallbackRm = await User.findOne({ role: ROLES.RM, status: "ACTIVE" }).select("_id").lean();
-      if (fallbackRm) assignedRmId = fallbackRm._id;
+      const fallbackRm = await User.findOne({ role: ROLES.RM, status: "ACTIVE" })
+        .select(RM_HIERARCHY_FIELDS)
+        .lean();
+      if (fallbackRm) {
+        assignedRmId = fallbackRm._id;
+        hierarchy = hierarchyFromRm(fallbackRm, normalizedLoanType);
+      }
     }
 
     // 4. Find or Create Customer User
@@ -275,7 +275,8 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       monthlyEmiPaying,
       loanPurpose,
       partnerId: assignedPartner._id,
-      rmId: assignedRmId,
+      rmId: hierarchy.rmId || assignedRmId,
+      asmId: hierarchy.asmId,
     };
 
     // 6. Find Existing Lead or Create New
@@ -325,11 +326,7 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       app.monthlyEmiPaying = monthlyEmiPaying;
       app.loanPurpose = loanPurpose;
       app.requestedAmount = loanAmount || app.requestedAmount || 0;
-      app.partnerId = assignedPartner._id;
-      app.rmId = assignedRmId || app.rmId;
-      // Per rule: LEADs stay with RM and do not route to ASM/RSM until DOC_COMPLETE
-      app.asmId = null;
-      app.rsmId = null;
+      stampLoanHierarchy(app, hierarchy, assignedPartner._id);
       app.formProgress = {
         ...(app.formProgress || {}),
         stepIndex: Math.max(Number(app.formProgress?.stepIndex) || 0, 0),
@@ -352,9 +349,9 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
           app = await Application.create({
             appNo,
             partnerId: assignedPartner._id,
-            rmId: assignedRmId,
-            rsmId: null, // Routed to RSM only on DOC_COMPLETE
-            asmId: null, // Routed to ASM only on DOC_COMPLETE
+            rmId: hierarchy.rmId || assignedRmId,
+            rsmId: hierarchy.rsmId,
+            asmId: hierarchy.asmId,
             customerId: customerUser._id,
             loanType: normalizedLoanType,
             customer: customerPayload,
@@ -493,8 +490,14 @@ router.post("/:id/progress", optionalAuth, async (req, res) => {
       }
       if (customer.loanAmount !== undefined) {
         const amt = Number(customer.loanAmount) || 0;
-        next.loanAmount = amt;
-        app.requestedAmount = amt || app.requestedAmount || 0;
+        if (amt > 0) {
+          const amountError = loanAmountError(amt);
+          if (amountError) {
+            return res.status(400).json({ success: false, message: amountError });
+          }
+          next.loanAmount = amt;
+          app.requestedAmount = amt;
+        }
       }
       app.customer = next;
     }
@@ -546,7 +549,23 @@ router.post("/:id/progress", optionalAuth, async (req, res) => {
       if (app.customer) app.customer.loanPurpose = app.loanPurpose;
     }
     if (requestedAmount !== undefined) {
-      app.requestedAmount = Number(requestedAmount) || app.requestedAmount || 0;
+      const amt = Number(requestedAmount) || 0;
+      if (amt > 0) {
+        const amountError = loanAmountError(amt);
+        if (amountError) {
+          return res.status(400).json({ success: false, message: amountError });
+        }
+        app.requestedAmount = amt;
+        if (app.customer) app.customer.loanAmount = amt;
+      }
+    }
+
+    if (app.partnerId) {
+      const owner = await User.findById(app.partnerId).select("rmId role").lean();
+      if (owner?.rmId) {
+        const rmDoc = await User.findById(owner.rmId).select(RM_HIERARCHY_FIELDS).lean();
+        if (rmDoc) stampLoanHierarchy(app, hierarchyFromRm(rmDoc, app.loanType), owner._id);
+      }
     }
 
     const prevProgress = app.formProgress || {};
@@ -582,12 +601,6 @@ router.post("/:id/progress", optionalAuth, async (req, res) => {
           lastContactedAt: follow.lastContactedAt || new Date(),
         };
       }
-    }
-
-    // LEADs stay with RM until DOC_COMPLETE
-    if (app.status === "LEAD") {
-      app.asmId = null;
-      app.rsmId = null;
     }
 
     app.markModified("customer");

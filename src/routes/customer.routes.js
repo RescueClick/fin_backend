@@ -14,6 +14,7 @@ import {
 } from "../utils/docUploadLimits.js";
 import { findCustomerApplyBlocker } from "../utils/loanReapplyPolicy.js";
 import { resolveSpecializedAsmForLoanType } from "../utils/rmRsmHierarchy.js";
+import { loanAmountError } from "../utils/loanFileRules.js";
 import mongoose from "mongoose";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { sendDeleteAccountRequestEmail, sendLoanApplicationEmail } from "../utils/emailService.js";
@@ -323,6 +324,14 @@ router.post(
         isArchived: { $ne: true },
       }).sort({ updatedAt: -1 });
 
+      const submittedAmount = Number(customer.loanAmount) || 0;
+      if (submittedAmount > 0) {
+        const amountError = loanAmountError(submittedAmount);
+        if (amountError) {
+          return res.status(400).json({ message: amountError });
+        }
+      }
+
       const hasRunningLoan = customer.hasRunningLoan || "NO";
       const monthlyEmiPaying = Number(customer.monthlyEmiPaying ?? 0);
       const loanPurpose = customer.loanPurpose || "";
@@ -335,8 +344,8 @@ router.post(
       if (existingLeadApp) {
         existingLeadApp.partnerId = appPartnerId || existingLeadApp.partnerId;
         existingLeadApp.rmId = appRmId || existingLeadApp.rmId;
-        existingLeadApp.rsmId = assignedRsmId || existingLeadApp.rsmId;
-        existingLeadApp.asmId = assignedAsmId || existingLeadApp.asmId;
+        existingLeadApp.rsmId = assignedRsmId;
+        existingLeadApp.asmId = assignedAsmId;
         existingLeadApp.docs = docs;
         existingLeadApp.references = refs;
         existingLeadApp.employmentInfo = employmentInfo;

@@ -35,6 +35,11 @@ import { Incentive } from "../models/Incentive.js";
 import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { resolveSpecializedAsmForLoanType } from "../utils/rmRsmHierarchy.js";
+import {
+  hierarchyFromRm,
+  loanAmountError,
+  RM_HIERARCHY_FIELDS,
+} from "../utils/loanFileRules.js";
 import { ReferralReward } from "../models/ReferralReward.js";
 import {
   buildPartnerInvoiceHtml,
@@ -131,9 +136,8 @@ const validateApplicationPayload = ({
   }
 
   const loanAmt = Number(customer?.loanAmount ?? 0);
-  if (!loanAmt || loanAmt <= 0) {
-    errors.push("Loan amount must be greater than zero");
-  }
+  const amountError = loanAmountError(loanAmt, { required: true });
+  if (amountError) errors.push(amountError);
 
   if (["PERSONAL", "HOME_LOAN_SALARIED", "LAP_SALARIED"].includes(loanType || "")) {
     if (!product.companyName) errors.push("Company name is required");
@@ -1022,6 +1026,7 @@ router.post(
       let assignedPartnerId = null;
       let assignedRmId = null;
       let assignedAsmId = null;
+      let assignedRsmId = null;
       let referralPartner = null;
 
       if (partnerReferralCode && String(partnerReferralCode).trim()) {
@@ -1039,8 +1044,11 @@ router.post(
           assignedPartnerId = referralPartner._id;
           assignedRmId = referralPartner.rmId || null;
           if (referralPartner.rmId) {
-            const referralRm = await User.findById(referralPartner.rmId).select("asmId").lean();
-            assignedAsmId = referralRm?.asmId || null;
+            const referralRm = await User.findById(referralPartner.rmId).select(RM_HIERARCHY_FIELDS).lean();
+            const hierarchy = hierarchyFromRm(referralRm, loanType);
+            assignedRmId = hierarchy.rmId;
+            assignedAsmId = hierarchy.asmId;
+            assignedRsmId = hierarchy.rsmId;
           }
         }
       }
@@ -1063,8 +1071,11 @@ router.post(
             assignedPartnerId = referralPartner._id;
             assignedRmId = referralPartner.rmId || null;
             if (referralPartner.rmId) {
-              const referralRm = await User.findById(referralPartner.rmId).select("asmId").lean();
-              assignedAsmId = referralRm?.asmId || null;
+              const referralRm = await User.findById(referralPartner.rmId).select(RM_HIERARCHY_FIELDS).lean();
+              const hierarchy = hierarchyFromRm(referralRm, loanType);
+              assignedRmId = hierarchy.rmId;
+              assignedAsmId = hierarchy.asmId;
+              assignedRsmId = hierarchy.rsmId;
             }
           }
         } catch (fallbackErr) {
@@ -1291,6 +1302,7 @@ router.post(
         existingApp.partnerId = assignedPartnerId;
         existingApp.rmId = assignedRmId;
         existingApp.asmId = assignedAsmId;
+        existingApp.rsmId = assignedRsmId;
         // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to SUBMITTED
         // (Option A: new applications should not start in DRAFT)
         if (applicationStatus === "DRAFT") {
@@ -1322,7 +1334,6 @@ router.post(
       }
 
       // Resolve ASM and RSM based on RM & loanType
-      let assignedRsmId = null;
       if (assignedRmId) {
         const rmDoc = await User.findById(assignedRmId)
           .select("rsmId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
@@ -1526,28 +1537,11 @@ router.post(
       let referralPartner = null;
       let assignedPartnerId = req.user.role === ROLES.PARTNER ? userId : null;
       let assignedRmId = req.user.role === ROLES.PARTNER ? partner?.rmId : null;
-      let assignedAsmId = req.user.role === ROLES.PARTNER ? partner?.asmId : null;
+      let assignedAsmId = null;
       // Must be declared: assigning undeclared assignedRsmId throws ReferenceError (500 "Server error")
       let assignedRsmId = null;
 
-      const resolveRsmIdForLoanType = (rmDoc, type) => {
-        if (!rmDoc) return null;
-        const lt = String(type || "").trim().toUpperCase();
-        if (lt === "PERSONAL") return rmDoc.personalRsmId || rmDoc.rsmId || null;
-        if (lt === "BUSINESS") {
-          return rmDoc.businessRsmId || rmDoc.businessHomeRsmId || rmDoc.rsmId || null;
-        }
-        if (
-          lt === "HOME_LOAN_SALARIED" ||
-          lt === "HOME_LOAN_SELF_EMPLOYED" ||
-          lt === "LAP_SALARIED" ||
-          lt === "LAP_SELF_EMPLOYED" ||
-          lt === "LAP"
-        ) {
-          return rmDoc.homeLapRsmId || rmDoc.businessHomeRsmId || rmDoc.rsmId || null;
-        }
-        return rmDoc.rsmId || null;
-      };
+      const resolveRsmIdForLoanType = (rmDoc) => rmDoc?.rsmId || null;
 
       if (req.user.role !== ROLES.PARTNER && partnerReferralCode) {
         referralPartner = await User.findOne({
@@ -1568,13 +1562,13 @@ router.post(
             .select("rsmId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
             .lean();
           assignedAsmId = resolveSpecializedAsmForLoanType(referralRm, loanType);
-          assignedRsmId = resolveRsmIdForLoanType(referralRm, loanType);
+          assignedRsmId = resolveRsmIdForLoanType(referralRm);
         }
       }
 
       if (req.user.role === ROLES.PARTNER && rm) {
         assignedAsmId = resolveSpecializedAsmForLoanType(rm, loanType);
-        assignedRsmId = resolveRsmIdForLoanType(rm, loanType);
+        assignedRsmId = resolveRsmIdForLoanType(rm);
       }
 
       // Check if customer exists
@@ -1834,6 +1828,7 @@ router.post(
         existingApp.partnerId = assignedPartnerId;
         existingApp.rmId = assignedRmId;
         existingApp.asmId = assignedAsmId;
+        existingApp.rsmId = assignedRsmId;
         // Keep DOC_INCOMPLETE status if it was DOC_INCOMPLETE, otherwise set to SUBMITTED
         // (Option A: new applications should not start in DRAFT)
         if (applicationStatus === "DRAFT") {
@@ -1874,7 +1869,7 @@ router.post(
             assignedAsmId = resolveSpecializedAsmForLoanType(rmDoc, loanType);
           }
           if (!assignedRsmId) {
-            assignedRsmId = resolveRsmIdForLoanType(rmDoc, loanType);
+            assignedRsmId = resolveRsmIdForLoanType(rmDoc);
           }
         }
       }
@@ -2060,9 +2055,9 @@ router.post(
         return res.status(400).json({ message: "Partner is not mapped to an RM" });
       }
 
-      const rm = await User.findById(partner.rmId);
+      const rm = await User.findById(partner.rmId).select(RM_HIERARCHY_FIELDS);
       const assignedRmId = partner.rmId;
-      const assignedAsmId = rm?.asmId || null;
+      const hierarchy = hierarchyFromRm(rm, loanType);
 
       // Create or reuse customer user
       const tempPassword =
@@ -2118,38 +2113,6 @@ router.post(
         }
       }
 
-      // Resolve RSM and ASM based on RM & loanType
-      let assignedRsmId = null;
-      if (assignedRmId) {
-        const rmDoc = await User.findById(assignedRmId)
-          .select("personalRsmId businessRsmId homeLapRsmId businessHomeRsmId asmId")
-          .lean();
-        if (rmDoc) {
-          if (loanType === "PERSONAL") {
-            assignedRsmId = rmDoc.personalRsmId || null;
-          } else if (loanType === "BUSINESS") {
-            assignedRsmId = rmDoc.businessRsmId || rmDoc.businessHomeRsmId || null;
-          } else if (
-            loanType === "HOME_LOAN_SALARIED" ||
-            loanType === "HOME_LOAN_SELF_EMPLOYED" ||
-            loanType === "LAP_SALARIED" ||
-            loanType === "LAP_SELF_EMPLOYED" ||
-            loanType === "LAP"
-          ) {
-            assignedRsmId = rmDoc.homeLapRsmId || rmDoc.businessHomeRsmId || null;
-          } else {
-            assignedRsmId = rmDoc.businessHomeRsmId || null;
-          }
-          if (assignedRsmId && !assignedAsmId) {
-            const rsmDoc = await User.findById(assignedRsmId).select("asmId").lean();
-            if (rsmDoc?.asmId) assignedAsmId = rsmDoc.asmId;
-          }
-          if (!assignedAsmId && rmDoc.asmId) {
-            assignedAsmId = rmDoc.asmId;
-          }
-        }
-      }
-
       const resolved = await resolveCustomerFile(customerUser._id, { partnerId });
       if (resolved.blocker) {
         return res.status(400).json(blockerResponse(resolved.blocker));
@@ -2158,7 +2121,14 @@ router.post(
         const existing = resolved.app;
         existing.loanType = loanType;
         existing.partnerId = partnerId;
-        existing.rmId = assignedRmId;
+        existing.rmId = hierarchy.rmId || assignedRmId;
+        existing.asmId = hierarchy.asmId;
+        existing.rsmId = hierarchy.rsmId;
+        if (existing.customer) {
+          existing.customer.partnerId = partnerId;
+          existing.customer.rmId = hierarchy.rmId || assignedRmId;
+          existing.customer.asmId = hierarchy.asmId;
+        }
         await existing.save();
         return res.status(200).json({
           message: "Continuing the customer's existing loan file",
@@ -2181,9 +2151,9 @@ router.post(
           app = await Application.create({
             appNo,
             partnerId,
-            rmId: assignedRmId,
-            rsmId: null,
-            asmId: null,
+            rmId: hierarchy.rmId || assignedRmId,
+            rsmId: hierarchy.rsmId,
+            asmId: hierarchy.asmId,
             customerId: customerUser._id,
             loanType,
             customer: {
@@ -2286,8 +2256,13 @@ router.patch(
         };
       } else if (step === "loan") {
         if (customer?.loanAmount !== undefined) {
-          application.customer.loanAmount = Number(customer.loanAmount) || 0;
-          application.requestedAmount = application.customer.loanAmount;
+          const amt = Number(customer.loanAmount) || 0;
+          const amountError = loanAmountError(amt, { required: true });
+          if (amountError) {
+            return res.status(400).json({ message: amountError });
+          }
+          application.customer.loanAmount = amt;
+          application.requestedAmount = amt;
         }
       } else if (step === "employment") {
         application.employmentInfo = {

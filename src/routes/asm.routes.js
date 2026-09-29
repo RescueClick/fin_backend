@@ -612,19 +612,16 @@ router.get("/get-customers", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER
     const manager = await User.findById(asmId).select("role asmType").lean();
     const allowedLoanTypes = manager?.role === ROLES.ASM ? loanTypesForAsmType(manager.asmType) : null;
 
-    const baseScope = [{ asmId }];
+    const baseScope = [];
     if (manager?.role === ROLES.ASM && allowedLoanTypes?.length) {
       baseScope.push({
         loanType: { $in: allowedLoanTypes },
-        $or: [
-          { rmId: { $in: rmIds } },
-          { partnerId: { $in: partnerIds } },
-        ],
+        rmId: { $in: rmIds },
       });
+    } else if (rmIds?.length) {
+      baseScope.push({ rmId: { $in: rmIds } });
     } else {
-      if (rsmIds?.length) baseScope.push({ rsmId: { $in: rsmIds } });
-      if (rmIds?.length) baseScope.push({ rmId: { $in: rmIds } });
-      if (partnerIds?.length) baseScope.push({ partnerId: { $in: partnerIds } });
+      baseScope.push({ rmId: { $in: [] } });
     }
 
     const applications = await Application.find({
@@ -798,22 +795,16 @@ router.get(
       const { rsmIds, rmIds, partnerIds } = await getAsmScopeIds(asmId);
       const allowedLoanTypes = manager?.role === ROLES.ASM ? loanTypesForAsmType(manager.asmType) : null;
 
-      const baseScope = [{ asmId }, { rsmId: asmId }];
+      const baseScope = [];
       if (manager?.role === ROLES.ASM && allowedLoanTypes?.length) {
         baseScope.push({
           loanType: { $in: allowedLoanTypes },
-          $or: [
-            { rmId: { $in: rmIds } },
-            { partnerId: { $in: partnerIds } },
-          ],
+          rmId: { $in: rmIds },
         });
+      } else if (rmIds?.length) {
+        baseScope.push({ rmId: { $in: rmIds } });
       } else {
-        if (rsmIds?.length) {
-          baseScope.push({ rsmId: { $in: rsmIds } });
-          baseScope.push({ asmId: { $in: rsmIds } });
-        }
-        if (rmIds?.length) baseScope.push({ rmId: { $in: rmIds } });
-        if (partnerIds?.length) baseScope.push({ partnerId: { $in: partnerIds } });
+        baseScope.push({ rmId: { $in: [] } });
       }
 
       const filter = activeApplicationsFilter({ $or: baseScope });
