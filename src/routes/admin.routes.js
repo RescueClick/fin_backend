@@ -2281,7 +2281,7 @@ router.get(
         })
         .populate({
           path: "partnerId",
-          select: "firstName lastName employeeId rmId",
+          select: "firstName middleName lastName employeeId rmId",
           populate: {
             path: "rmId",
             select: "firstName lastName employeeId personalAsmId businessAsmId homeLapAsmId businessHomeAsmId rsmId",
@@ -2344,6 +2344,10 @@ router.get(
           .join(" ");
 
         const empId = customerUser.employeeId || c.employeeId || app.appNo || null;
+        const partnerName = [p.firstName, p.middleName, p.lastName]
+          .map((part) => String(part || "").trim())
+          .filter(Boolean)
+          .join(" ") || null;
 
         return {
           _id: app._id,
@@ -2362,7 +2366,7 @@ router.get(
           disburseAmount: app.approvedLoanAmount || 0,
           status: app.status,
           applicationDate: app.createdAt,
-          partnerName: p.firstName ? `${p.firstName} ${p.lastName}` : null,
+          partnerName,
           partnerEmployeeId: p.employeeId || null,
           rmName: r.firstName ? `${r.firstName} ${r.lastName}` : null,
           rmEmployeeId: r.employeeId || null,
