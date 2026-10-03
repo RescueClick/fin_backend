@@ -1204,10 +1204,10 @@ router.post(
           businessName: product.businessName,
           businessAddress: product.businessAddress,
           businessLandmark: product.businessLandmark,
-          businessVintage: product.businessVintage,
+          businessVintage: product.businessVintage || product.yearsInBusiness,
           gstNumber: product.gstNumber,
-          annualTurnoverInINR: product.annualTurnoverInINR,
-          yearsInBusiness: product.yearsInBusiness,
+          annualTurnoverInINR: product.annualTurnoverInINR || product.annualTurnover,
+          yearsInBusiness: product.yearsInBusiness || product.businessVintage,
         };
       }
 
@@ -1722,10 +1722,10 @@ router.post(
           businessName: product.businessName,
           businessAddress: product.businessAddress,
           businessLandmark: product.businessLandmark,
-          businessVintage: product.businessVintage,
+          businessVintage: product.businessVintage || product.yearsInBusiness,
           gstNumber: product.gstNumber,
-          annualTurnoverInINR: product.annualTurnoverInINR,
-          yearsInBusiness: product.yearsInBusiness,
+          annualTurnoverInINR: product.annualTurnoverInINR || product.annualTurnover,
+          yearsInBusiness: product.yearsInBusiness || product.businessVintage,
         };
       }
 
