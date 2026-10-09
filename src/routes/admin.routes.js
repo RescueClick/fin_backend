@@ -75,6 +75,7 @@ import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { resolveLoginBank } from "../utils/loginBank.js";
 import { publicFileReview, saveFileReview } from "../utils/fileReview.js";
+import { parseMetaLeadSheet, matchMetaLeadsToApplications } from "../utils/metaLeadSheet.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
@@ -2267,6 +2268,28 @@ router.post(
     } catch (err) {
       console.error("Error in activate partner:", err);
       return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// POST /meta-leads/check — compare an uploaded Meta leads sheet with loan applications
+router.post(
+  "/meta-leads/check",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  async (req, res) => {
+    try {
+      const leads = parseMetaLeadSheet(req.body?.csvText);
+      const applications = await Application.find(activeApplicationsFilter({}))
+        .select("appNo status loanType customer.phone customer.alternatePhone")
+        .lean();
+      return res.json(matchMetaLeadsToApplications(leads, applications));
+    } catch (err) {
+      const status = err.status || 500;
+      if (status >= 500) console.error("Meta lead sheet check failed:", err);
+      return res.status(status).json({
+        message: err.message || "Could not check the Meta lead sheet",
+      });
     }
   }
 );
