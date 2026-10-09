@@ -524,26 +524,19 @@ export function describeScannedProfile(profile) {
 
 export function annotateBanksWithPolicy(banks, application) {
   const profile = buildApplicantProfile(application);
-  let hidden = 0;
-  const visible = [];
-  for (const bank of banks) {
+  const visible = banks.map((bank) => {
     const policy = resolvePolicy(bank);
     const policyMatch = application ? matchApplicantToPolicy(policy, profile) : null;
-    const next = {
+    return {
       ...bank,
       underwritingPolicy: policy,
       ...(policyMatch ? { policyMatch } : {}),
     };
-    if (policyMatch?.status === "fail") {
-      hidden += 1;
-      continue;
-    }
-    visible.push(next);
-  }
+  });
   if (application) {
-    const rank = { pass: 0, review: 1, unconfigured: 2 };
+    const rank = { pass: 0, review: 1, fail: 2, unconfigured: 3 };
     visible.sort((a, b) => {
-      const d = (rank[a.policyMatch?.status] ?? 3) - (rank[b.policyMatch?.status] ?? 3);
+      const d = (rank[a.policyMatch?.status] ?? 4) - (rank[b.policyMatch?.status] ?? 4);
       if (d) return d;
       return String(a.bankName || "").localeCompare(String(b.bankName || ""));
     });
@@ -555,7 +548,8 @@ export function annotateBanksWithPolicy(banks, application) {
           shown: visible.length,
           matched: visible.filter((b) => b.policyMatch?.status === "pass").length,
           review: visible.filter((b) => b.policyMatch?.status === "review").length,
-          hidden,
+          outside: visible.filter((b) => b.policyMatch?.status === "fail").length,
+          hidden: 0,
           scanned: describeScannedProfile(profile),
         }
       : null,

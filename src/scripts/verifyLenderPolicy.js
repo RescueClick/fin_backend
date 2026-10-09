@@ -47,7 +47,8 @@ const lowSalary = {
 };
 const low = annotateBanksWithPolicy(banks, lowSalary);
 const names = low.banks.map((b) => b.bankName.toLowerCase());
-assert(!names.some((n) => n.includes("fibe")), "Fibe hidden for 18k on 8L");
+assert(names.some((n) => n.includes("fibe")), "Fibe stays even when salary fails");
+assert(low.banks.find((b) => b.bankName.toLowerCase().includes("fibe"))?.policyMatch.status === "fail", "Fibe marked outside policy");
 assert(names.some((n) => n.includes("incred")), "InCred stays");
 assert(low.banks.find((b) => b.bankName.toLowerCase().includes("finna"))?.policyMatch.status === "review", "Finnable metro review");
 
@@ -56,17 +57,19 @@ const heavyEmi = {
   customer: { ...fit.customer, monthlyEmiPaying: 20000 },
 };
 const foir = annotateBanksWithPolicy(banks, heavyEmi);
-assert(foir.banks.some((b) => /incred/i.test(b.bankName)), "InCred FOIR 70 allows 66%");
-assert(!foir.banks.some((b) => /finna/i.test(b.bankName)), "Finnable FOIR fail");
-assert(!foir.banks.some((b) => /fibe/i.test(b.bankName)), "Fibe FOIR fail");
+assert(foir.banks.find((b) => /incred/i.test(b.bankName))?.policyMatch.status === "pass", "InCred FOIR 70 allows 66%");
+assert(foir.banks.find((b) => /finna/i.test(b.bankName))?.policyMatch.status === "fail", "Finnable FOIR marked fail");
+assert(foir.banks.find((b) => /fibe/i.test(b.bankName))?.policyMatch.status === "fail", "Fibe FOIR marked fail");
+assert(foir.banks.length === 3, "FOIR fail still keeps every pincode bank");
 
 const young = {
   ...fit,
   customer: { ...fit.customer, dateOfBirth: new Date(new Date().getFullYear() - 20, 0, 1) },
 };
 const age = annotateBanksWithPolicy(banks, young);
-assert(!age.banks.some((b) => /incred/i.test(b.bankName)), "InCred min age 21");
-assert(age.banks.some((b) => /fibe/i.test(b.bankName)), "Fibe allows 20");
+assert(age.banks.find((b) => /incred/i.test(b.bankName))?.policyMatch.status === "fail", "InCred min age 21 marked fail");
+assert(age.banks.find((b) => /fibe/i.test(b.bankName))?.policyMatch.status === "pass", "Fibe allows 20");
+assert(age.banks.length === 3, "age fail still keeps every pincode bank");
 
 const selfEmployed = { loanType: "BUSINESS", businessInfo: { businessName: "Shop" }, customer: fit.customer };
 const incredOnly = matchApplicantToPolicy(catalogPolicyForBank(banks[0]), {
