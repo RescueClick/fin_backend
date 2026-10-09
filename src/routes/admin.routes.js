@@ -25,6 +25,12 @@ import { ReferralReward } from "../models/ReferralReward.js";
 import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
 import { settlePendingEarnings } from "../utils/walletBalance.js";
 import { BankMaster } from "../models/BankMaster.js";
+import {
+  catalogPolicyForBank,
+  normalizePolicy,
+  persistMissingCatalogPolicies,
+  policyForSave,
+} from "../utils/lenderPolicy.js";
 import { BankRm } from "../models/BankRm.js";
 import { upload } from "../middleware/upload.js";
 import mongoose from "mongoose";
@@ -67,6 +73,7 @@ import { persistReassignmentAudit } from "../utils/reassignmentAuditService.js";
 import { bulkMovePartnersToRm } from "../utils/bulkMovePartnersToRm.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
+import { resolveLoginBank } from "../utils/loginBank.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
@@ -173,6 +180,7 @@ router.get("/banks", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
     const banks = await BankMaster.find({})
       .sort({ createdAt: -1 })
       .lean();
+    await persistMissingCatalogPolicies(BankMaster, banks);
     return res.json({ banks });
   } catch (err) {
     console.error("Error fetching banks (admin):", err);
@@ -325,6 +333,8 @@ router.post(
         rmEmail: String(rmEmail || "").trim().toLowerCase(),
         rsmTypes: normalizedRsmTypes,
         serviceablePincodes: parsedPincodes,
+        underwritingPolicy:
+          policyForSave(req.body?.underwritingPolicy, bankName, normalizedLoanType) || undefined,
         createdBy: req.user.sub,
       });
 
@@ -500,6 +510,13 @@ router.put(
       if (rmEmail !== undefined) existing.rmEmail = String(rmEmail || "").trim().toLowerCase();
       existing.rsmTypes = normalizedRsmTypes;
       existing.serviceablePincodes = nextPincodes;
+      if (req.body?.underwritingPolicy !== undefined) {
+        existing.underwritingPolicy =
+          policyForSave(req.body.underwritingPolicy, nextBankName, nextLoanType) || undefined;
+      } else if (!(existing.underwritingPolicy?.disabled || normalizePolicy(existing.underwritingPolicy))) {
+        existing.underwritingPolicy =
+          catalogPolicyForBank({ bankName: nextBankName, loanType: nextLoanType }) || undefined;
+      }
       existing.updatedBy = req.user.sub;
 
       if (isActive !== undefined) {
@@ -2304,7 +2321,7 @@ router.get(
             { path: "rsmId", select: "firstName lastName employeeId role" },
           ],
         })
-        .select("appNo loanType approvedLoanAmount status createdAt customer customerId asmId rsmId rmId partnerId")
+        .select("appNo loanType approvedLoanAmount status createdAt customer customerId asmId rsmId rmId partnerId loginBankName loginBankId bankSends")
         .lean();
 
       const formatted = applications.map((app) => {
@@ -2345,6 +2362,7 @@ router.get(
           .join(" ");
 
         const empId = customerUser.employeeId || c.employeeId || app.appNo || null;
+        const loginBank = resolveLoginBank(app);
         const partnerName = [p.firstName, p.middleName, p.lastName]
           .map((part) => String(part || "").trim())
           .filter(Boolean)
@@ -2375,6 +2393,7 @@ router.get(
           asmEmployeeId: resolvedAsm ? resolvedAsm.employeeId : null,
           rsmName: resolvedRsm ? `${resolvedRsm.firstName} ${resolvedRsm.lastName}`.trim() : null,
           rsmEmployeeId: resolvedRsm ? resolvedRsm.employeeId : null,
+          loginBankName: loginBank.loginBankName || "",
         };
       });
 

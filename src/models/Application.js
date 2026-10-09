@@ -131,6 +131,9 @@ const CustomerSchema = new mongoose.Schema(
     hasRunningLoan: { type: String, enum: ["YES", "NO", "Yes", "No"], default: "NO" },
     monthlyEmiPaying: { type: Number, default: 0 },
     loanPurpose: { type: String, trim: true },
+    salaryInHand: { type: String, trim: true },
+    salaryReceiptMode: { type: String, trim: true },
+    cibilScoreBand: { type: String, trim: true },
 
     partnerId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     rmId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
@@ -247,6 +250,9 @@ const ApplicationSchema = new mongoose.Schema(
     hasRunningLoan: { type: String, default: "NO" },
     monthlyEmiPaying: { type: Number, default: 0 },
     loanPurpose: { type: String, trim: true },
+    salaryInHand: { type: String, trim: true },
+    salaryReceiptMode: { type: String, trim: true },
+    cibilScoreBand: { type: String, trim: true },
     leadSource: {
       type: String,
       enum: ["PARTNER", "CUSTOMER_DIRECT", "PUBLIC_REFERRAL"],
@@ -286,6 +292,9 @@ const ApplicationSchema = new mongoose.Schema(
     status: { type: String, enum: APP_STATUSES, default: "SUBMITTED" },
     stageHistory: [StageSchema],
     bankSends: [BankSendSchema],
+    /** Bank the file was logged into (loan login). */
+    loginBankId: { type: mongoose.Schema.Types.ObjectId, ref: "BankMaster" },
+    loginBankName: { type: String, trim: true, default: "" },
     deletedAt: { type: Date },
     isArchived: { type: Boolean, default: false }
   },

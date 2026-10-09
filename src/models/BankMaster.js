@@ -42,6 +42,9 @@ const bankMasterSchema = new mongoose.Schema(
       default: [] 
     },
 
+    // Salaried underwriting rules shown on the bank card and used to filter loans.
+    underwritingPolicy: { type: mongoose.Schema.Types.Mixed },
+
     isActive: { type: Boolean, default: true },
 
     // For audit

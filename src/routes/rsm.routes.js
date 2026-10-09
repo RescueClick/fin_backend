@@ -7,6 +7,10 @@ import { ROLES, RSM_TYPES } from "../config/roles.js";
 import { User } from "../models/User.js";
 import { Application, APP_STATUSES } from "../models/Application.js";
 import { BankMaster } from "../models/BankMaster.js";
+import {
+  annotateBanksWithPolicy,
+  persistMissingCatalogPolicies,
+} from "../utils/lenderPolicy.js";
 import { BankRm } from "../models/BankRm.js";
 import { Payout } from "../models/Payout.js";
 import { Incentive } from "../models/Incentive.js";
@@ -21,6 +25,7 @@ import { sendMail } from "../utils/sendMail.js";
 import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { emitApplicationStatusChanged } from "../utils/socketEmitter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
+import { assignLoginBank, resolveLoginBank } from "../utils/loginBank.js";
 import { makeRmCode } from "../utils/codes.js";
 import { Target } from "../models/Target.js";
 import fs from "fs";
@@ -611,7 +616,7 @@ router.post(
   requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const { to, note, approvedLoanAmount } = req.body;
+      const { to, note, approvedLoanAmount, bankId, bankName } = req.body;
       const rsmId = req.user.sub;
 
       if (!to)
@@ -725,6 +730,17 @@ router.post(
         app.approvedLoanAmount = Number(approvedLoanAmount);
       }
 
+      if (to === "LOGIN") {
+        const bankResult = await assignLoginBank(
+          app,
+          { bankId, bankName },
+          { required: true }
+        );
+        if (bankResult.error) {
+          return res.status(400).json({ message: bankResult.error });
+        }
+      }
+
       // Store old status before transition
       const oldStatus = app.status;
 
@@ -820,6 +836,8 @@ router.post(
           : "Application status updated successfully",
         status: app.status,
         approvedLoanAmount: app.approvedLoanAmount,
+        loginBankName: app.loginBankName || "",
+        loginBankId: app.loginBankId || null,
         stageHistory: app.stageHistory,
         reopened: isReopenFromRejected,
       });
@@ -944,8 +962,11 @@ router.get("/applications", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_
 
     const result = applications.map((app) => {
       const payout = payoutMap[app._id.toString()];
+      const loginBank = resolveLoginBank(app);
       return {
         ...app,
+        loginBankName: loginBank.loginBankName,
+        loginBankId: loginBank.loginBankId,
         payoutAmount: payout?.amount || 0,
         payOutStatus: payout?.payOutStatus || "PENDING",
       };
@@ -1078,10 +1099,20 @@ router.post(
           docsCount: pkg.docsCount,
           status: "SENT",
         });
-        await Application.updateOne({ _id: app._id }, { $push: { bankSends: record } });
+        await Application.updateOne(
+          { _id: app._id },
+          {
+            $push: { bankSends: record },
+            ...(bank
+              ? { $set: { loginBankId: bank._id, loginBankName: bankName } }
+              : {}),
+          }
+        );
         return res.json({
           message: `Sent to ${bankName} (${to})`,
           bankSend: record,
+          loginBankName: bank ? bankName : app.loginBankName || "",
+          loginBankId: bank?._id || app.loginBankId || null,
           failedDocs: pkg.failed.map((f) => f.docType),
         });
       } catch (sendErr) {
@@ -1840,7 +1871,7 @@ router.get("/banks", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
       return true;
     });
 
-    const { pincode, loanType: queryLoanType } = req.query;
+    const { pincode, loanType: queryLoanType, applicationId } = req.query;
 
     if (queryLoanType) {
       filtered = filtered.filter(b => normalizeLoanType(b.loanType) === normalizeLoanType(queryLoanType));
@@ -1858,7 +1889,23 @@ router.get("/banks", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
       });
     }
 
-    return res.json(filtered);
+    await persistMissingCatalogPolicies(BankMaster, filtered);
+
+    if (applicationId && mongoose.Types.ObjectId.isValid(String(applicationId))) {
+      const application = await Application.findById(applicationId)
+        .select("loanType customer employmentInfo businessInfo")
+        .lean();
+      if (application) {
+        const annotated = annotateBanksWithPolicy(filtered, application);
+        if (annotated.policyFilter) {
+          annotated.policyFilter.pincode = String(pincode || application.customer?.currentAddressPinCode || "").trim();
+        }
+        return res.json(annotated);
+      }
+    }
+
+    const withPolicy = annotateBanksWithPolicy(filtered, null).banks;
+    return res.json(withPolicy);
   } catch (err) {
     console.error("Error fetching banks for RSM:", err);
     return res.status(500).json({ message: "Error fetching banks" });

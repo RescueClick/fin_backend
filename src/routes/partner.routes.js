@@ -40,6 +40,7 @@ import {
   loanAmountError,
   RM_HIERARCHY_FIELDS,
 } from "../utils/loanFileRules.js";
+import { personFinancialFrom } from "../utils/personFinancial.js";
 import { ReferralReward } from "../models/ReferralReward.js";
 import {
   buildPartnerInvoiceHtml,
@@ -1786,6 +1787,7 @@ router.post(
         hasRunningLoan: customer.hasRunningLoan || "NO",
         monthlyEmiPaying: Number(customer.monthlyEmiPaying ?? 0),
         loanPurpose: customer.loanPurpose || "",
+        ...personFinancialFrom(customer),
         partnerId: assignedPartnerId,
         rmId: assignedRmId,
         asmId: assignedAsmId,
@@ -1819,6 +1821,9 @@ router.post(
         existingApp.hasRunningLoan = customerData.hasRunningLoan;
         existingApp.monthlyEmiPaying = customerData.monthlyEmiPaying;
         existingApp.loanPurpose = customerData.loanPurpose;
+        existingApp.salaryInHand = customerData.salaryInHand;
+        existingApp.salaryReceiptMode = customerData.salaryReceiptMode;
+        existingApp.cibilScoreBand = customerData.cibilScoreBand;
         existingApp.requestedAmount = customerData.loanAmount || existingApp.requestedAmount;
         existingApp.employmentInfo = employmentInfo;
         existingApp.businessInfo = businessInfo;
@@ -1905,6 +1910,9 @@ router.post(
             hasRunningLoan: customerData.hasRunningLoan,
             monthlyEmiPaying: customerData.monthlyEmiPaying,
             loanPurpose: customerData.loanPurpose,
+            salaryInHand: customerData.salaryInHand,
+            salaryReceiptMode: customerData.salaryReceiptMode,
+            cibilScoreBand: customerData.cibilScoreBand,
             status: applicationStatus === "DRAFT" ? "DRAFT" : "SUBMITTED",
             stageHistory: [],
           });

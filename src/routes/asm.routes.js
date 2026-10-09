@@ -43,6 +43,7 @@ import { parseDashboardPeriod } from "../utils/dashboardPeriod.js";
 import { computeDashboardFileStats } from "../utils/dashboardFileStats.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
+import { assignLoginBank, resolveLoginBank } from "../utils/loginBank.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
 import { emitPayoutCreated, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
@@ -633,7 +634,7 @@ router.get("/get-customers", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER
       .populate("customerId", "employeeId _id firstName lastName email phone")
       .populate("partnerId", "firstName lastName employeeId")
       .populate("rmId", "firstName lastName employeeId")
-      .select("appNo loanType approvedLoanAmount status createdAt customer stageHistory")
+      .select("appNo loanType approvedLoanAmount status createdAt customer stageHistory loginBankName loginBankId bankSends")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -652,6 +653,7 @@ router.get("/get-customers", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER
       const partner = app.partnerId || {};
       const rm = app.rmId || {};
       const payout = payoutMap[app._id.toString()];
+      const loginBank = resolveLoginBank(app);
 
       return {
         appNo: app.appNo,
@@ -675,6 +677,7 @@ router.get("/get-customers", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER
         partnerEmployeeId: partner.employeeId || null,
         rmName: rm.firstName ? `${rm.firstName} ${rm.lastName}` : null,
         rmEmployeeId: rm.employeeId || null,
+        loginBankName: loginBank.loginBankName || "",
       };
     });
 
@@ -812,7 +815,7 @@ router.get(
       const applications = await Application.find(filter)
         .populate("customerId", "employeeId firstName lastName email phone")
         .populate("partnerId", "firstName lastName employeeId")
-        .select("appNo loanType approvedLoanAmount status createdAt customer")
+        .select("appNo loanType approvedLoanAmount status createdAt customer loginBankName loginBankId bankSends")
         .sort({ createdAt: -1 })
         .lean();
 
@@ -830,6 +833,7 @@ router.get(
         const customer = app.customer || {};
         const customerUser = app.customerId || {};
         const payout = _payoutMap[app._id.toString()];
+        const loginBank = resolveLoginBank(app);
 
         return {
           username: customer.firstName
@@ -846,6 +850,7 @@ router.get(
           payOutStatus: payout?.payOutStatus || "PENDING",
           payoutAmount: payout?.amount || 0,
           actionId: app._id,
+          loginBankName: loginBank.loginBankName || "",
         };
       });
 
@@ -4806,7 +4811,7 @@ router.post(
   requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const { to, note, approvedLoanAmount } = req.body;
+      const { to, note, approvedLoanAmount, bankId, bankName } = req.body;
       const asmId = req.user.sub;
 
       if (!to) {
@@ -4897,6 +4902,17 @@ router.post(
         app.approvedLoanAmount = Number(approvedLoanAmount);
       }
 
+      if (to === "LOGIN") {
+        const bankResult = await assignLoginBank(
+          app,
+          { bankId, bankName },
+          { required: true }
+        );
+        if (bankResult.error) {
+          return res.status(400).json({ message: bankResult.error });
+        }
+      }
+
       const oldStatus = app.status;
       if (oldStatus !== to) {
         app.transition(to, asmId, note || `Status updated to ${to} by ASM`);
@@ -4938,6 +4954,8 @@ router.post(
           : `Application transitioned to ${to} successfully`,
         status: app.status,
         appNo: app.appNo,
+        loginBankName: app.loginBankName || "",
+        loginBankId: app.loginBankId || null,
         asmId: app.asmId,
         rsmId: app.rsmId,
         reopened: isReopenFromRejected,
