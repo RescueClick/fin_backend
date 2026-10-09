@@ -2,6 +2,7 @@ import {
   normalizeIncomingDocType,
   findMissingMandatoryDocs,
 } from "./loanMandatoryDocRules.js";
+import { personFinancialFrom } from "./personFinancial.js";
 import {
   oversizeDocBatchViolation,
   formatOversizeMessage,
@@ -240,6 +241,14 @@ export function applyCompleteFormToApplication(app, {
   app.hasRunningLoan = customerData.hasRunningLoan || "NO";
   app.monthlyEmiPaying = customerData.monthlyEmiPaying || 0;
   app.loanPurpose = customerData.loanPurpose || "";
+  const personFinancial = personFinancialFrom(customerData);
+  app.salaryInHand = personFinancial.salaryInHand;
+  app.salaryReceiptMode = personFinancial.salaryReceiptMode;
+  app.cibilScoreBand = personFinancial.cibilScoreBand;
+  app.customer = {
+    ...(app.customer || {}),
+    ...personFinancial,
+  };
   app.requestedAmount =
     customerData.loanAmount || app.requestedAmount || 0;
   if (employmentInfo) app.employmentInfo = employmentInfo;

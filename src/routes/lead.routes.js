@@ -22,6 +22,7 @@ import {
   findCustomerApplyBlocker,
   resolveCustomerFile,
 } from "../utils/loanReapplyPolicy.js";
+import { personFinancialFrom } from "../utils/personFinancial.js";
 import {
   notifyPartnerToCompleteLeadForm,
   notifyRmToProgressLeads,
@@ -162,6 +163,14 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       financialDetails.loanPurpose ?? customer.loanPurpose ?? ""
     ).trim();
 
+    const personFinancial = personFinancialFrom({
+      ...customer,
+      ...financialDetails,
+      salaryInHand: financialDetails.salaryInHand ?? customer.salaryInHand,
+      salaryReceiptMode: financialDetails.salaryReceiptMode ?? customer.salaryReceiptMode,
+      cibilScoreBand: financialDetails.cibilScoreBand ?? customer.cibilScoreBand,
+    });
+
     const loanAmount = Number(customer.loanAmount) || 0;
     const amountError = loanAmountError(loanAmount);
     if (amountError) {
@@ -274,6 +283,7 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       hasRunningLoan,
       monthlyEmiPaying,
       loanPurpose,
+      ...personFinancial,
       partnerId: assignedPartner._id,
       rmId: hierarchy.rmId || assignedRmId,
       asmId: hierarchy.asmId,
@@ -325,6 +335,9 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       app.hasRunningLoan = hasRunningLoan;
       app.monthlyEmiPaying = monthlyEmiPaying;
       app.loanPurpose = loanPurpose;
+      app.salaryInHand = personFinancial.salaryInHand;
+      app.salaryReceiptMode = personFinancial.salaryReceiptMode;
+      app.cibilScoreBand = personFinancial.cibilScoreBand;
       app.requestedAmount = loanAmount || app.requestedAmount || 0;
       stampLoanHierarchy(app, hierarchy, assignedPartner._id);
       app.formProgress = {
@@ -358,6 +371,9 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
             hasRunningLoan,
             monthlyEmiPaying,
             loanPurpose,
+            salaryInHand: personFinancial.salaryInHand,
+            salaryReceiptMode: personFinancial.salaryReceiptMode,
+            cibilScoreBand: personFinancial.cibilScoreBand,
             leadSource,
             requestedAmount: loanAmount,
             leadFollowUp: {
@@ -547,6 +563,12 @@ router.post("/:id/progress", optionalAuth, async (req, res) => {
     if (loanPurpose !== undefined) {
       app.loanPurpose = String(loanPurpose || "").trim();
       if (app.customer) app.customer.loanPurpose = app.loanPurpose;
+    }
+    if (app.customer) {
+      const personFinancial = personFinancialFrom(app.customer);
+      app.salaryInHand = personFinancial.salaryInHand;
+      app.salaryReceiptMode = personFinancial.salaryReceiptMode;
+      app.cibilScoreBand = personFinancial.cibilScoreBand;
     }
     if (requestedAmount !== undefined) {
       const amt = Number(requestedAmount) || 0;

@@ -15,6 +15,7 @@ import {
 import { findCustomerApplyBlocker } from "../utils/loanReapplyPolicy.js";
 import { resolveSpecializedAsmForLoanType } from "../utils/rmRsmHierarchy.js";
 import { loanAmountError } from "../utils/loanFileRules.js";
+import { personFinancialFrom } from "../utils/personFinancial.js";
 import mongoose from "mongoose";
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { sendDeleteAccountRequestEmail, sendLoanApplicationEmail } from "../utils/emailService.js";
@@ -335,6 +336,7 @@ router.post(
       const hasRunningLoan = customer.hasRunningLoan || "NO";
       const monthlyEmiPaying = Number(customer.monthlyEmiPaying ?? 0);
       const loanPurpose = customer.loanPurpose || "";
+      const personFinancial = personFinancialFrom(customer);
 
       let app = null;
       let appRetries = 0;
@@ -354,6 +356,9 @@ router.post(
         existingLeadApp.hasRunningLoan = hasRunningLoan;
         existingLeadApp.monthlyEmiPaying = monthlyEmiPaying;
         existingLeadApp.loanPurpose = loanPurpose;
+        existingLeadApp.salaryInHand = personFinancial.salaryInHand;
+        existingLeadApp.salaryReceiptMode = personFinancial.salaryReceiptMode;
+        existingLeadApp.cibilScoreBand = personFinancial.cibilScoreBand;
         existingLeadApp.requestedAmount = customer.loanAmount ? Number(customer.loanAmount) : existingLeadApp.requestedAmount;
         existingLeadApp.customer = {
           ...existingLeadApp.customer,
@@ -373,6 +378,7 @@ router.post(
           hasRunningLoan,
           monthlyEmiPaying,
           loanPurpose,
+          ...personFinancial,
           partnerId: appPartnerId || null,
           rmId: appRmId || null,
           asmId: assignedAsmId || null,
@@ -405,6 +411,9 @@ router.post(
             hasRunningLoan,
             monthlyEmiPaying,
             loanPurpose,
+            salaryInHand: personFinancial.salaryInHand,
+            salaryReceiptMode: personFinancial.salaryReceiptMode,
+            cibilScoreBand: personFinancial.cibilScoreBand,
             requestedAmount: customer.loanAmount ? Number(customer.loanAmount) : undefined,
             customer: {
               firstName: customer.firstName,
@@ -425,6 +434,7 @@ router.post(
               hasRunningLoan,
               monthlyEmiPaying,
               loanPurpose,
+              ...personFinancial,
               partnerId: appPartnerId || null,
               rmId: appRmId || null,
               rsmId: null,
