@@ -45,3 +45,19 @@ export function parseDashboardPeriod(query = {}) {
     currentMonth,
   };
 }
+
+/** Inclusive start, exclusive end. Month-only uses the current year. */
+export function periodBounds(query = {}) {
+  const period = parseDashboardPeriod(query);
+  if (period.startDate && period.endDate) return period;
+  if (period.hasMonth && period.month >= 1 && period.month <= 12) {
+    const y = period.currentYear;
+    return {
+      ...period,
+      startDate: new Date(y, period.month - 1, 1),
+      endDate: new Date(y, period.month, 1),
+      isFiltered: true,
+    };
+  }
+  return period;
+}

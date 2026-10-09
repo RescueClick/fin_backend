@@ -87,6 +87,7 @@ import {
 } from "../utils/targetRebalanceService.js";
 import { PUBLIC_LOAN_REFERRAL_FALLBACK_PARTNER_CODE as PUBLIC_LOAN_REFERRAL_FALLBACK } from "../constants/publicReferral.js";
 import { getReferralRewardAmounts } from "../utils/referralService.js";
+import { periodBounds } from "../utils/dashboardPeriod.js";
 
 const router = Router();
 
@@ -3183,14 +3184,22 @@ router.get(
   async (req, res) => {
     try {
       const limit = parseInt(req.query.limit) || 10;
+      const period = periodBounds(req.query);
+      const inPeriod = period.startDate && period.endDate
+        ? { $gte: period.startDate, $lt: period.endDate }
+        : null;
+      const take = inPeriod ? Math.max(limit, 30) : 5;
 
       const activities = [];
 
       // 1. Recent customers registered
-      const recentCustomers = await User.find({ role: ROLES.CUSTOMER })
+      const recentCustomers = await User.find({
+        role: ROLES.CUSTOMER,
+        ...(inPeriod ? { createdAt: inPeriod } : {}),
+      })
         .select("firstName lastName email createdAt")
         .sort({ createdAt: -1 })
-        .limit(5)
+        .limit(take)
         .lean();
 
       recentCustomers.forEach((customer) => {
@@ -3205,11 +3214,14 @@ router.get(
       });
 
       // 2. Recent payouts completed
-      const recentPayouts = await Payout.find({ status: "PAID" })
+      const recentPayouts = await Payout.find({
+        payOutStatus: "DONE",
+        ...(inPeriod ? { updatedAt: inPeriod } : {}),
+      })
         .populate("partnerId", "firstName lastName")
-        .select("amount status updatedAt partnerId")
+        .select("amount payOutStatus updatedAt partnerId")
         .sort({ updatedAt: -1 })
-        .limit(5)
+        .limit(take)
         .lean();
 
       recentPayouts.forEach((payout) => {
@@ -3219,7 +3231,7 @@ router.get(
         activities.push({
           type: "payout_completed",
           title: "Payout completed",
-          description: `₹${payout.amount.toLocaleString()} to ${partnerName}`,
+          description: `₹${Number(payout.amount || 0).toLocaleString("en-IN")} to ${partnerName}`,
           timestamp: payout.updatedAt,
           icon: "banknote",
           iconColor: "green",
@@ -3227,10 +3239,13 @@ router.get(
       });
 
       // 3. Recent partners onboarded
-      const recentPartners = await User.find({ role: ROLES.PARTNER })
+      const recentPartners = await User.find({
+        role: ROLES.PARTNER,
+        ...(inPeriod ? { createdAt: inPeriod } : {}),
+      })
         .select("firstName lastName email employeeId partnerCode createdAt")
         .sort({ createdAt: -1 })
-        .limit(5)
+        .limit(take)
         .lean();
 
       recentPartners.forEach((partner) => {
@@ -3247,12 +3262,13 @@ router.get(
       // 4. Recent application status changes (important ones)
       const recentApplications = await Application.find({
         status: { $in: ["APPROVED", "DISBURSED", "REJECTED"] },
+        ...(inPeriod ? { updatedAt: inPeriod } : {}),
       })
         .populate("customerId", "firstName lastName")
         .populate("partnerId", "firstName lastName")
         .select("appNo status loanType approvedLoanAmount updatedAt customerId partnerId")
         .sort({ updatedAt: -1 })
-        .limit(5)
+        .limit(take)
         .lean();
 
       recentApplications.forEach((app) => {
@@ -7150,19 +7166,22 @@ router.get(
       }
 
       const apps = await Application.find(filter)
-        .populate("customerId", "firstName lastName email phone panNumber aadharNumber employmentType monthlyIncome city pincode employeeId")
+        .populate("customerId", "firstName lastName email phone panNumber aadharNumber employmentType city pincode employeeId")
         .populate("partnerId", "firstName lastName employeeId partnerCode email phone bankName accountNumber ifscCode accountHolderName")
         .populate("rmId", "firstName lastName employeeId phone email")
-        .populate("bankId", "bankName branch ifsc")
         .sort({ updatedAt: -1, createdAt: -1 })
         .lean();
 
-      // Fetch Payouts to associate payment statuses
+      // Payouts are stored on `application`, not a separate applicationId field.
       const appIds = apps.map((a) => a._id);
-      const payouts = await Payout.find({ applicationId: { $in: appIds } }).lean();
+      const payouts = appIds.length
+        ? await Payout.find({ application: { $in: appIds } })
+            .select("application amount payOutStatus note")
+            .lean()
+        : [];
       const payoutMap = new Map();
       payouts.forEach((p) => {
-        if (p.applicationId) payoutMap.set(p.applicationId.toString(), p);
+        if (p.application) payoutMap.set(String(p.application), p);
       });
 
       // Filter by date range and shape data
@@ -7180,6 +7199,14 @@ router.get(
           if (pId) partnerSet.add(pId);
 
           const payout = payoutMap.get(app._id.toString());
+          const sends = Array.isArray(app.bankSends) ? app.bankSends : [];
+          const lastNamedSend = [...sends].reverse().find((s) => s && s.bankName);
+          const lenderName = app.bankName || lastNamedSend?.bankName || "DhanSource Capital";
+          const docs = Array.isArray(app.docs)
+            ? app.docs
+            : Array.isArray(app.documents)
+              ? app.documents
+              : [];
 
           finalApps.push({
             id: app._id,
@@ -7189,7 +7216,7 @@ router.get(
             requestedAmount: Number(app.requestedAmount || app.customer?.loanAmount || 0),
             approvedLoanAmount: approvedAmount,
             status: app.status,
-            bankName: app.bankName || app.bankId?.bankName || "DhanSource Capital",
+            bankName: lenderName,
             disbursedAt: dDate || app.createdAt,
             createdAt: app.createdAt,
             updatedAt: app.updatedAt,
@@ -7233,7 +7260,7 @@ router.get(
                   email: app.rmId.email,
                 }
               : null,
-            documents: Array.isArray(app.documents) ? app.documents : [],
+            documents: docs,
             stageHistory: Array.isArray(app.stageHistory) ? app.stageHistory : [],
             payoutStatus: payout?.payOutStatus || "PENDING",
             payoutAmount: payout?.amount != null ? Number(payout.amount) : 0,

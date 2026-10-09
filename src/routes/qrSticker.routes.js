@@ -6,6 +6,7 @@ import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { ROLES } from "../config/roles.js";
 import { getReferralWebBaseUrl } from "../config/branding.js";
+import { periodBounds } from "../utils/dashboardPeriod.js";
 
 const router = express.Router();
 
@@ -295,11 +296,17 @@ adminQrRouter.get(
         batchId,
         channelHint,
         search,
+        year,
+        month,
         page = 1,
         limit = 50,
       } = req.query;
 
       const filter = {};
+      const period = periodBounds({ year, month });
+      if (period.startDate && period.endDate) {
+        filter.createdAt = { $gte: period.startDate, $lt: period.endDate };
+      }
       if (status && ["UNASSIGNED", "ASSIGNED", "DISABLED"].includes(status)) {
         filter.status = status;
       }
