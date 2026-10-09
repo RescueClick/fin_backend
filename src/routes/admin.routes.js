@@ -95,7 +95,7 @@ import {
 } from "../utils/targetRebalanceService.js";
 import { PUBLIC_LOAN_REFERRAL_FALLBACK_PARTNER_CODE as PUBLIC_LOAN_REFERRAL_FALLBACK } from "../constants/publicReferral.js";
 import { getReferralRewardAmounts } from "../utils/referralService.js";
-import { periodBounds } from "../utils/dashboardPeriod.js";
+import { periodBounds, narrowRangeToDay } from "../utils/dashboardPeriod.js";
 
 const router = Router();
 
@@ -2786,6 +2786,10 @@ router.get(
         startDate = new Date(selectedYear, 0, 1, 0, 0, 0, 0);
         endDate = new Date(selectedYear + 1, 0, 1, 0, 0, 0, 0);
       }
+
+      const narrowed = narrowRangeToDay(startDate, endDate, req.query.day);
+      startDate = narrowed.startDate;
+      endDate = narrowed.endDate;
 
       const isDateFiltered = Boolean(startDate && endDate);
 
@@ -7186,7 +7190,7 @@ router.get(
   requireRole(ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const { year, month, loanType } = req.query;
+      const { year, month, loanType, day } = req.query;
 
       const hasYear = year && year !== "all";
       const hasMonth = month && month !== "all";
@@ -7205,6 +7209,10 @@ router.get(
         startDate = new Date(curYear, Number(month) - 1, 1, 0, 0, 0, 0);
         endDate = new Date(curYear, Number(month), 1, 0, 0, 0, 0);
       }
+
+      const narrowed = narrowRangeToDay(startDate, endDate, day);
+      startDate = narrowed.startDate;
+      endDate = narrowed.endDate;
 
       // Query all DISBURSED applications
       const filter = activeApplicationsFilter({

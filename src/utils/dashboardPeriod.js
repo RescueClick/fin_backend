@@ -33,31 +33,61 @@ export function parseDashboardPeriod(query = {}) {
     endDate = new Date(year + 1, 0, 1);
   }
 
+  const narrowed = narrowRangeToDay(startDate, endDate, query.day);
+
   return {
     year: hasYear ? year : "all",
     month: hasMonth ? month : "all",
+    day: narrowed.day,
     hasYear,
     hasMonth,
-    isFiltered: hasYear || hasMonth,
-    startDate,
-    endDate,
+    hasDay: narrowed.day !== "all",
+    isFiltered: hasYear || hasMonth || narrowed.day !== "all",
+    startDate: narrowed.startDate,
+    endDate: narrowed.endDate,
     currentYear,
     currentMonth,
   };
 }
 
-/** Inclusive start, exclusive end. Month-only uses the current year. */
+/** Narrow a month range to one calendar day. Year-long ranges stay unchanged. */
+export function narrowRangeToDay(startDate, endDate, day) {
+  const d = Number(day);
+  if (!startDate || !endDate || !Number.isFinite(d) || d < 1 || d > 31) {
+    return { startDate, endDate, day: "all" };
+  }
+  const span = endDate.getTime() - startDate.getTime();
+  if (span > 32 * 24 * 60 * 60 * 1000) {
+    return { startDate, endDate, day: "all" };
+  }
+  const y = startDate.getFullYear();
+  const m = startDate.getMonth();
+  const start = new Date(y, m, d, 0, 0, 0, 0);
+  if (start.getMonth() !== m) return { startDate, endDate, day: "all" };
+  return {
+    startDate: start,
+    endDate: new Date(y, m, d + 1, 0, 0, 0, 0),
+    day: d,
+  };
+}
+
+/** Inclusive start, exclusive end. Month-only uses the current year. A day narrows that month to one date. */
 export function periodBounds(query = {}) {
   const period = parseDashboardPeriod(query);
-  if (period.startDate && period.endDate) return period;
-  if (period.hasMonth && period.month >= 1 && period.month <= 12) {
+  let startDate = period.startDate;
+  let endDate = period.endDate;
+  if ((!startDate || !endDate) && period.hasMonth && period.month >= 1 && period.month <= 12) {
     const y = period.currentYear;
-    return {
-      ...period,
-      startDate: new Date(y, period.month - 1, 1),
-      endDate: new Date(y, period.month, 1),
-      isFiltered: true,
-    };
+    startDate = new Date(y, period.month - 1, 1);
+    endDate = new Date(y, period.month, 1);
   }
-  return period;
+  const narrowed = narrowRangeToDay(startDate, endDate, query.day);
+  return {
+    ...period,
+    startDate: narrowed.startDate,
+    endDate: narrowed.endDate,
+    day: narrowed.day,
+    hasDay: narrowed.day !== "all",
+    isFiltered: Boolean(narrowed.startDate && narrowed.endDate),
+  };
 }

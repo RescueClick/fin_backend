@@ -298,12 +298,13 @@ adminQrRouter.get(
         search,
         year,
         month,
+        day,
         page = 1,
         limit = 50,
       } = req.query;
 
       const filter = {};
-      const period = periodBounds({ year, month });
+      const period = periodBounds({ year, month, day });
       if (period.startDate && period.endDate) {
         filter.createdAt = { $gte: period.startDate, $lt: period.endDate };
       }
