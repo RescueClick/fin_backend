@@ -12,7 +12,7 @@ import {
   canonicalDocTypeForVerification,
 } from "../models/Application.js";
 import { Payout } from "../models/Payout.js";
-import { publicFileReview } from "../utils/fileReview.js";
+import { publicFileReview, saveFileReview } from "../utils/fileReview.js";
 import fs from "fs";
 import path from "path";
 import archiver from "archiver";
@@ -2417,6 +2417,45 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
     return res.status(500).json({ message: "Error fetching RM customers" });
   }
 });
+
+// PATCH /applications/:id/file-review — RM updates the internal loan-file review
+router.patch(
+  "/applications/:id/file-review",
+  auth,
+  requireRole(ROLES.RM),
+  async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+        return res.status(400).json({ message: "Invalid application id" });
+      }
+      const rmId = req.user.sub;
+      const partners = await User.find({
+        rmId,
+        role: ROLES.PARTNER,
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      })
+        .select("_id")
+        .lean();
+      const partnerIds = partners.map((p) => p._id);
+      const app = await Application.findOne(
+        activeApplicationsFilter({
+          _id: req.params.id,
+          $or: [{ rmId }, { partnerId: { $in: partnerIds } }],
+        })
+      );
+      if (!app) {
+        return res.status(404).json({ message: "Loan file not found in your customer list" });
+      }
+      const rm = await User.findById(rmId).select("firstName lastName role").lean();
+      const saved = await saveFileReview(app, rm, req.body?.text);
+      return res.json(saved);
+    } catch (err) {
+      const status = err.status || 500;
+      if (status >= 500) console.error("RM file review error:", err);
+      return res.status(status).json({ message: err.message || "Failed to save review" });
+    }
+  }
+);
 
 // Payout endpoints moved to ASM and Admin routes
 
