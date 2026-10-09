@@ -12,6 +12,7 @@ import {
   canonicalDocTypeForVerification,
 } from "../models/Application.js";
 import { Payout } from "../models/Payout.js";
+import { publicFileReview } from "../utils/fileReview.js";
 import fs from "fs";
 import path from "path";
 import archiver from "archiver";
@@ -2371,6 +2372,9 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
         status: app.status,
         hasRunningLoan: app.hasRunningLoan || cust.hasRunningLoan || "NO",
         monthlyEmiPaying: app.monthlyEmiPaying ?? cust.monthlyEmiPaying ?? 0,
+        cibilScoreBand: cust.cibilScoreBand || app.cibilScoreBand || "",
+        salaryInHand: emp.salaryInHand || cust.salaryInHand || app.salaryInHand || "",
+        fileReview: publicFileReview(app.fileReview),
         loanPurpose: app.loanPurpose || cust.loanPurpose || "",
         leadSource: app.leadSource || "PARTNER",
         leadFollowUp: app.leadFollowUp || { status: "NEW", remarks: "" },
