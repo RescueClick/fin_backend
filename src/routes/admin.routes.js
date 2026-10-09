@@ -2322,7 +2322,7 @@ router.get(
             { path: "rsmId", select: "firstName lastName employeeId role" },
           ],
         })
-        .select("appNo loanType approvedLoanAmount status createdAt customer customerId asmId rsmId rmId partnerId loginBankName loginBankId bankSends fileReview")
+        .select("appNo loanType approvedLoanAmount status createdAt customer employmentInfo customerId asmId rsmId rmId partnerId loginBankName loginBankId bankSends fileReview hasRunningLoan monthlyEmiPaying cibilScoreBand salaryInHand salaryReceiptMode")
         .lean();
 
       const formatted = applications.map((app) => {
@@ -2384,6 +2384,14 @@ router.get(
           loanType: app.loanType,
           loanAmount: c.loanAmount || 0,
           disburseAmount: app.approvedLoanAmount || 0,
+          cibilScoreBand: c.cibilScoreBand || app.cibilScoreBand || "",
+          hasRunningLoan: c.hasRunningLoan || app.hasRunningLoan || "NO",
+          monthlyEmiPaying: Number(c.monthlyEmiPaying ?? app.monthlyEmiPaying ?? 0) || 0,
+          salaryInHand:
+            app.employmentInfo?.salaryInHand ||
+            c.salaryInHand ||
+            app.salaryInHand ||
+            "",
           status: app.status,
           applicationDate: app.createdAt,
           partnerName,
