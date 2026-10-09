@@ -1,4 +1,4 @@
-const CIBIL_BANDS = new Set(["BELOW_650", "BELOW_750", "ABOVE_750", "NO_SCORE"]);
+const CIBIL_BANDS = new Set(["BELOW_600", "RANGE_600_700", "RANGE_700_750", "RANGE_750_850"]);
 const SALARY_MODES = new Set(["ONLINE", "CASH"]);
 
 export function personFinancialFrom(source = {}) {
