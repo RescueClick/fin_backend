@@ -2345,7 +2345,7 @@ router.get(
             { path: "rsmId", select: "firstName lastName employeeId role" },
           ],
         })
-        .select("appNo loanType approvedLoanAmount status createdAt customer employmentInfo customerId asmId rsmId rmId partnerId loginBankName loginBankId bankSends fileReview hasRunningLoan monthlyEmiPaying cibilScoreBand salaryInHand salaryReceiptMode")
+        .select("appNo loanType approvedLoanAmount status createdAt customer employmentInfo customerId asmId rsmId rmId partnerId loginBankName loginBankId bankSends fileReview hasRunningLoan monthlyEmiPaying hasBounce bounceCount cibilScoreBand salaryInHand salaryReceiptMode")
         .lean();
 
       const formatted = applications.map((app) => {
@@ -2410,6 +2410,8 @@ router.get(
           cibilScoreBand: c.cibilScoreBand || app.cibilScoreBand || "",
           hasRunningLoan: c.hasRunningLoan || app.hasRunningLoan || "NO",
           monthlyEmiPaying: Number(c.monthlyEmiPaying ?? app.monthlyEmiPaying ?? 0) || 0,
+          hasBounce: c.hasBounce || app.hasBounce || "NO",
+          bounceCount: Number(c.bounceCount ?? app.bounceCount ?? 0) || 0,
           salaryInHand:
             app.employmentInfo?.salaryInHand ||
             c.salaryInHand ||

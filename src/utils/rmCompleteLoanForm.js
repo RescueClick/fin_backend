@@ -245,6 +245,8 @@ export function applyCompleteFormToApplication(app, {
   app.salaryInHand = personFinancial.salaryInHand;
   app.salaryReceiptMode = personFinancial.salaryReceiptMode;
   app.cibilScoreBand = personFinancial.cibilScoreBand;
+  app.hasBounce = personFinancial.hasBounce;
+  app.bounceCount = personFinancial.bounceCount;
   app.customer = {
     ...(app.customer || {}),
     ...personFinancial,

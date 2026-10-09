@@ -130,6 +130,8 @@ const CustomerSchema = new mongoose.Schema(
 
     hasRunningLoan: { type: String, enum: ["YES", "NO", "Yes", "No"], default: "NO" },
     monthlyEmiPaying: { type: Number, default: 0 },
+    hasBounce: { type: String, enum: ["YES", "NO"], default: "NO" },
+    bounceCount: { type: Number, default: 0 },
     loanPurpose: { type: String, trim: true },
     salaryInHand: { type: String, trim: true },
     salaryReceiptMode: { type: String, trim: true },
@@ -261,6 +263,8 @@ const ApplicationSchema = new mongoose.Schema(
     remarks: { type: String },
     hasRunningLoan: { type: String, default: "NO" },
     monthlyEmiPaying: { type: Number, default: 0 },
+    hasBounce: { type: String, default: "NO" },
+    bounceCount: { type: Number, default: 0 },
     loanPurpose: { type: String, trim: true },
     salaryInHand: { type: String, trim: true },
     salaryReceiptMode: { type: String, trim: true },

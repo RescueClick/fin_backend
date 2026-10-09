@@ -1824,6 +1824,8 @@ router.post(
         existingApp.salaryInHand = customerData.salaryInHand;
         existingApp.salaryReceiptMode = customerData.salaryReceiptMode;
         existingApp.cibilScoreBand = customerData.cibilScoreBand;
+        existingApp.hasBounce = customerData.hasBounce || "NO";
+        existingApp.bounceCount = Number(customerData.bounceCount) || 0;
         existingApp.requestedAmount = customerData.loanAmount || existingApp.requestedAmount;
         existingApp.employmentInfo = employmentInfo;
         existingApp.businessInfo = businessInfo;
@@ -1913,6 +1915,8 @@ router.post(
             salaryInHand: customerData.salaryInHand,
             salaryReceiptMode: customerData.salaryReceiptMode,
             cibilScoreBand: customerData.cibilScoreBand,
+            hasBounce: customerData.hasBounce || "NO",
+            bounceCount: Number(customerData.bounceCount) || 0,
             status: applicationStatus === "DRAFT" ? "DRAFT" : "SUBMITTED",
             stageHistory: [],
           });

@@ -338,6 +338,8 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       app.salaryInHand = personFinancial.salaryInHand;
       app.salaryReceiptMode = personFinancial.salaryReceiptMode;
       app.cibilScoreBand = personFinancial.cibilScoreBand;
+      app.hasBounce = personFinancial.hasBounce;
+      app.bounceCount = personFinancial.bounceCount;
       app.requestedAmount = loanAmount || app.requestedAmount || 0;
       stampLoanHierarchy(app, hierarchy, assignedPartner._id);
       app.formProgress = {
@@ -374,6 +376,8 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
             salaryInHand: personFinancial.salaryInHand,
             salaryReceiptMode: personFinancial.salaryReceiptMode,
             cibilScoreBand: personFinancial.cibilScoreBand,
+            hasBounce: personFinancial.hasBounce,
+            bounceCount: personFinancial.bounceCount,
             leadSource,
             requestedAmount: loanAmount,
             leadFollowUp: {
@@ -569,6 +573,10 @@ router.post("/:id/progress", optionalAuth, async (req, res) => {
       app.salaryInHand = personFinancial.salaryInHand;
       app.salaryReceiptMode = personFinancial.salaryReceiptMode;
       app.cibilScoreBand = personFinancial.cibilScoreBand;
+      app.hasBounce = personFinancial.hasBounce;
+      app.bounceCount = personFinancial.bounceCount;
+      app.customer.hasBounce = personFinancial.hasBounce;
+      app.customer.bounceCount = personFinancial.bounceCount;
     }
     if (requestedAmount !== undefined) {
       const amt = Number(requestedAmount) || 0;
@@ -696,6 +704,8 @@ router.get("/rm", auth, requireRole(ROLES.RM), async (req, res) => {
       salaryInHand: app.salaryInHand || app.customer?.salaryInHand || "",
       salaryReceiptMode: app.salaryReceiptMode || app.customer?.salaryReceiptMode || "",
       cibilScoreBand: app.cibilScoreBand || app.customer?.cibilScoreBand || "",
+      hasBounce: app.hasBounce || app.customer?.hasBounce || "NO",
+      bounceCount: app.bounceCount ?? app.customer?.bounceCount ?? 0,
       leadSource: app.leadSource || "PARTNER",
       leadFollowUp: app.leadFollowUp || { status: "NEW", remarks: "" },
       status: app.status,
@@ -1070,6 +1080,8 @@ router.get("/admin", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
       salaryInHand: app.salaryInHand || app.customer?.salaryInHand || "",
       salaryReceiptMode: app.salaryReceiptMode || app.customer?.salaryReceiptMode || "",
       cibilScoreBand: app.cibilScoreBand || app.customer?.cibilScoreBand || "",
+      hasBounce: app.hasBounce || app.customer?.hasBounce || "NO",
+      bounceCount: app.bounceCount ?? app.customer?.bounceCount ?? 0,
       leadSource: app.leadSource || "PARTNER",
       leadFollowUp: app.leadFollowUp || { status: "NEW", remarks: "" },
       customer: {
@@ -1084,6 +1096,8 @@ router.get("/admin", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
         salaryInHand: app.customer?.salaryInHand || app.salaryInHand || "",
         salaryReceiptMode: app.customer?.salaryReceiptMode || app.salaryReceiptMode || "",
         cibilScoreBand: app.customer?.cibilScoreBand || app.cibilScoreBand || "",
+        hasBounce: app.customer?.hasBounce || app.hasBounce || "NO",
+        bounceCount: app.customer?.bounceCount ?? app.bounceCount ?? 0,
       },
       partner: {
         firstName: app.partnerId?.firstName || "",

@@ -359,6 +359,8 @@ router.post(
         existingLeadApp.salaryInHand = personFinancial.salaryInHand;
         existingLeadApp.salaryReceiptMode = personFinancial.salaryReceiptMode;
         existingLeadApp.cibilScoreBand = personFinancial.cibilScoreBand;
+        existingLeadApp.hasBounce = personFinancial.hasBounce;
+        existingLeadApp.bounceCount = personFinancial.bounceCount;
         existingLeadApp.requestedAmount = customer.loanAmount ? Number(customer.loanAmount) : existingLeadApp.requestedAmount;
         existingLeadApp.customer = {
           ...existingLeadApp.customer,
@@ -414,6 +416,8 @@ router.post(
             salaryInHand: personFinancial.salaryInHand,
             salaryReceiptMode: personFinancial.salaryReceiptMode,
             cibilScoreBand: personFinancial.cibilScoreBand,
+            hasBounce: personFinancial.hasBounce,
+            bounceCount: personFinancial.bounceCount,
             requestedAmount: customer.loanAmount ? Number(customer.loanAmount) : undefined,
             customer: {
               firstName: customer.firstName,

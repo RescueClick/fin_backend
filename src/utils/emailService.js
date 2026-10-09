@@ -1160,6 +1160,7 @@ export const sendBankRmEmail = async ({ app, bankName, rmName, to, cc, sender, n
       ["Permanent Address", [c.permanentAddress, c.permanentAddressLandmark, c.permanentAddressPinCode].filter(Boolean).join(", ")],
       ["Running Loan", app.hasRunningLoan || c.hasRunningLoan],
       ["Monthly EMI", formatInr(app.monthlyEmiPaying || c.monthlyEmiPaying || "")],
+      ["Any Bounce", (app.hasBounce || c.hasBounce) === "YES" ? `Yes (${app.bounceCount || c.bounceCount || 0})` : "No"],
     ])}
     ${infoSection("Employment", [
       ["Company", app.employmentInfo?.companyName],
