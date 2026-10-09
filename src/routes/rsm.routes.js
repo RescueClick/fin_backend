@@ -26,6 +26,7 @@ import { createEmailChangeRequest } from "../utils/emailChangeService.js";
 import { emitApplicationStatusChanged } from "../utils/socketEmitter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { assignLoginBank, resolveLoginBank } from "../utils/loginBank.js";
+import { publicFileReview, saveFileReview } from "../utils/fileReview.js";
 import { makeRmCode } from "../utils/codes.js";
 import { Target } from "../models/Target.js";
 import fs from "fs";
@@ -963,8 +964,10 @@ router.get("/applications", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_
     const result = applications.map((app) => {
       const payout = payoutMap[app._id.toString()];
       const loginBank = resolveLoginBank(app);
+      const { fileReviewHistory, ...rest } = app;
       return {
-        ...app,
+        ...rest,
+        fileReview: publicFileReview(app.fileReview),
         loginBankName: loginBank.loginBankName,
         loginBankId: loginBank.loginBankId,
         payoutAmount: payout?.amount || 0,
@@ -978,6 +981,57 @@ router.get("/applications", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_
     res.status(500).json({ message: "Error fetching applications" });
   }
 });
+
+// PATCH /api/rsm/applications/:id/file-review
+router.patch(
+  "/applications/:id/file-review",
+  auth,
+  requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+        return res.status(400).json({ message: "Invalid application id" });
+      }
+      const managerId = req.user.sub;
+      const manager = await User.findById(managerId)
+        .select("role asmType rsmType firstName lastName")
+        .lean();
+      if (!manager) {
+        return res.status(404).json({ message: "Manager not found" });
+      }
+
+      let app;
+      if (manager.role === ROLES.SUPER_ADMIN || manager.role === ROLES.ADMIN) {
+        app = await Application.findOne(activeApplicationsFilter({ _id: req.params.id }));
+      } else {
+        const managerObjectId = toObjectId(managerId);
+        const typeNorm = normalizeRsmTypeValue(manager.asmType || manager.rsmType);
+        const loanTypeFilter = loanTypeFilterForRsmType(typeNorm);
+        const eligibleRmIds =
+          manager.role === ROLES.RSM
+            ? await getRmIdsUnderRsm(managerObjectId)
+            : await eligibleRmIdsForRsmHierarchy(managerObjectId, typeNorm);
+        app = await Application.findOne(
+          activeApplicationsFilter({
+            _id: req.params.id,
+            rmId: { $in: eligibleRmIds },
+            ...loanTypeFilter,
+          })
+        );
+      }
+
+      if (!app) {
+        return res.status(404).json({ message: "Loan file not found in your customer list" });
+      }
+      const saved = await saveFileReview(app, manager, req.body?.text);
+      return res.json(saved);
+    } catch (err) {
+      const status = err.status || 500;
+      if (status >= 500) console.error("RSM file review error:", err);
+      return res.status(status).json({ message: err.message || "Failed to save review" });
+    }
+  }
+);
 
 // GET /api/rsm/applications/:id
 // Get single application details for RSM

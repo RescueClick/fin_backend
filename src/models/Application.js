@@ -218,6 +218,18 @@ const CoApplicantSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// Internal staff note on the loan file. Separate from rejection remarks shown to partners.
+const FileReviewEntrySchema = new mongoose.Schema(
+  {
+    text: { type: String, required: true, maxlength: 500 },
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    updatedByName: { type: String, default: "" },
+    updatedByRole: { type: String, default: "" },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
 // =================== MAIN APPLICATION ===================
 const ApplicationSchema = new mongoose.Schema(
   {
@@ -296,7 +308,9 @@ const ApplicationSchema = new mongoose.Schema(
     loginBankId: { type: mongoose.Schema.Types.ObjectId, ref: "BankMaster" },
     loginBankName: { type: String, trim: true, default: "" },
     deletedAt: { type: Date },
-    isArchived: { type: Boolean, default: false }
+    isArchived: { type: Boolean, default: false },
+    fileReview: { type: FileReviewEntrySchema },
+    fileReviewHistory: { type: [FileReviewEntrySchema], default: [] },
   },
   { timestamps: true }
 );

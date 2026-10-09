@@ -44,6 +44,7 @@ import { computeDashboardFileStats } from "../utils/dashboardFileStats.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { assignLoginBank, resolveLoginBank } from "../utils/loginBank.js";
+import { publicFileReview, saveFileReview } from "../utils/fileReview.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { emitTargetUpdatedForDoc, emitTargetUpdatesForDocs } from "../utils/targetSocketEmitter.js";
 import { emitPayoutCreated, emitApplicationStatusChanged } from "../utils/socketEmitter.js";
@@ -815,7 +816,7 @@ router.get(
       const applications = await Application.find(filter)
         .populate("customerId", "employeeId firstName lastName email phone")
         .populate("partnerId", "firstName lastName employeeId")
-        .select("appNo loanType approvedLoanAmount status createdAt customer loginBankName loginBankId bankSends")
+        .select("appNo loanType approvedLoanAmount status createdAt customer loginBankName loginBankId bankSends fileReview")
         .sort({ createdAt: -1 })
         .lean();
 
@@ -851,6 +852,7 @@ router.get(
           payoutAmount: payout?.amount || 0,
           actionId: app._id,
           loginBankName: loginBank.loginBankName || "",
+          fileReview: publicFileReview(app.fileReview),
         };
       });
 
@@ -858,6 +860,63 @@ router.get(
     } catch (err) {
       console.error("Error fetching ASM applications:", err);
       res.status(500).json({ message: "Error fetching ASM applications" });
+    }
+  }
+);
+
+// PATCH /applications/:id/file-review — ASM/RSM using this list updates the loan-file review
+router.patch(
+  "/applications/:id/file-review",
+  auth,
+  requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+        return res.status(400).json({ message: "Invalid application id" });
+      }
+      const managerId = req.user.sub;
+      const manager = await User.findById(managerId)
+        .select("role asmType firstName lastName")
+        .lean();
+      if (!manager) {
+        return res.status(404).json({ message: "Manager not found" });
+      }
+
+      let app;
+      if (manager.role === ROLES.SUPER_ADMIN || manager.role === ROLES.ADMIN) {
+        app = await Application.findOne(activeApplicationsFilter({ _id: req.params.id }));
+      } else {
+        const { rmIds } = await getAsmScopeIds(managerId);
+        const allowedLoanTypes =
+          manager.role === ROLES.ASM ? loanTypesForAsmType(manager.asmType) : null;
+        const baseScope = [];
+        if (manager.role === ROLES.ASM && allowedLoanTypes?.length) {
+          baseScope.push({
+            loanType: { $in: allowedLoanTypes },
+            rmId: { $in: rmIds },
+          });
+        } else if (rmIds?.length) {
+          baseScope.push({ rmId: { $in: rmIds } });
+        } else {
+          baseScope.push({ rmId: { $in: [] } });
+        }
+        app = await Application.findOne(
+          activeApplicationsFilter({
+            _id: req.params.id,
+            $or: baseScope,
+          })
+        );
+      }
+
+      if (!app) {
+        return res.status(404).json({ message: "Loan file not found in your customer list" });
+      }
+      const saved = await saveFileReview(app, manager, req.body?.text);
+      return res.json(saved);
+    } catch (err) {
+      const status = err.status || 500;
+      if (status >= 500) console.error("ASM file review error:", err);
+      return res.status(status).json({ message: err.message || "Failed to save review" });
     }
   }
 );

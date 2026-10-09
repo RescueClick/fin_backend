@@ -74,6 +74,7 @@ import { bulkMovePartnersToRm } from "../utils/bulkMovePartnersToRm.js";
 import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { resolveLoginBank } from "../utils/loginBank.js";
+import { publicFileReview, saveFileReview } from "../utils/fileReview.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
@@ -2321,7 +2322,7 @@ router.get(
             { path: "rsmId", select: "firstName lastName employeeId role" },
           ],
         })
-        .select("appNo loanType approvedLoanAmount status createdAt customer customerId asmId rsmId rmId partnerId loginBankName loginBankId bankSends")
+        .select("appNo loanType approvedLoanAmount status createdAt customer customerId asmId rsmId rmId partnerId loginBankName loginBankId bankSends fileReview")
         .lean();
 
       const formatted = applications.map((app) => {
@@ -2394,6 +2395,7 @@ router.get(
           rsmName: resolvedRsm ? `${resolvedRsm.firstName} ${resolvedRsm.lastName}`.trim() : null,
           rsmEmployeeId: resolvedRsm ? resolvedRsm.employeeId : null,
           loginBankName: loginBank.loginBankName || "",
+          fileReview: publicFileReview(app.fileReview),
         };
       });
 
@@ -2401,6 +2403,35 @@ router.get(
     } catch (err) {
       console.error("Error fetching customer applications:", err);
       res.status(500).json({ message: "Error fetching customer applications" });
+    }
+  }
+);
+
+// PATCH /applications/:id/file-review — Admin updates the internal loan-file review
+router.patch(
+  "/applications/:id/file-review",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  async (req, res) => {
+    try {
+      if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+        return res.status(400).json({ message: "Invalid application id" });
+      }
+      const app = await Application.findOne(
+        activeApplicationsFilter({ _id: req.params.id })
+      );
+      if (!app) {
+        return res.status(404).json({ message: "Loan file not found" });
+      }
+      const admin = await User.findById(req.user.sub)
+        .select("firstName lastName role")
+        .lean();
+      const saved = await saveFileReview(app, admin, req.body?.text);
+      return res.json(saved);
+    } catch (err) {
+      const status = err.status || 500;
+      if (status >= 500) console.error("Admin file review error:", err);
+      return res.status(status).json({ message: err.message || "Failed to save review" });
     }
   }
 );
