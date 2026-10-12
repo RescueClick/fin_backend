@@ -179,6 +179,13 @@ const router = Router();
 // List all banks (admin view)
 router.get("/banks", auth, requireRole(ROLES.SUPER_ADMIN), async (req, res) => {
   try {
+    if (String(req.query.list || "") === "1") {
+      const banks = await BankMaster.find({ isActive: { $ne: false } })
+        .select("bankName loanType commissionPercentage")
+        .sort({ bankName: 1, loanType: 1 })
+        .lean();
+      return res.json({ banks });
+    }
     const banks = await BankMaster.find({})
       .sort({ createdAt: -1 })
       .lean();
@@ -6237,6 +6244,8 @@ function formatPayoutApplicationRow(app, payout, isDoneEndpoint = false) {
     payoutPercentage,
     companyPercentage: payout?.companyPercentage != null ? Number(payout.companyPercentage) : null,
     companyRevenue: payout?.companyRevenue != null ? Number(payout.companyRevenue) : null,
+    disbursementBankId: payout?.disbursementBankId || app.loginBankId || null,
+    disbursementBankName: payout?.disbursementBankName || app.loginBankName || "",
     grossAmount,
     tdsApplicable,
     tdsSection,
@@ -6300,7 +6309,7 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.SUPER_ADMIN), a
 
     const appIds = applications.map((app) => app._id);
     const payouts = await Payout.find({ application: { $in: appIds } })
-      .select("application amount grossAmount payoutPercentage companyPercentage companyRevenue tdsApplicable tdsSection tdsPercentage tdsAmount netAmount invoiceNumber invoiceDate invoiceSentAt invoiceSentTo invoiceNotes payOutStatus note")
+      .select("application amount grossAmount payoutPercentage companyPercentage companyRevenue +disbursementBankId +disbursementBankName tdsApplicable tdsSection tdsPercentage tdsAmount netAmount invoiceNumber invoiceDate invoiceSentAt invoiceSentTo invoiceNotes payOutStatus note")
       .lean();
 
     const doneAppIds = new Set(
@@ -6347,7 +6356,7 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.SUPER_ADMIN), asyn
       application: { $in: appIds },
       payOutStatus: "DONE",
     })
-      .select("application amount grossAmount payoutPercentage companyPercentage companyRevenue tdsApplicable tdsSection tdsPercentage tdsAmount netAmount invoiceNumber invoiceDate invoiceSentAt invoiceSentTo invoiceNotes payOutStatus note")
+      .select("application amount grossAmount payoutPercentage companyPercentage companyRevenue +disbursementBankId +disbursementBankName tdsApplicable tdsSection tdsPercentage tdsAmount netAmount invoiceNumber invoiceDate invoiceSentAt invoiceSentTo invoiceNotes payOutStatus note")
       .lean();
 
     const doneMap = {};
@@ -6502,6 +6511,8 @@ router.post("/set-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
       invoiceNotes: inputInvoiceNotes,
       sendInvoiceEmail: inputSendInvoiceEmail,
       companyPercentage: inputCompanyPercentage,
+      bankId,
+      disbursementBankName: inputDisbursementBankName,
       note,
       payOutStatus,
     } = req.body;
@@ -6567,6 +6578,26 @@ router.post("/set-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
     const companyPct = hasCompanyPct ? Number(inputCompanyPercentage) : null;
     const companyRev = hasCompanyPct ? Number(((approved * companyPct) / 100).toFixed(2)) : null;
 
+    let disbursementBankId = null;
+    let disbursementBankName = String(inputDisbursementBankName || "").trim();
+    if (bankId && mongoose.Types.ObjectId.isValid(bankId)) {
+      const bank = await BankMaster.findById(bankId).select("bankName loanType commissionPercentage").lean();
+      if (bank) {
+        disbursementBankId = bank._id;
+        disbursementBankName = bank.bankName || disbursementBankName;
+        await Application.updateOne(
+          { _id: application._id },
+          { $set: { loginBankId: bank._id, loginBankName: disbursementBankName } }
+        );
+        if (hasCompanyPct) {
+          await BankMaster.updateOne(
+            { _id: bank._id },
+            { $set: { commissionPercentage: companyPct } }
+          );
+        }
+      }
+    }
+
     const appNo = application.appNo || (application._id ? `TLF${application._id.toString().slice(-4).toUpperCase()}` : "APP");
 
     // Check if payout already exists
@@ -6597,6 +6628,10 @@ router.post("/set-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
         payout.companyPercentage = companyPct;
         payout.companyRevenue = companyRev;
       }
+      if (disbursementBankId || disbursementBankName) {
+        payout.disbursementBankId = disbursementBankId;
+        payout.disbursementBankName = disbursementBankName;
+      }
       if (note !== undefined) {
         payout.note = note;
       }
@@ -6621,6 +6656,9 @@ router.post("/set-payouts", auth, requireRole(ROLES.SUPER_ADMIN), async (req, re
         invoiceDate: invoiceDt,
         invoiceNotes: invoiceNt,
         ...(hasCompanyPct ? { companyPercentage: companyPct, companyRevenue: companyRev } : {}),
+        ...(disbursementBankId || disbursementBankName
+          ? { disbursementBankId, disbursementBankName }
+          : {}),
         note: note || "",
         payOutStatus:
           payOutStatus && ["PENDING", "DONE", "REJECTED"].includes(payOutStatus)
