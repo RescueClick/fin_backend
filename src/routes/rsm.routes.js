@@ -1171,9 +1171,14 @@ router.post(
         });
       } catch (sendErr) {
         console.error("Send to bank email failed:", sendErr);
-        Object.assign(record, { status: "FAILED", error: String(sendErr.message || sendErr).slice(0, 300) });
+        const reason = String(sendErr.message || sendErr);
+        Object.assign(record, { status: "FAILED", error: reason.slice(0, 300) });
         await Application.updateOne({ _id: app._id }, { $push: { bankSends: record } });
-        return res.status(502).json({ message: "Email could not be sent. Please try again.", bankSend: record });
+        const mailbox = String(process.env.EMAIL_USER || "the sending mailbox").trim();
+        const message = /not owned by user/i.test(reason)
+          ? `Email was not sent. Hostinger is blocking ${mailbox}. Open that mailbox in Hostinger, confirm it is a real mailbox and not only a forwarder, reset its password, update EMAIL_PASS, and restart the server.`
+          : "Email could not be sent. Please try again.";
+        return res.status(502).json({ message, bankSend: record });
       }
     } catch (err) {
       console.error("Send to bank error:", err);
