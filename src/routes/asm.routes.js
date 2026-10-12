@@ -12,6 +12,7 @@ import { Incentive } from "../models/Incentive.js";
 import { Config } from "../models/Config.js";
 import mongoose from "mongoose";
 import { Application } from "../models/Application.js";
+import { BankMaster } from "../models/BankMaster.js";
 import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
 import { sendMail } from "../utils/sendMail.js";
 import { sendUserAccountEmail } from "../utils/emailService.js";
@@ -2164,6 +2165,11 @@ function formatAsmPayoutApplicationRow(app, payout, isDoneEndpoint = false) {
     createdAt: app.createdAt,
     disbursedAt,
     updatedAt: disbursedAt || app.updatedAt,
+    actualLoanAmount: payout?.actualLoanAmount ?? null,
+    companyPercentage: payout?.companyPercentage ?? null,
+    companyRevenue: payout?.companyRevenue ?? null,
+    disbursementBankId: payout?.disbursementBankId || app.loginBankId || null,
+    disbursementBankName: payout?.disbursementBankName || app.loginBankName || "",
   };
 }
 
@@ -2197,7 +2203,7 @@ router.get("/customers/pending-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM,
 
     const appIds = applications.map((app) => app._id);
     const payouts = await Payout.find({ application: { $in: appIds } })
-      .select("application amount payOutStatus note")
+      .select("application amount payOutStatus note payoutPercentage +actualLoanAmount +companyPercentage +companyRevenue +disbursementBankId +disbursementBankName")
       .lean();
 
     const doneAppIds = new Set(
@@ -2259,7 +2265,7 @@ router.get("/customers/done-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, RO
       application: { $in: appIds },
       payOutStatus: "DONE",
     })
-      .select("application amount payOutStatus note")
+      .select("application amount payOutStatus note payoutPercentage +actualLoanAmount +companyPercentage +companyRevenue +disbursementBankId +disbursementBankName")
       .lean();
 
     const doneMap = {};
@@ -2388,6 +2394,9 @@ router.post("/set-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
       payoutPercentage,
       payoutAmount: directPayoutAmount,
       note,
+      actualLoanAmount,
+      companyPercentage,
+      bankId,
     } = req.body;
 
     // Validate ObjectId
@@ -2407,7 +2416,7 @@ router.post("/set-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
         { rmId: { $in: rmIds } },
         { partnerId: { $in: partnerIds } },
       ],
-    }).select("approvedLoanAmount partnerId rmId status");
+    }).select("approvedLoanAmount partnerId rmId status loginBankId loginBankName");
 
     if (!application) {
       return res.status(404).json({ message: "Application not found or not assigned to your hierarchy" });
@@ -2443,11 +2452,52 @@ router.post("/set-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
       });
     }
 
+    let disbursementBank = null;
+    if (bankId) {
+      if (!mongoose.Types.ObjectId.isValid(bankId)) {
+        return res.status(400).json({ message: "Invalid disbursement bank" });
+      }
+      disbursementBank = await BankMaster.findById(bankId).select("bankName commissionPercentage").lean();
+      if (!disbursementBank) {
+        return res.status(404).json({ message: "Disbursement bank not found" });
+      }
+      application.loginBankId = disbursementBank._id;
+      application.loginBankName = disbursementBank.bankName;
+      await application.save();
+    }
+
+    const actualAmount = Number(actualLoanAmount);
+    const bankPct = Number(companyPercentage);
+    const hasActual = actualLoanAmount !== undefined && actualLoanAmount !== "" && Number.isFinite(actualAmount) && actualAmount >= 0;
+    const hasBankPct = companyPercentage !== undefined && companyPercentage !== "" && Number.isFinite(bankPct) && bankPct >= 0;
+    const bankCommission = hasActual && hasBankPct
+      ? Number(((actualAmount * bankPct) / 100).toFixed(2))
+      : null;
+
+    if (disbursementBank && hasBankPct) {
+      await BankMaster.updateOne(
+        { _id: disbursementBank._id },
+        { $set: { commissionPercentage: bankPct } }
+      );
+    }
+
     if (payout) {
       // Update existing proposed payout — always stay PENDING for Admin
       payout.amount = payoutAmount || payout.amount;
+      payout.grossAmount = payoutAmount || payout.grossAmount;
+      payout.netAmount = payoutAmount || payout.netAmount;
+      if (payoutPercentage != null && payoutPercentage !== "" && !isNaN(Number(payoutPercentage))) {
+        payout.payoutPercentage = Number(payoutPercentage);
+      }
       payout.note = note || payout.note;
       payout.payOutStatus = "PENDING";
+      if (hasActual) payout.actualLoanAmount = actualAmount;
+      if (hasBankPct) payout.companyPercentage = bankPct;
+      if (bankCommission != null) payout.companyRevenue = bankCommission;
+      if (disbursementBank) {
+        payout.disbursementBankId = disbursementBank._id;
+        payout.disbursementBankName = disbursementBank.bankName;
+      }
       await payout.save();
     } else {
       // Create new payout proposal for Admin
@@ -2455,9 +2505,18 @@ router.post("/set-payouts", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_
         application: applicationId,
         partnerId,
         amount: payoutAmount,
+        grossAmount: payoutAmount,
+        netAmount: payoutAmount,
+        payoutPercentage: payoutPercentage != null && payoutPercentage !== "" ? Number(payoutPercentage) : undefined,
         note,
         payOutStatus: "PENDING",
         addedBy: managerId,
+        ...(hasActual ? { actualLoanAmount: actualAmount } : {}),
+        ...(hasBankPct ? { companyPercentage: bankPct } : {}),
+        ...(bankCommission != null ? { companyRevenue: bankCommission } : {}),
+        ...(disbursementBank
+          ? { disbursementBankId: disbursementBank._id, disbursementBankName: disbursementBank.bankName }
+          : {}),
       });
     }
 

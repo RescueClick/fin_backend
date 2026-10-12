@@ -47,6 +47,9 @@ const bankMasterSchema = new mongoose.Schema(
 
     isActive: { type: Boolean, default: true },
 
+    // Percent DhanSource receives from this bank. Admin only; not a partner payout.
+    commissionPercentage: { type: Number, default: null },
+
     // For audit
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },

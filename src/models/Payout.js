@@ -43,6 +43,21 @@ const payoutSchema = new mongoose.Schema(
       type: Number,
       select: false,
     },
+    // Real amount disbursed by the bank. Partner commission uses the approval amount instead.
+    actualLoanAmount: {
+      type: Number,
+      select: false,
+    },
+    disbursementBankId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "BankMaster",
+      select: false,
+    },
+    disbursementBankName: {
+      type: String,
+      trim: true,
+      select: false,
+    },
     tdsApplicable: {
       type: Boolean,
       default: true,

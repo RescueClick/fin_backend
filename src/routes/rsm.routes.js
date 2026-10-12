@@ -1888,6 +1888,14 @@ router.patch("/profile/update", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SU
 // RSM fetches banks allowed for their rsmType
 router.get("/banks", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   try {
+    if (String(req.query.all || "") === "1") {
+      const banks = await BankMaster.find({ isActive: true })
+        .select("bankName loanType commissionPercentage")
+        .sort({ bankName: 1, loanType: 1 })
+        .lean();
+      return res.json(banks);
+    }
+
     const rsm = await User.findById(req.user.sub)
       .select("asmType rsmType")
       .lean();
