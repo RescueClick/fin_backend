@@ -936,6 +936,7 @@ export const sendDeleteAccountConfirmationEmail = async (user) => {
 import {
   buildPartnerInvoiceHtml,
   calculateTdsAndNet,
+  settleNetAfterTds,
   generateInvoiceNumber,
   generateIncentiveInvoiceNumber,
   formatINR,
@@ -992,8 +993,17 @@ export const sendPartnerPayoutInvoiceEmail = async ({
   });
 
   const finalGross = grossAmount != null ? Number(grossAmount) : calc.grossAmount;
-  const finalTdsAmt = tdsAmount != null ? Number(tdsAmount) : calc.tdsAmount;
-  const finalNetAmt = netAmount != null ? Number(netAmount) : (payoutAmount > 0 && grossAmount == null ? payoutAmount : calc.netAmount);
+  const finalTdsAmt =
+    tdsAmount != null && Number(tdsAmount) > 0
+      ? Number(tdsAmount)
+      : tdsApplicable
+      ? calc.tdsAmount
+      : 0;
+  const finalNetAmt = settleNetAfterTds(
+    finalGross,
+    tdsApplicable ? finalTdsAmt : 0,
+    netAmount != null ? Number(netAmount) : payoutAmount > 0 && grossAmount == null ? payoutAmount : null
+  );
   const finalTdsSection = tdsSection || calc.tdsSection || "194T";
   const finalTdsRate = tdsPercentage != null ? Number(tdsPercentage) : calc.tdsPercentage;
   const finalInvoiceNo =

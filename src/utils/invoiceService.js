@@ -109,6 +109,20 @@ export function calculateTdsAndNet({
 }
 
 /**
+ * Net transferred is gross minus TDS.
+ * A stored net that still equals the gross never had the tax cut applied.
+ */
+export function settleNetAfterTds(grossAmount, tdsAmount, storedNet) {
+  const gross = Number(grossAmount) || 0;
+  const tds = Math.max(0, Number(tdsAmount) || 0);
+  const expected = Number(Math.max(0, gross - tds).toFixed(2));
+  const stored = storedNet == null || storedNet === "" ? null : Number(storedNet);
+  if (stored == null || Number.isNaN(stored) || stored <= 0) return expected;
+  if (tds > 0 && Math.abs(stored - gross) < 0.05) return expected;
+  return Number(stored.toFixed(2));
+}
+
+/**
  * Generate standardized tax invoice number
  * Format: INV-PO-YYYY-APPNUMBER-XXXX
  */
@@ -222,6 +236,11 @@ export function buildPartnerInvoiceHtml({
   const secBadge = tdsApplicable
     ? `TDS U/S ${tdsSection || "194T"} (${tdsPercentage}%) APPLIED`
     : "TDS EXEMPTED / NOT APPLIED";
+  const settledNet = settleNetAfterTds(
+    grossAmount,
+    tdsApplicable ? tdsAmount : 0,
+    netAmount
+  );
 
   return `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1e293b; line-height: 1.5; max-width: 680px; margin: 0 auto; background: #ffffff;">
@@ -367,7 +386,7 @@ export function buildPartnerInvoiceHtml({
               </span>
             </td>
             <td style="padding: 12px 14px; text-align: right; font-weight: 900; font-size: 18px; color: #15803d;">
-              ${formatINR(netAmount || grossAmount)}
+              ${formatINR(settledNet)}
             </td>
           </tr>
         </table>

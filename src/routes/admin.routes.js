@@ -50,6 +50,7 @@ import {
 } from "../utils/emailService.js";
 import {
   calculateTdsAndNet,
+  settleNetAfterTds,
   generateInvoiceNumber,
   generateIncentiveInvoiceNumber,
   buildPartnerInvoiceHtml,
@@ -6213,12 +6214,11 @@ function formatPayoutApplicationRow(app, payout, isDoneEndpoint = false) {
       ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2))
       : 0;
   const rawNet = payout?.netAmount != null ? Number(payout.netAmount) : null;
-  const netAmount =
-    rawNet != null && rawNet > 0
-      ? rawNet
-      : payoutAmount > 0
-      ? payoutAmount
-      : Number(Math.max(0, grossAmount - tdsAmount).toFixed(2));
+  const netAmount = settleNetAfterTds(
+    grossAmount,
+    tdsAmount,
+    rawNet != null && rawNet > 0 ? rawNet : payoutAmount > 0 ? payoutAmount : null
+  );
 
   const payoutPercentage =
     payout?.payoutPercentage != null
@@ -6779,7 +6779,6 @@ router.post("/payouts/:payoutId/send-invoice", auth, requireRole(ROLES.SUPER_ADM
     const rawGross = payout.grossAmount != null ? Number(payout.grossAmount) : null;
     const grossAmount = rawGross != null && rawGross > 0 ? rawGross : paidAmount;
     const rawNet = payout.netAmount != null ? Number(payout.netAmount) : null;
-    const netAmount = rawNet != null && rawNet > 0 ? rawNet : paidAmount;
     const tdsApplicable = payout.tdsApplicable !== undefined ? payout.tdsApplicable : true;
     const tdsSection = payout.tdsSection || policy.tdsSection || DEFAULT_TDS_SECTION;
     const tdsPercentage = payout.tdsPercentage != null ? payout.tdsPercentage : (policy.tdsPercentage ?? DEFAULT_TDS_PERCENTAGE);
@@ -6790,6 +6789,11 @@ router.post("/payouts/:payoutId/send-invoice", auth, requireRole(ROLES.SUPER_ADM
         : tdsApplicable && grossAmount > 0
         ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2))
         : 0;
+    const netAmount = settleNetAfterTds(
+      grossAmount,
+      tdsApplicable ? tdsAmount : 0,
+      rawNet != null && rawNet > 0 ? rawNet : paidAmount
+    );
     const invoiceNumber = payout.invoiceNumber || generateInvoiceNumber(appNo, payout._id);
 
     const emailResult = await sendPartnerPayoutInvoiceEmail({
@@ -6928,7 +6932,6 @@ router.get("/payouts/:payoutId/invoice", auth, requireRole(ROLES.SUPER_ADMIN), a
     const rawGross = payout.grossAmount != null ? Number(payout.grossAmount) : null;
     const grossAmount = rawGross != null && rawGross > 0 ? rawGross : paidAmount;
     const rawNet = payout.netAmount != null ? Number(payout.netAmount) : null;
-    const netAmount = rawNet != null && rawNet > 0 ? rawNet : paidAmount;
     const tdsApplicable = payout.tdsApplicable !== undefined ? payout.tdsApplicable : true;
     const tdsSection = payout.tdsSection || policy.tdsSection || DEFAULT_TDS_SECTION;
     const tdsPercentage = payout.tdsPercentage != null ? payout.tdsPercentage : (policy.tdsPercentage ?? DEFAULT_TDS_PERCENTAGE);
@@ -6939,6 +6942,11 @@ router.get("/payouts/:payoutId/invoice", auth, requireRole(ROLES.SUPER_ADMIN), a
         : tdsApplicable && grossAmount > 0
         ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2))
         : 0;
+    const netAmount = settleNetAfterTds(
+      grossAmount,
+      tdsApplicable ? tdsAmount : 0,
+      rawNet != null && rawNet > 0 ? rawNet : paidAmount
+    );
     const invoiceNumber = payout.invoiceNumber || generateInvoiceNumber(appNo, payout._id);
     const invoiceDate = payout.invoiceDate || payout.updatedAt || new Date();
 
@@ -8559,7 +8567,6 @@ router.post(
       const rawGross = incentive.grossAmount != null ? Number(incentive.grossAmount) : null;
       const grossAmount = rawGross != null && rawGross > 0 ? rawGross : paidAmount;
       const rawNet = incentive.netAmount != null ? Number(incentive.netAmount) : null;
-      const netAmount = rawNet != null && rawNet > 0 ? rawNet : paidAmount;
       const tdsApplicable =
         incentive.tdsApplicable !== undefined ? incentive.tdsApplicable : true;
       const tdsSection = incentive.tdsSection || policy.tdsSection || DEFAULT_TDS_SECTION;
@@ -8574,6 +8581,11 @@ router.post(
           : tdsApplicable && grossAmount > 0
           ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2))
           : 0;
+      const netAmount = settleNetAfterTds(
+        grossAmount,
+        tdsApplicable ? tdsAmount : 0,
+        rawNet != null && rawNet > 0 ? rawNet : paidAmount
+      );
 
       const partnerCode = partner.employeeId || partner.partnerCode || "PARTNER";
       const periodRef = `${incentive.year}-${String(incentive.month).padStart(2, "0")}`;

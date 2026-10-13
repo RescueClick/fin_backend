@@ -46,6 +46,7 @@ import {
   buildPartnerInvoiceHtml,
   getInvoiceAndTdsPolicy,
   generateInvoiceNumber,
+  settleNetAfterTds,
 } from "../utils/invoiceService.js";
 import { WithdrawalRequest } from "../models/WithdrawalRequest.js";
 import {
@@ -3298,8 +3299,14 @@ router.get(
         const isTds = p.tdsApplicable !== undefined ? p.tdsApplicable : true;
         const tdsSec = p.tdsSection || "194T";
         const tdsPct = p.tdsPercentage != null ? Number(p.tdsPercentage) : 10;
-        const tdsAmt = p.tdsAmount != null ? Number(p.tdsAmount) : (isTds ? Number(((gross * tdsPct) / 100).toFixed(2)) : 0);
-        const netAmt = p.netAmount != null ? Number(p.netAmount) : Number((gross - tdsAmt).toFixed(2));
+        const storedTds = p.tdsAmount != null ? Number(p.tdsAmount) : null;
+        const tdsAmt =
+          storedTds != null && storedTds > 0
+            ? storedTds
+            : isTds
+            ? Number(((gross * tdsPct) / 100).toFixed(2))
+            : 0;
+        const netAmt = settleNetAfterTds(gross, isTds ? tdsAmt : 0, p.netAmount);
 
         return {
           id: p._id,
@@ -4330,11 +4337,21 @@ router.get(
       const approvedAmount = Number(fullApp?.approvedLoanAmount || fullApp?.customer?.loanAmount || 0);
 
       const grossAmount = payout.grossAmount != null ? Number(payout.grossAmount) : Number(payout.amount || 0);
-      const netAmount = payout.netAmount != null ? Number(payout.netAmount) : Number(payout.amount || 0);
       const tdsApplicable = payout.tdsApplicable !== undefined ? payout.tdsApplicable : true;
       const tdsSection = payout.tdsSection || policy.tdsSection || "194T";
       const tdsPercentage = payout.tdsPercentage != null ? payout.tdsPercentage : 10;
-      const tdsAmount = payout.tdsAmount != null ? payout.tdsAmount : (tdsApplicable ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2)) : 0);
+      const storedTds = payout.tdsAmount != null ? Number(payout.tdsAmount) : null;
+      const tdsAmount =
+        storedTds != null && storedTds > 0
+          ? storedTds
+          : tdsApplicable
+          ? Number(((grossAmount * tdsPercentage) / 100).toFixed(2))
+          : 0;
+      const netAmount = settleNetAfterTds(
+        grossAmount,
+        tdsApplicable ? tdsAmount : 0,
+        payout.netAmount != null ? Number(payout.netAmount) : payout.amount
+      );
       const invoiceNumber = payout.invoiceNumber || generateInvoiceNumber(appNo, payout._id);
 
       const invoicePayload = {
