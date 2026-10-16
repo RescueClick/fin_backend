@@ -11,11 +11,11 @@ import { getClientBaseUrl } from "../config/branding.js";
 
 const LOAN_TYPE_FORM_PATH = {
   PERSONAL: "/partner/personal-loan",
-  BUSINESS: "/partner/business-loan",
+  BUSINESS: "/partner/bussiness-loan",
   HOME_LOAN_SALARIED: "/partner/home-loan-salaried",
-  HOME_LOAN_SELF_EMPLOYED: "/partner/home-loan-self-employed",
+  HOME_LOAN_SELF_EMPLOYED: "/partner/home-loan-self-employee",
   LAP_SALARIED: "/partner/lap-loan-salaried",
-  LAP_SELF_EMPLOYED: "/partner/lap-loan-self-employed",
+  LAP_SELF_EMPLOYED: "/partner/lap-loan-self-employee",
   LAP: "/partner/lap-loan-salaried",
 };
 
