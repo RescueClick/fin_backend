@@ -2399,17 +2399,30 @@ function partnerVisibleAppsFilter(partnerId) {
 }
 
 function resolveAppRemarks(app) {
-  if (app?.remarks) return app.remarks;
   const history = app?.stageHistory;
   if (Array.isArray(history) && history.length) {
+    // 1. Look for the note that admin / RM entered on transitioning to the current status
+    for (let i = history.length - 1; i >= 0; i--) {
+      const entry = history[i];
+      if (entry?.to === app?.status && entry?.note && String(entry.note).trim()) {
+        const trimmed = String(entry.note).trim();
+        if (trimmed.length > 1) return trimmed;
+      }
+    }
+    // 2. Look for the latest note in stage history
     for (let i = history.length - 1; i >= 0; i--) {
       const entry = history[i];
       if (entry?.note && String(entry.note).trim()) {
-        return entry.note;
+        const trimmed = String(entry.note).trim();
+        if (trimmed.length > 1) return trimmed;
       }
     }
   }
-  return null;
+  if (app?.remarks && String(app.remarks).trim()) {
+    const trimmed = String(app.remarks).trim();
+    if (trimmed.length > 1) return trimmed;
+  }
+  return app?.remarks || null;
 }
 
 /** Partner views own applications with customer + payout info */
@@ -2595,6 +2608,7 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
       payoutAmount: payoutMap[app._id.toString()] || 0, // ✅ only payout amount
       docs: app.docs || [], // ✅ Include documents for incomplete doc tracking
       remarks: resolveAppRemarks(app), // rejection remark from app.remarks or stageHistory
+      stageNote: resolveAppRemarks(app),
       rm: {
         rmId: app.rmId?._id,
         name: `${app.rmId?.firstName ?? ""} ${app.rmId?.lastName ?? ""}`.trim(),
@@ -2641,6 +2655,9 @@ router.get(
           message: "Application not found or not assigned to this Partner",
         });
       }
+
+      application.remarks = resolveAppRemarks(application);
+      application.stageNote = resolveAppRemarks(application);
 
       return res.json(application);
     } catch (err) {
