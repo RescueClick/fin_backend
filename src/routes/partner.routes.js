@@ -2580,6 +2580,7 @@ router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
     const customers = applications.map((app) => ({
       customerId: app.customerId?._id,
       customerEmployeeId: app.customerId?.employeeId || null,
+      appNo: app.appNo || (app._id ? `DS-${app._id.toString().slice(-6).toUpperCase()}` : null),
       customerName: app.customer?.firstName
         ? `${app.customer.firstName} ${app.customer.lastName || ""}`.trim()
         : `${app.customerId?.firstName ?? ""} ${app.customerId?.lastName ?? ""}`.trim(),
