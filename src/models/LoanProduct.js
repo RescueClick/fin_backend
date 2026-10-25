@@ -25,7 +25,23 @@ const FormFieldSchema = new mongoose.Schema(
     label: { type: String, required: true },
     fieldType: {
       type: String,
-      enum: ["text", "number", "email", "phone", "select", "radio", "date", "textarea", "currency"],
+      enum: [
+        "text",
+        "number",
+        "email",
+        "phone",
+        "select",
+        "radio",
+        "date",
+        "textarea",
+        "currency",
+        "pan",
+        "aadhaar",
+        "image",
+        "file",
+        "signature",
+        "checkbox",
+      ],
       default: "text",
     },
     placeholder: { type: String, default: "" },
@@ -58,6 +74,7 @@ const LoanStepSchema = new mongoose.Schema(
     stepIndex: { type: Number, required: true },
     title: { type: String, required: true },
     description: { type: String, default: "" },
+    icon: { type: String, default: "📋" },
   },
   { _id: false }
 );
