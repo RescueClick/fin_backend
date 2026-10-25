@@ -659,6 +659,35 @@ router.post("/:id/progress", optionalAuth, async (req, res) => {
 });
 
 /**
+ * GET /api/leads/:id/docs
+ * Rehydrate uploaded documents for an application/lead on page reload/refresh.
+ * Returns { ok: true, applicationId, docs: [ { docType, url, status, updatedAt } ] }
+ */
+router.get("/:id/docs", optionalAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ ok: false, message: "Invalid application id" });
+    }
+
+    const app = await Application.findById(id).select("docs status appNo loanType").lean();
+    if (!app) {
+      return res.status(404).json({ ok: false, message: "Application not found" });
+    }
+
+    return res.json({
+      ok: true,
+      applicationId: app._id,
+      status: app.status,
+      docs: (app.docs || []).filter((d) => Boolean(d && d.url)),
+    });
+  } catch (err) {
+    console.error("GET /leads/:id/docs error:", err);
+    return res.status(500).json({ ok: false, message: err.message || "Failed to fetch docs" });
+  }
+});
+
+/**
  * GET /api/leads/rm
  * Get all leads assigned to the logged-in RM (or partners under this RM).
  */
