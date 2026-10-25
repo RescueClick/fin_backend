@@ -329,3 +329,30 @@ export function validateApplicationPayload({
 
   return errors;
 }
+
+/**
+ * Merges newly uploaded documents into existing documents without wiping
+ * previously uploaded documents. Updates matching docType or appends new ones.
+ */
+export function mergeDocsKeepExisting(existingDocs = [], newDocs = []) {
+  if (!newDocs || !newDocs.length) return existingDocs || [];
+  const byType = new Map();
+  for (const doc of existingDocs || []) {
+    const key = String(doc.docType || "").toUpperCase();
+    if (!byType.has(key)) byType.set(key, []);
+    byType.get(key).push(doc);
+  }
+  const merged = [];
+  for (const incoming of newDocs) {
+    const key = String(incoming.docType || "").toUpperCase();
+    const bucket = byType.get(key) || [];
+    if (bucket.length) bucket.shift();
+    byType.set(key, bucket);
+    merged.push(incoming);
+  }
+  for (const docs of byType.values()) {
+    if (docs?.length) merged.push(...docs);
+  }
+  return merged;
+}
+

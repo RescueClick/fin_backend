@@ -26,6 +26,7 @@ import { DEFAULT_REFERRAL_BENEFITS } from "../utils/referralBannerDefaults.js";
 import {
   normalizeApplicationPayload,
   validateApplicationPayload,
+  mergeDocsKeepExisting,
 } from "../utils/applicationPayloadHelper.js";
 import { Payout } from "../models/Payout.js";
 import { partnerUpload } from "../middleware/profileUpload.js";
@@ -1196,15 +1197,8 @@ router.post(
         existingApp &&
         ["DRAFT", "DOC_INCOMPLETE", "LEAD"].includes(existingApp.status)
       ) {
-        // Partner resubmission with files replaces docs. Empty DRAFT shell
-        // (mobile resilient fallback) must KEEP existing docs so we don't wipe
-        // uploads before per-document upload completes.
-        const docsToSave =
-          newDocs.length > 0
-            ? newDocs
-            : applicationStatus === "DRAFT"
-              ? existingApp.docs || []
-              : newDocs;
+        // Merge newly uploaded files with existing docs (never wipe previously uploaded documents)
+        const docsToSave = mergeDocsKeepExisting(existingApp.docs || [], newDocs || []);
         if (applicationStatus !== "DRAFT") {
           const missingDocs = findMissingMandatoryDocs(loanType, customer, docsToSave);
           if (missingDocs.length > 0) {
@@ -1723,12 +1717,8 @@ router.post(
         // Partner resubmission with files replaces docs. Empty DRAFT shell
         // (mobile resilient fallback) must KEEP existing docs so we don't wipe
         // uploads before per-document upload completes.
-        const docsToSave =
-          newDocs.length > 0
-            ? newDocs
-            : applicationStatus === "DRAFT"
-              ? existingApp.docs || []
-              : newDocs;
+        // Merge newly uploaded files with existing docs (never wipe previously uploaded documents)
+        const docsToSave = mergeDocsKeepExisting(existingApp.docs || [], newDocs || []);
         if (applicationStatus !== "DRAFT") {
           const missingDocs = findMissingMandatoryDocs(loanType, customer, docsToSave);
           if (missingDocs.length > 0) {
@@ -4501,6 +4491,74 @@ router.get("/referral-banners", async (req, res) => {
     return res.json({ banners: DEFAULT_REFERRAL_BENEFITS });
   }
 });
+
+// ✅ Upload document for a lead / draft application (Public / Pre-submit)
+router.post(
+  "/public/applications/:id/documents",
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const docType = req.query.docType || req.body?.docType;
+
+      if (!docType) {
+        return res.status(400).json({ message: "docType is required" });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ message: "File is required" });
+      }
+
+      const violSingle = oversizeSingleDocViolation(req.file, docType);
+      if (violSingle) {
+        await deleteS3ObjectsForUploadedFiles([req.file]);
+        return res.status(400).json({ message: formatOversizeMessage(violSingle) });
+      }
+
+      const application = await Application.findOne({
+        _id: id,
+        status: { $in: ["LEAD", "DRAFT", "DOC_INCOMPLETE"] },
+      });
+
+      if (!application) {
+        return res.status(404).json({
+          message: "Application not found or already completed",
+        });
+      }
+
+      const normDocType = normalizeIncomingDocType(docType);
+      const docIndex = (application.docs || []).findIndex(
+        (doc) => String(doc.docType || "").toUpperCase() === normDocType.toUpperCase()
+      );
+
+      const newDocObj = {
+        docType: normDocType,
+        url: req.file.location,
+        status: "PENDING",
+        uploadedAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      if (docIndex >= 0) {
+        application.docs[docIndex] = newDocObj;
+      } else {
+        application.docs.push(newDocObj);
+      }
+
+      await application.save();
+
+      return res.json({
+        ok: true,
+        message: "Document uploaded successfully",
+        doc: newDocObj,
+        docsCount: application.docs.length,
+      });
+    } catch (err) {
+      console.error("Public doc upload error:", err);
+      return res.status(500).json({ message: err.message || "Failed to upload document" });
+    }
+  }
+);
 
 // ✅ Upload document for an application
 router.post(

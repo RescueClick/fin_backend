@@ -24,6 +24,7 @@ import { getSupportSettings } from "../utils/supportSettings.js";
 import {
   normalizeApplicationPayload,
   validateApplicationPayload,
+  mergeDocsKeepExisting,
 } from "../utils/applicationPayloadHelper.js";
 import { findMissingMandatoryDocs } from "../utils/loanMandatoryDocRules.js";
 
@@ -338,7 +339,7 @@ router.post(
         existingLeadApp.rmId = appRmId || existingLeadApp.rmId;
         existingLeadApp.rsmId = assignedRsmId;
         existingLeadApp.asmId = assignedAsmId;
-        existingLeadApp.docs = docs;
+        existingLeadApp.docs = mergeDocsKeepExisting(existingLeadApp.docs || [], docs || []);
         existingLeadApp.references = refs;
         existingLeadApp.employmentInfo = employmentInfo;
         existingLeadApp.businessInfo = businessInfo;
