@@ -2565,6 +2565,244 @@ router.get(
   }
 );
 
+// ✅ Partner views pre-mapped form data for viewing/editing their loan application
+router.get(
+  "/applications/:applicationId/form-data",
+  auth,
+  requireRole(ROLES.PARTNER),
+  async (req, res) => {
+    try {
+      const { applicationId } = req.params;
+      const partnerId = req.user.sub;
+
+      const app = await Application.findOne({
+        _id: applicationId,
+        partnerId,
+      })
+        .populate("customerId", "firstName middleName lastName email phone")
+        .populate("rmId", "firstName lastName email phone")
+        .lean();
+
+      if (!app) {
+        return res.status(404).json({
+          message: "Application not found or not accessible to this partner",
+        });
+      }
+
+      const customerUser = app.customerId || {};
+      const c = app.customer || {};
+
+      return res.json({
+        id: app._id,
+        appNo: app.appNo,
+        status: app.status === "LOGIN" ? "DOC_COMPLETE" : app.status,
+        loanType: app.loanType,
+        dynamicProductCode: app.dynamicProductCode || app.loanType,
+        customFieldResponses: app.customFieldResponses || {},
+        customer: {
+          ...c,
+          firstName: c.firstName || customerUser.firstName || "",
+          middleName: c.middleName || customerUser.middleName || "",
+          lastName: c.lastName || customerUser.lastName || "",
+          email: c.email || customerUser.email || "",
+          phone: c.phone || customerUser.phone || "",
+          hasRunningLoan: c.hasRunningLoan || app.hasRunningLoan || "NO",
+          monthlyEmiPaying: c.monthlyEmiPaying ?? app.monthlyEmiPaying ?? 0,
+          loanPurpose: c.loanPurpose || app.loanPurpose || "",
+          loanAmount: c.loanAmount || app.requestedAmount || 0,
+        },
+        employmentInfo: app.employmentInfo || null,
+        businessInfo: app.businessInfo || null,
+        propertyInfo: app.propertyInfo || null,
+        vehicleInfo: app.vehicleInfo || null,
+        coApplicant: app.coApplicant || null,
+        references: app.references || [],
+        docs: (app.docs || []).map((d) => ({
+          docType: d.docType,
+          url: d.url,
+          status: d.status,
+          remarks: d.remarks || "",
+        })),
+      });
+    } catch (err) {
+      console.error("Partner form-data error:", err);
+      return res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// ✅ Partner updates loan application form details (View & Edit Form)
+router.post(
+  "/applications/:applicationId/complete-form",
+  auth,
+  requireRole(ROLES.PARTNER),
+  upload.array("docs", 20),
+  async (req, res) => {
+    try {
+      const { applicationId } = req.params;
+      const partnerId = req.user.sub;
+
+      const app = await Application.findOne({
+        _id: applicationId,
+        partnerId,
+      });
+
+      if (!app) {
+        return res.status(404).json({
+          message: "Application not found or not accessible to this partner",
+        });
+      }
+
+      // Check if application is in editable state
+      const nonEditableStatuses = ["APPROVED", "DISBURSED", "REJECTED"];
+      if (nonEditableStatuses.includes(String(app.status).toUpperCase())) {
+        return res.status(400).json({
+          message: `Application cannot be edited while in ${app.status} status.`,
+        });
+      }
+
+      let parsedPayload = {};
+      try {
+        if (typeof req.body?.data === "string") {
+          parsedPayload = JSON.parse(req.body.data || "{}");
+        } else if (req.body?.data && typeof req.body.data === "object") {
+          parsedPayload = req.body.data;
+        } else if (req.body && typeof req.body === "object") {
+          parsedPayload = req.body;
+        }
+      } catch (parseErr) {
+        return res.status(400).json({ message: "Invalid form payload" });
+      }
+
+      const {
+        customer = {},
+        product = {},
+        employmentInfo = {},
+        businessInfo = {},
+        propertyInfo = {},
+        vehicleInfo = {},
+        references = [],
+        coApplicant = {},
+        customFieldResponses = {},
+      } = parsedPayload;
+
+      // Update customer object on application
+      app.customer = {
+        ...(app.customer || {}),
+        ...customer,
+      };
+
+      // Update customer user record if present
+      if (app.customerId) {
+        await User.findByIdAndUpdate(app.customerId, {
+          $set: {
+            ...(customer.firstName ? { firstName: customer.firstName } : {}),
+            ...(customer.middleName ? { middleName: customer.middleName } : {}),
+            ...(customer.lastName ? { lastName: customer.lastName } : {}),
+            ...(customer.email ? { email: customer.email } : {}),
+            ...(customer.phone ? { phone: customer.phone } : {}),
+            ...(customer.panNumber ? { panNumber: customer.panNumber } : {}),
+            ...(customer.currentAddress ? { currentAddress: customer.currentAddress } : {}),
+          },
+        }).catch((e) => console.warn("Failed to sync customer User:", e.message));
+      }
+
+      // Update employment / business / property info
+      if (Object.keys(employmentInfo).length > 0 || Object.keys(product).length > 0) {
+        app.employmentInfo = {
+          ...(app.employmentInfo || {}),
+          ...product,
+          ...employmentInfo,
+        };
+      }
+      if (Object.keys(businessInfo).length > 0) {
+        app.businessInfo = {
+          ...(app.businessInfo || {}),
+          ...businessInfo,
+        };
+      }
+      if (Object.keys(propertyInfo).length > 0) {
+        app.propertyInfo = {
+          ...(app.propertyInfo || {}),
+          ...propertyInfo,
+        };
+      }
+      if (Object.keys(vehicleInfo).length > 0) {
+        app.vehicleInfo = {
+          ...(app.vehicleInfo || {}),
+          ...vehicleInfo,
+        };
+      }
+      if (Array.isArray(references) && references.length > 0) {
+        app.references = references;
+      }
+      if (coApplicant && Object.keys(coApplicant).length > 0) {
+        app.coApplicant = {
+          ...(app.coApplicant || {}),
+          ...coApplicant,
+        };
+      }
+      if (customFieldResponses && Object.keys(customFieldResponses).length > 0) {
+        app.customFieldResponses = {
+          ...(app.customFieldResponses || {}),
+          ...customFieldResponses,
+        };
+      }
+
+      if (customer.loanAmount) {
+        app.requestedAmount = Number(customer.loanAmount) || app.requestedAmount;
+      }
+
+      // Handle newly uploaded files
+      if (req.files && req.files.length > 0) {
+        const uploadedDocs = req.files.map((file) => ({
+          docType: file.fieldname || "OTHER_DOCS",
+          url: file.location || file.path,
+          name: file.originalname,
+          size: file.size,
+          mimeType: file.mimetype,
+          uploadedBy: partnerId,
+          status: "UPLOADED",
+          uploadedAt: new Date(),
+        }));
+        const existingDocs = app.docs || [];
+        uploadedDocs.forEach((newDoc) => {
+          const idx = existingDocs.findIndex(
+            (d) => String(d.docType).toUpperCase() === String(newDoc.docType).toUpperCase()
+          );
+          if (idx >= 0) {
+            existingDocs[idx] = { ...existingDocs[idx], ...newDoc };
+          } else {
+            existingDocs.push(newDoc);
+          }
+        });
+        app.docs = existingDocs;
+      }
+
+      app.stageHistory.push({
+        from: app.status,
+        to: app.status,
+        by: partnerId,
+        at: new Date(),
+        note: "Partner updated loan application form details",
+      });
+
+      await app.save();
+
+      return res.json({
+        success: true,
+        message: "Application form updated successfully",
+        id: app._id,
+        appNo: app.appNo,
+        status: app.status,
+      });
+    } catch (err) {
+      console.error("Error updating partner application form:", err);
+      return res.status(500).json({ message: "Failed to update application form", error: err.message });
+    }
+  }
+);
+
 router.get("/customers", auth, requireRole(ROLES.PARTNER), async (req, res) => {
   try {
     const partnerId = req.user.sub; // Partner logged in

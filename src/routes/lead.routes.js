@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import argon2 from "argon2";
 import { User } from "../models/User.js";
 import { Application, APP_STATUSES, LOAN_TYPES } from "../models/Application.js";
+import LoanProduct from "../models/LoanProduct.js";
 import { ROLES } from "../config/roles.js";
 import { verifyAccessToken } from "../utils/jwt.js";
 import { generateEmployeeId } from "../utils/generateEmployeeId.js";
@@ -113,10 +114,16 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
     } = req.body || {};
 
     const normalizedLoanType = String(loanType || "PERSONAL").trim().toUpperCase();
-    if (!LOAN_TYPES.includes(normalizedLoanType)) {
+    const isStandardType = LOAN_TYPES.includes(normalizedLoanType);
+    let isDynamicType = false;
+    if (!isStandardType) {
+      const match = await LoanProduct.findOne({ code: normalizedLoanType, status: { $ne: "ARCHIVED" } }).lean();
+      if (match) isDynamicType = true;
+    }
+    if (!isStandardType && !isDynamicType && normalizedLoanType !== "PERSONAL") {
       return res.status(400).json({
         success: false,
-        message: `Invalid loanType. Supported types: ${LOAN_TYPES.join(", ")}`,
+        message: `Invalid loanType '${normalizedLoanType}'. Must be a supported loan type or active loan product.`,
       });
     }
 

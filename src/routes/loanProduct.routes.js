@@ -22,4 +22,7 @@ router.post("/admin", auth, requireRole("ADMIN", "SUPER_ADMIN"), createLoanProdu
 router.put("/admin/:id", auth, requireRole("ADMIN", "SUPER_ADMIN"), updateLoanProduct);
 router.delete("/admin/:id", auth, requireRole("ADMIN", "SUPER_ADMIN"), deleteLoanProduct);
 
+// Code route alias (placed after admin routes so 'admin' is not treated as a code)
+router.get("/:code", getLoanProductByCode);
+
 export default router;

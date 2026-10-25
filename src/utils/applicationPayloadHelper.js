@@ -282,7 +282,8 @@ export function validateApplicationPayload({
     errors.push("Customer phone must be 10 digits");
   }
 
-  if (!loanType || !LOAN_TYPES.includes(loanType)) {
+  const upperLoanType = String(loanType || "").trim().toUpperCase();
+  if (!upperLoanType) {
     errors.push("A valid loanType is required");
   }
 

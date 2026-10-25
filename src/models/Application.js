@@ -246,8 +246,9 @@ const ApplicationSchema = new mongoose.Schema(
 
     loanType: {
       type: String,
-      enum: LOAN_TYPES,  // ✅ restricts to predefined loan types
       required: true,
+      trim: true,
+      uppercase: true,
     },
 
     // Common sections
@@ -259,6 +260,8 @@ const ApplicationSchema = new mongoose.Schema(
     employmentInfo: { type: EmploymentInfoSchema }, // Personal / Home Salaried
     businessInfo: { type: BusinessInfoSchema },     // Business / Home Self-Employed
     propertyInfo: { type: PropertyInfoSchema },     // Home Loan
+    customFieldResponses: { type: Map, of: mongoose.Schema.Types.Mixed, default: {} },
+    dynamicProductCode: { type: String, default: "" },
     approvedLoanAmount: { type: Number }, // approved/disbursed by RM
     remarks: { type: String },
     hasRunningLoan: { type: String, default: "NO" },
