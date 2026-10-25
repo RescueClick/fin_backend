@@ -21,6 +21,11 @@ import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { sendDeleteAccountRequestEmail, sendLoanApplicationEmail } from "../utils/emailService.js";
 import { createNotification } from "../utils/notificationService.js";
 import { getSupportSettings } from "../utils/supportSettings.js";
+import {
+  normalizeApplicationPayload,
+  validateApplicationPayload,
+} from "../utils/applicationPayloadHelper.js";
+import { findMissingMandatoryDocs } from "../utils/loanMandatoryDocRules.js";
 
 const router = Router();
 /** Partner views own applications (with status & docs) */
@@ -85,22 +90,46 @@ router.post(
         }
       }
 
-      // Parse input JSON
-      const { customer, product, loanType, references, partnerReferralCode } = JSON.parse(
-        req.body.data || "{}"
-      );
-
-      if (!customer?.firstName || !customer?.email || !customer?.phone) {
-        return res
-          .status(400)
-          .json({ message: "customer.firstName, email, phone required" });
+      // Parse and normalize input JSON
+      let rawData = {};
+      try {
+        if (typeof req.body?.data === "string") {
+          rawData = JSON.parse(req.body.data || "{}");
+        } else if (req.body?.data && typeof req.body.data === "object") {
+          rawData = req.body.data;
+        } else if (req.body && typeof req.body === "object") {
+          rawData = req.body;
+        }
+      } catch (parseErr) {
+        return res.status(400).json({ message: "Invalid application JSON payload: " + parseErr.message });
       }
 
-      if (
-        !loanType ||
-        !Application.schema.path("loanType").enumValues.includes(loanType)
-      ) {
-        return res.status(400).json({ message: "Valid loanType is required" });
+      const normalized = normalizeApplicationPayload(rawData);
+      const {
+        customer,
+        product,
+        loanType,
+        employmentInfo,
+        businessInfo,
+        propertyInfo,
+        references: refs,
+        coApplicant,
+        partnerReferralCode,
+      } = normalized;
+
+      const validationErrors = validateApplicationPayload({
+        customer,
+        product,
+        loanType,
+        references: refs,
+        coApplicant,
+      });
+
+      if (validationErrors.length > 0) {
+        return res.status(400).json({
+          message: "Validation failed",
+          errors: validationErrors,
+        });
       }
 
       // Check if customer exists
@@ -231,48 +260,6 @@ router.post(
         status: "PENDING",
       }));
 
-      // Prepare conditional sections
-      let employmentInfo = null;
-      let businessInfo = null;
-      let propertyInfo = null;
-
-      if (["PERSONAL", "HOME_LOAN_SALARIED", "LAP_SALARIED"].includes(loanType)) {
-        employmentInfo = {
-          companyName: product.companyName,
-          designation: product.designation,
-          companyAddress: product.currentAddress,
-          monthlySalary: product.monthlySalary,
-          totalExperience: product.totalExperience,
-          currentExperience: product.currentExperience,
-        };
-      }
-
-      if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(loanType)) {
-        businessInfo = {
-          shopName: product.shopName,
-          gstNumber: product.gstNumber,
-          annualTurnoverInINR: product.annualTurnoverInINR,
-          shopAddress: product.shopAddress,
-        };
-      }
-
-      if (
-        ["HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"].includes(loanType)
-      ) {
-        propertyInfo = {
-          propertyType: product.propertyType,
-          propertyValue: product.propertyValue,
-          propertyAddress: product.propertyAddress,
-        };
-      }
-
-      // Map references
-      const refs = Array.isArray(references)
-        ? references
-        : references
-        ? [references]
-        : [];
-
       // Determine Partner & RM
       let appPartnerId = req.user.role === ROLES.PARTNER ? userId : customerUser.partnerId;
       let appRmId = req.user.role === ROLES.PARTNER ? partner?.rmId : customerUser.rmId;
@@ -333,10 +320,13 @@ router.post(
         }
       }
 
-      const hasRunningLoan = customer.hasRunningLoan || "NO";
-      const monthlyEmiPaying = Number(customer.monthlyEmiPaying ?? 0);
-      const loanPurpose = customer.loanPurpose || "";
-      const personFinancial = personFinancialFrom(customer);
+      const customerDataToSave = {
+        ...customer,
+        partnerId: appPartnerId || null,
+        rmId: appRmId || null,
+        rsmId: assignedRsmId || null,
+        asmId: assignedAsmId || null,
+      };
 
       let app = null;
       let appRetries = 0;
@@ -353,37 +343,18 @@ router.post(
         existingLeadApp.employmentInfo = employmentInfo;
         existingLeadApp.businessInfo = businessInfo;
         existingLeadApp.propertyInfo = propertyInfo;
-        existingLeadApp.hasRunningLoan = hasRunningLoan;
-        existingLeadApp.monthlyEmiPaying = monthlyEmiPaying;
-        existingLeadApp.loanPurpose = loanPurpose;
-        existingLeadApp.salaryInHand = personFinancial.salaryInHand;
-        existingLeadApp.salaryReceiptMode = personFinancial.salaryReceiptMode;
-        existingLeadApp.cibilScoreBand = personFinancial.cibilScoreBand;
-        existingLeadApp.hasBounce = personFinancial.hasBounce;
-        existingLeadApp.bounceCount = personFinancial.bounceCount;
-        existingLeadApp.requestedAmount = customer.loanAmount ? Number(customer.loanAmount) : existingLeadApp.requestedAmount;
+        existingLeadApp.hasRunningLoan = customer.hasRunningLoan;
+        existingLeadApp.monthlyEmiPaying = customer.monthlyEmiPaying;
+        existingLeadApp.loanPurpose = customer.loanPurpose;
+        existingLeadApp.salaryInHand = customer.salaryInHand;
+        existingLeadApp.salaryReceiptMode = customer.salaryReceiptMode;
+        existingLeadApp.cibilScoreBand = customer.cibilScoreBand;
+        existingLeadApp.hasBounce = customer.hasBounce;
+        existingLeadApp.bounceCount = customer.bounceCount;
+        existingLeadApp.requestedAmount = customer.loanAmount || existingLeadApp.requestedAmount;
         existingLeadApp.customer = {
           ...existingLeadApp.customer,
-          firstName: customer.firstName,
-          middleName: customer.middleName || "",
-          lastName: customer.lastName || "",
-          email: customer.email,
-          phone: customer.phone,
-          mothersName: customer.mothersName || "",
-          panNumber: customer.panNumber || "",
-          dateOfBirth: customer.dateOfBirth,
-          gender: customer.gender,
-          maritalStatus: customer.maritalStatus,
-          currentAddress: product.currentAddress,
-          permanentAddress: product.permanentAddress || product.currentAddress,
-          loanAmount: customer.loanAmount ? Number(customer.loanAmount) : undefined,
-          hasRunningLoan,
-          monthlyEmiPaying,
-          loanPurpose,
-          ...personFinancial,
-          partnerId: appPartnerId || null,
-          rmId: appRmId || null,
-          asmId: assignedAsmId || null,
+          ...customerDataToSave,
         };
         existingLeadApp.status = "SUBMITTED";
         existingLeadApp.stageHistory.push({
@@ -410,40 +381,16 @@ router.post(
             asmId: assignedAsmId || null,
             customerId: customerUser._id,
             loanType,
-            hasRunningLoan,
-            monthlyEmiPaying,
-            loanPurpose,
-            salaryInHand: personFinancial.salaryInHand,
-            salaryReceiptMode: personFinancial.salaryReceiptMode,
-            cibilScoreBand: personFinancial.cibilScoreBand,
-            hasBounce: personFinancial.hasBounce,
-            bounceCount: personFinancial.bounceCount,
-            requestedAmount: customer.loanAmount ? Number(customer.loanAmount) : undefined,
-            customer: {
-              firstName: customer.firstName,
-              middleName: customer.middleName || "",
-              lastName: customer.lastName || "",
-              email: customer.email,
-              phone: customer.phone,
-              mothersName: customer.mothersName || "",
-              panNumber: customer.panNumber || "",
-              dateOfBirth: customer.dateOfBirth,
-              gender: customer.gender,
-              maritalStatus: customer.maritalStatus,
-              currentAddress: product.currentAddress,
-              permanentAddress: product.permanentAddress || product.currentAddress,
-              loanAmount: customer.loanAmount
-                ? Number(customer.loanAmount)
-                : undefined,
-              hasRunningLoan,
-              monthlyEmiPaying,
-              loanPurpose,
-              ...personFinancial,
-              partnerId: appPartnerId || null,
-              rmId: appRmId || null,
-              rsmId: null,
-              asmId: assignedAsmId || null,
-            },
+            hasRunningLoan: customer.hasRunningLoan,
+            monthlyEmiPaying: customer.monthlyEmiPaying,
+            loanPurpose: customer.loanPurpose,
+            salaryInHand: customer.salaryInHand,
+            salaryReceiptMode: customer.salaryReceiptMode,
+            cibilScoreBand: customer.cibilScoreBand,
+            hasBounce: customer.hasBounce,
+            bounceCount: customer.bounceCount,
+            requestedAmount: customer.loanAmount || undefined,
+            customer: customerDataToSave,
             docs,
             references: refs,
             employmentInfo,

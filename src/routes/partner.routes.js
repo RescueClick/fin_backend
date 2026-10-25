@@ -23,6 +23,10 @@ import { generateEmployeeId } from "../utils/generateEmployeeId.js";
 import { Banner } from "../models/Banner.js";
 import { ReferralBanner } from "../models/ReferralBanner.js";
 import { DEFAULT_REFERRAL_BENEFITS } from "../utils/referralBannerDefaults.js";
+import {
+  normalizeApplicationPayload,
+  validateApplicationPayload,
+} from "../utils/applicationPayloadHelper.js";
 import { Payout } from "../models/Payout.js";
 import { partnerUpload } from "../middleware/profileUpload.js";
 import mongoose from "mongoose";
@@ -85,104 +89,7 @@ function firstNonEmptyTrimmed(values) {
   return "";
 }
 
-const validateApplicationPayload = ({
-  customer = {},
-  product = {},
-  loanType,
-  references = [],
-  coApplicant,
-}) => {
-  const errors = [];
-
-  const normalizePhone = (value) => {
-    const digits = String(value ?? "").replace(/\D/g, "");
-    if (!digits) return "";
-    // If user provides +91 / spaced numbers / extra digits, take last 10.
-    if (digits.length >= 10) return digits.slice(-10);
-    return digits; // let validations fail below if too short
-  };
-
-  const normalizeEmail = (value) => {
-    return String(value ?? "").trim().replace(/\s+/g, "");
-  };
-
-  // Normalize for consistent validation.
-  customer.email = normalizeEmail(customer.email);
-  customer.phone = normalizePhone(customer.phone);
-  if (Array.isArray(references)) {
-    references = references.map((r) => ({
-      ...r,
-      phone: normalizePhone(r?.phone),
-    }));
-  }
-  if (coApplicant && typeof coApplicant === "object") {
-    coApplicant.phone = normalizePhone(coApplicant.phone);
-  }
-
-  if (!customer.firstName) errors.push("Customer first name is required");
-  if (!customer.email) errors.push("Customer email is required");
-  if (customer.email && !/^\S+@\S+\.\S+$/.test(customer.email)) {
-    errors.push("Customer email format is invalid");
-  }
-  if (!customer.phone) {
-    errors.push("Customer phone is required");
-  } else if (!/^\d{10}$/.test(String(customer.phone))) {
-    errors.push("Customer phone must be 10 digits");
-  }
-
-  if (
-    !loanType ||
-    !Application.schema.path("loanType").enumValues.includes(loanType)
-  ) {
-    errors.push("A valid loanType is required");
-  }
-
-  const loanAmt = Number(customer?.loanAmount ?? 0);
-  const amountError = loanAmountError(loanAmt, { required: true });
-  if (amountError) errors.push(amountError);
-
-  if (["PERSONAL", "HOME_LOAN_SALARIED", "LAP_SALARIED"].includes(loanType || "")) {
-    if (!product.companyName) errors.push("Company name is required");
-    if (!product.designation) errors.push("Designation is required");
-    if (!product.monthlySalary) errors.push("Monthly salary is required");
-  }
-
-  if (["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(loanType || "")) {
-    if (!product.businessName) errors.push("Business name is required");
-    if (!product.businessAddress) errors.push("Business address is required");
-    if (!product.businessVintage) errors.push("Business vintage is required");
-  }
-
-  const refs = Array.isArray(references)
-    ? references
-    : references
-      ? [references]
-      : [];
-
-  if (refs.length < 2) {
-    errors.push("At least two references are required");
-  }
-
-  refs.forEach((ref, index) => {
-    if (!ref?.name) errors.push(`Reference ${index + 1} name is required`);
-    if (!ref?.phone) {
-      errors.push(`Reference ${index + 1} phone is required`);
-    } else if (!/^\d{10}$/.test(String(ref.phone))) {
-      errors.push(`Reference ${index + 1} phone must be 10 digits`);
-    }
-  });
-
-  // Co-applicant is required for female applicants, but only for BUSINESS, HOME_LOAN_SELF_EMPLOYED, and LAP_SELF_EMPLOYED loan types
-  if (
-    customer.gender === "Female" &&
-    ["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(loanType || "") &&
-    !coApplicant?.phone
-  ) {
-    errors.push("Co-applicant phone is required for female applicants with business, home loan self-employed, or lap self-employed applications");
-  }
-
-  return errors;
-};
+// validateApplicationPayload and normalizeApplicationPayload are imported from ../utils/applicationPayloadHelper.js
 
 // Check if a customer exists by email or phone
 router.get("/check-customer", auth, requireRole(ROLES.PARTNER), async (req, res) => {
@@ -1000,6 +907,20 @@ router.post(
   upload.array("docs", 20), // personal loan can send 13+ docs
   async (req, res) => {
     try {
+      let rawData = {};
+      try {
+        if (typeof req.body?.data === "string") {
+          rawData = JSON.parse(req.body.data || "{}");
+        } else if (req.body?.data && typeof req.body.data === "object") {
+          rawData = req.body.data;
+        } else if (req.body && typeof req.body === "object") {
+          rawData = req.body;
+        }
+      } catch (parseErr) {
+        return res.status(400).json({ message: "Invalid application JSON payload: " + parseErr.message });
+      }
+
+      const normalized = normalizeApplicationPayload(rawData);
       const {
         customer,
         product,
@@ -1008,7 +929,7 @@ router.post(
         coApplicant,
         partnerReferralCode,
         status: applicationStatus,
-      } = JSON.parse(req.body.data || "{}");
+      } = normalized;
 
       const validationErrors = validateApplicationPayload({
         customer,
@@ -1511,6 +1432,7 @@ router.post(
         parsedPayload = {};
       }
 
+      const normalized = normalizeApplicationPayload(parsedPayload);
       const {
         customer,
         product,
@@ -1519,7 +1441,7 @@ router.post(
         coApplicant,
         partnerReferralCode,
         status: applicationStatus,
-      } = parsedPayload;
+      } = normalized;
 
       const validationErrors = validateApplicationPayload({
         customer,

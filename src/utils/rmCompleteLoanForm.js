@@ -8,6 +8,10 @@ import {
   formatOversizeMessage,
   deleteS3ObjectsForUploadedFiles,
 } from "./docUploadLimits.js";
+import {
+  normalizeApplicationPayload,
+  validateApplicationPayload,
+} from "./applicationPayloadHelper.js";
 
 const EDITABLE_STATUSES = ["LEAD", "DRAFT", "DOC_INCOMPLETE"];
 
@@ -15,103 +19,20 @@ export function isRmEditableApplicationStatus(status) {
   return EDITABLE_STATUSES.includes(String(status || "").toUpperCase());
 }
 
-export function validateRmCompletePayload({
-  customer = {},
-  product = {},
-  loanType,
-  references = [],
-  coApplicant,
-}) {
-  const errors = [];
+export function validateRmCompletePayload(payload = {}) {
+  const normalized = normalizeApplicationPayload(payload);
+  const errors = validateApplicationPayload(normalized);
 
-  const normalizePhone = (value) => {
-    const digits = String(value ?? "").replace(/\D/g, "");
-    if (!digits) return "";
-    if (digits.length >= 10) return digits.slice(-10);
-    return digits;
+  return {
+    errors,
+    customer: normalized.customer,
+    references: normalized.references,
+    coApplicant: normalized.coApplicant,
+    product: normalized.product,
+    employmentInfo: normalized.employmentInfo,
+    businessInfo: normalized.businessInfo,
+    propertyInfo: normalized.propertyInfo,
   };
-
-  const normalizeEmail = (value) =>
-    String(value ?? "").trim().replace(/\s+/g, "");
-
-  customer.email = normalizeEmail(customer.email);
-  customer.phone = normalizePhone(customer.phone);
-  if (Array.isArray(references)) {
-    references = references.map((r) => ({
-      ...r,
-      phone: normalizePhone(r?.phone),
-    }));
-  }
-  if (coApplicant && typeof coApplicant === "object") {
-    coApplicant.phone = normalizePhone(coApplicant.phone);
-  }
-
-  if (!customer.firstName) errors.push("Customer first name is required");
-  if (!customer.email) errors.push("Customer email is required");
-  if (customer.email && !/^\S+@\S+\.\S+$/.test(customer.email)) {
-    errors.push("Customer email format is invalid");
-  }
-  if (!customer.phone) {
-    errors.push("Customer phone is required");
-  } else if (!/^\d{10}$/.test(String(customer.phone))) {
-    errors.push("Customer phone must be 10 digits");
-  }
-
-  if (!loanType) errors.push("loanType is required");
-
-  const loanAmt = Number(customer?.loanAmount ?? 0);
-  if (!loanAmt || loanAmt <= 0) {
-    errors.push("Loan amount must be greater than zero");
-  }
-
-  if (["PERSONAL", "HOME_LOAN_SALARIED", "LAP_SALARIED"].includes(loanType || "")) {
-    if (!product.companyName) errors.push("Company name is required");
-    if (!product.designation) errors.push("Designation is required");
-    if (!product.monthlySalary) errors.push("Monthly salary is required");
-  }
-
-  if (
-    ["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(
-      loanType || ""
-    )
-  ) {
-    if (!product.businessName) errors.push("Business name is required");
-    if (!product.businessAddress) errors.push("Business address is required");
-    if (!product.businessVintage) errors.push("Business vintage is required");
-  }
-
-  const refs = Array.isArray(references)
-    ? references
-    : references
-      ? [references]
-      : [];
-
-  if (refs.length < 2) {
-    errors.push("At least two references are required");
-  }
-
-  refs.forEach((ref, index) => {
-    if (!ref?.name) errors.push(`Reference ${index + 1} name is required`);
-    if (!ref?.phone) {
-      errors.push(`Reference ${index + 1} phone is required`);
-    } else if (!/^\d{10}$/.test(String(ref.phone))) {
-      errors.push(`Reference ${index + 1} phone must be 10 digits`);
-    }
-  });
-
-  if (
-    customer.gender === "Female" &&
-    ["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(
-      loanType || ""
-    ) &&
-    !coApplicant?.phone
-  ) {
-    errors.push(
-      "Co-applicant phone is required for female applicants with business, home loan self-employed, or lap self-employed applications"
-    );
-  }
-
-  return { errors, customer, references: refs, coApplicant };
 }
 
 export function buildConditionalSections(loanType, product = {}) {
