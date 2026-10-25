@@ -182,6 +182,7 @@ export const createLoanProduct = async (req, res) => {
       code: normalizedCode,
       slug: normalizedSlug,
       iconUrl: iconUrl || "",
+      iconKey: req.body.iconKey || "PERSONAL",
       badgeText: badgeText || "Instant Approval",
       description: description || "",
       minAmount: minAmount !== undefined ? Number(minAmount) : 25000,

@@ -85,6 +85,10 @@ const LoanProductSchema = new mongoose.Schema(
     code: { type: String, required: true, uppercase: true, unique: true, trim: true }, // e.g. "PERSONAL"
     slug: { type: String, required: true, lowercase: true, unique: true, trim: true }, // e.g. "personal-loan"
     iconUrl: { type: String, default: "" },
+    iconKey: {
+      type: String,
+      default: "PERSONAL",
+    },
     badgeText: { type: String, default: "Instant Approval" },
     description: { type: String, default: "" },
 
