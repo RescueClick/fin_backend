@@ -2704,11 +2704,20 @@ router.post(
         });
       }
 
-      // Check if application is in editable state
-      const nonEditableStatuses = ["APPROVED", "DISBURSED", "REJECTED"];
+      // Check if application is in editable state (only allow up to Documents Complete stage)
+      const nonEditableStatuses = [
+        "UNDER_REVIEW",
+        "LOGIN",
+        "KYC_PENDING",
+        "KYC_COMPLETE",
+        "APPROVED",
+        "AGREEMENT",
+        "DISBURSED",
+        "REJECTED",
+      ];
       if (nonEditableStatuses.includes(String(app.status).toUpperCase())) {
         return res.status(400).json({
-          message: `Application cannot be edited while in ${app.status} status.`,
+          message: `Application form cannot be edited while in ${app.status} status. It can only be edited up to Documents Complete stage.`,
         });
       }
 
