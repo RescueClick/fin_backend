@@ -22,6 +22,7 @@ import cibilRoutes from "./src/routes/cibil.routes.js";
 import chatRoutes from "./src/routes/chat.routes.js";
 import leadRoutes from "./src/routes/lead.routes.js";
 import salesTargetRoutes from "./src/routes/salesTarget.routes.js";
+import loanProductRoutes from "./src/routes/loanProduct.routes.js";
 import { lockMonth } from "./src/utils/salesTargetService.js";
 import qrPublicRoutes, {
   adminQrRouter,
@@ -196,6 +197,7 @@ app.use("/api/cibil", cibilRoutes); // CIBIL checks and payments
 app.use("/api/chat", chatRoutes); // Internal Staff Chat (Admin, ASM, RSM, RM)
 app.use("/api/leads", leadRoutes); // Lead capture & RM follow-up
 app.use("/api/targets", salesTargetRoutes); // Admin → RSM → ASM → RM monthly targets
+app.use("/api/loan-products", loanProductRoutes); // Dynamic Server-Driven Loan Products & Forms Engine
 
 
 
