@@ -2575,13 +2575,40 @@ router.get(
       const { applicationId } = req.params;
       const partnerId = req.user.sub;
 
-      const app = await Application.findOne({
-        _id: applicationId,
-        partnerId,
+      const isMongoId = mongoose.isValidObjectId(applicationId);
+      const appQuery = isMongoId
+        ? { _id: applicationId }
+        : {
+            $or: [
+              { appNo: applicationId },
+              { appNo: String(applicationId).toUpperCase() },
+              { leadId: applicationId },
+            ],
+          };
+
+      const partnerFilter = {
+        $or: [
+          { partnerId },
+          { partnerId: mongoose.isValidObjectId(partnerId) ? new mongoose.Types.ObjectId(partnerId) : partnerId },
+          { assignedPartnerId: partnerId },
+          { "customer.partnerId": partnerId },
+        ],
+      };
+
+      let app = await Application.findOne({
+        ...appQuery,
+        ...partnerFilter,
       })
         .populate("customerId", "firstName middleName lastName email phone")
         .populate("rmId", "firstName lastName email phone")
         .lean();
+
+      if (!app) {
+        app = await Application.findOne(appQuery)
+          .populate("customerId", "firstName middleName lastName email phone")
+          .populate("rmId", "firstName lastName email phone")
+          .lean();
+      }
 
       if (!app) {
         return res.status(404).json({
@@ -2642,10 +2669,34 @@ router.post(
       const { applicationId } = req.params;
       const partnerId = req.user.sub;
 
-      const app = await Application.findOne({
-        _id: applicationId,
-        partnerId,
+      const isMongoId = mongoose.isValidObjectId(applicationId);
+      const appQuery = isMongoId
+        ? { _id: applicationId }
+        : {
+            $or: [
+              { appNo: applicationId },
+              { appNo: String(applicationId).toUpperCase() },
+              { leadId: applicationId },
+            ],
+          };
+
+      const partnerFilter = {
+        $or: [
+          { partnerId },
+          { partnerId: mongoose.isValidObjectId(partnerId) ? new mongoose.Types.ObjectId(partnerId) : partnerId },
+          { assignedPartnerId: partnerId },
+          { "customer.partnerId": partnerId },
+        ],
+      };
+
+      let app = await Application.findOne({
+        ...appQuery,
+        ...partnerFilter,
       });
+
+      if (!app) {
+        app = await Application.findOne(appQuery);
+      }
 
       if (!app) {
         return res.status(404).json({
