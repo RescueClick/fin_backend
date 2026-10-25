@@ -84,8 +84,14 @@ const LoanProductSchema = new mongoose.Schema(
     publishToCustomerApp: { type: Boolean, default: true },
     status: {
       type: String,
-      enum: ["DRAFT", "ACTIVE", "ARCHIVED"],
+      enum: ["DRAFT", "ACTIVE", "COMING_SOON", "MAINTENANCE", "ARCHIVED"],
       default: "ACTIVE",
+    },
+    isComingSoon: { type: Boolean, default: false },
+    isUnderMaintenance: { type: Boolean, default: false },
+    maintenanceMessage: {
+      type: String,
+      default: "This loan service is currently undergoing routine maintenance. Please check back shortly.",
     },
 
     // Dynamic Step Definitions

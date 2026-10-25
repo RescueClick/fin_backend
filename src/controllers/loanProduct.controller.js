@@ -8,7 +8,7 @@ export const getPublicLoanProducts = async (req, res) => {
   try {
     const { client } = req.query; // 'partner', 'customer', 'web'
 
-    const filter = { status: "ACTIVE" };
+    const filter = { status: { $in: ["ACTIVE", "COMING_SOON", "MAINTENANCE"] } };
 
     if (client === "partner") {
       filter.publishToPartnerApp = true;
@@ -22,10 +22,17 @@ export const getPublicLoanProducts = async (req, res) => {
       .sort({ displayOrder: 1, createdAt: 1 })
       .lean();
 
+    // Ensure computed flags for client compatibility
+    const mappedProducts = products.map((p) => ({
+      ...p,
+      isComingSoon: p.status === "COMING_SOON" || Boolean(p.isComingSoon),
+      isUnderMaintenance: p.status === "MAINTENANCE" || Boolean(p.isUnderMaintenance),
+    }));
+
     return res.status(200).json({
       success: true,
-      count: products.length,
-      data: products,
+      count: mappedProducts.length,
+      data: mappedProducts,
     });
   } catch (error) {
     console.error("Error fetching public loan products:", error);
@@ -46,7 +53,7 @@ export const getLoanProductByCode = async (req, res) => {
     const { code } = req.params;
     const product = await LoanProduct.findOne({
       code: String(code).toUpperCase().trim(),
-      status: "ACTIVE",
+      status: { $in: ["ACTIVE", "COMING_SOON", "MAINTENANCE"] },
     }).lean();
 
     if (!product) {
@@ -56,9 +63,15 @@ export const getLoanProductByCode = async (req, res) => {
       });
     }
 
+    const mapped = {
+      ...product,
+      isComingSoon: product.status === "COMING_SOON" || Boolean(product.isComingSoon),
+      isUnderMaintenance: product.status === "MAINTENANCE" || Boolean(product.isUnderMaintenance),
+    };
+
     return res.status(200).json({
       success: true,
-      data: product,
+      data: mapped,
     });
   } catch (error) {
     console.error("Error fetching loan product by code:", error);
@@ -131,6 +144,9 @@ export const createLoanProduct = async (req, res) => {
       publishToPartnerApp,
       publishToCustomerApp,
       status,
+      isComingSoon,
+      isUnderMaintenance,
+      maintenanceMessage,
       steps,
       customFields,
       requiredDocuments,
@@ -177,6 +193,9 @@ export const createLoanProduct = async (req, res) => {
       publishToPartnerApp: publishToPartnerApp !== undefined ? Boolean(publishToPartnerApp) : true,
       publishToCustomerApp: publishToCustomerApp !== undefined ? Boolean(publishToCustomerApp) : true,
       status: status || "ACTIVE",
+      isComingSoon: status === "COMING_SOON" || Boolean(isComingSoon),
+      isUnderMaintenance: status === "MAINTENANCE" || Boolean(isUnderMaintenance),
+      maintenanceMessage: maintenanceMessage || "",
       steps: Array.isArray(steps) && steps.length > 0 ? steps : undefined,
       customFields: Array.isArray(customFields) ? customFields : [],
       requiredDocuments: Array.isArray(requiredDocuments) ? requiredDocuments : [],
@@ -227,6 +246,17 @@ export const updateLoanProduct = async (req, res) => {
     }
     if (updates.slug) {
       updates.slug = String(updates.slug).toLowerCase().trim();
+    }
+
+    if (updates.status === "COMING_SOON") {
+      updates.isComingSoon = true;
+      updates.isUnderMaintenance = false;
+    } else if (updates.status === "MAINTENANCE") {
+      updates.isUnderMaintenance = true;
+      updates.isComingSoon = false;
+    } else if (updates.status === "ACTIVE") {
+      updates.isComingSoon = false;
+      updates.isUnderMaintenance = false;
     }
 
     const updated = await LoanProduct.findByIdAndUpdate(id, { $set: updates }, { new: true });
