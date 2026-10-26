@@ -471,6 +471,7 @@ router.post(
         id: app._id,
         appNo: app.appNo,
         status: app.status,
+        emailSent: true,
         customerLogin: {
           email: customerUser.email,
           password: customer.password ? customer.password : tempPassword,
