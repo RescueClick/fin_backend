@@ -26,13 +26,21 @@ export const normalizeIncomingDocType = (docType) => {
     GST_CERTIFICATE: "GST_DOCUMENT",
     BANK_STATEMENT: "BANK_STATEMENT_1",
     CO_APPLICANT_PASSPORT_PHOTO: "CO_APPLICANT_SELFIE",
+    CO_APPLICANT_PHOTO: "CO_APPLICANT_SELFIE",
     CO_APPLICANT_SELFIE_OR_PHOTO: "CO_APPLICANT_SELFIE",
   };
   return aliases[key] || key;
 };
 
 export const getMandatoryDocRules = (loanType, customer = {}) => {
-  const isFemale = String(customer?.gender || "").toLowerCase() === "female";
+  const hasCoApplicant = Boolean(
+    customer?.hasCoApplicant === true ||
+    customer?.hasCoApplicant === "true" ||
+    customer?.coApplicant?.hasCoApplicant === true ||
+    customer?.coApplicant?.phone ||
+    customer?.coMobileNumber ||
+    customer?.coApplicantPhone
+  );
 
   if (loanType === "PERSONAL") {
     return [
@@ -53,7 +61,7 @@ export const getMandatoryDocRules = (loanType, customer = {}) => {
   }
 
   if (loanType === "HOME_LOAN_SALARIED" || loanType === "LAP_SALARIED") {
-    return [
+    const rules = [
       "AADHAR_FRONT",
       "AADHAR_BACK",
       "PAN",
@@ -68,6 +76,15 @@ export const getMandatoryDocRules = (loanType, customer = {}) => {
       "SALARY_SLIP_3",
       "BANK_STATEMENT_1",
     ];
+
+    if (hasCoApplicant) {
+      rules.push("CO_APPLICANT_AADHAR_FRONT");
+      rules.push("CO_APPLICANT_AADHAR_BACK");
+      rules.push("CO_APPLICANT_PAN");
+      rules.push({ anyOf: ["CO_APPLICANT_SELFIE"], label: "CO_APPLICANT_SELFIE_OR_PHOTO" });
+    }
+
+    return rules;
   }
 
   const rules = [
@@ -86,7 +103,7 @@ export const getMandatoryDocRules = (loanType, customer = {}) => {
     "BANK_STATEMENT_1",
   ];
 
-  if (isFemale && (loanType === "BUSINESS" || loanType === "HOME_LOAN_SELF_EMPLOYED" || loanType === "LAP_SELF_EMPLOYED")) {
+  if (hasCoApplicant && (loanType === "BUSINESS" || loanType === "HOME_LOAN_SELF_EMPLOYED" || loanType === "LAP_SELF_EMPLOYED")) {
     rules.push("CO_APPLICANT_AADHAR_FRONT");
     rules.push("CO_APPLICANT_AADHAR_BACK");
     rules.push("CO_APPLICANT_PAN");

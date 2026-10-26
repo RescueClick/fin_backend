@@ -303,6 +303,9 @@ router.get("/loan-doc-rules", auth, async (req, res) => {
 
     const customer = {
       gender: req.query.gender,
+      hasCoApplicant: req.query.hasCoApplicant === "true" || req.query.hasCoApplicant === true,
+      coMobileNumber: req.query.coMobileNumber,
+      coApplicantPhone: req.query.coApplicantPhone,
     };
     const rules = getMandatoryDocRules(loanType, customer);
     return res.json({

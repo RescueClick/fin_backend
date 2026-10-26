@@ -151,6 +151,18 @@ export function normalizeApplicationPayload(rawPayload = {}) {
     hasRunningLoan,
     monthlyEmiPaying,
     loanPurpose,
+    hasCoApplicant: Boolean(
+      rawPayload.hasCoApplicant === true ||
+      rawPayload.hasCoApplicant === "true" ||
+      customerRaw.hasCoApplicant === true ||
+      customerRaw.hasCoApplicant === "true" ||
+      coApplicantRaw?.hasCoApplicant === true ||
+      coApplicantRaw?.phone ||
+      customerRaw.coApplicantPhone ||
+      customerRaw.coApplicantMobile ||
+      rawPayload.coApplicantPhone ||
+      rawPayload.coApplicantMobile
+    ),
     ...financialFields,
   };
 
@@ -252,6 +264,7 @@ export function normalizeApplicationPayload(rawPayload = {}) {
       customerRaw.coApplicantRelation ||
       ""
     ).trim(),
+    hasCoApplicant: normalizedCustomer.hasCoApplicant,
   };
 
   return {
@@ -337,15 +350,17 @@ export function validateApplicationPayload({
     }
   });
 
-  const isFemale = String(customer.gender || "").toLowerCase() === "female";
-  if (
-    isFemale &&
-    ["BUSINESS", "HOME_LOAN_SELF_EMPLOYED", "LAP_SELF_EMPLOYED"].includes(loanType || "") &&
-    !coApplicant?.phone
-  ) {
-    errors.push(
-      "Co-applicant phone is required for female applicants with business, home loan self-employed, or lap self-employed applications"
-    );
+  const hasCoApp = Boolean(
+    customer.hasCoApplicant ||
+    coApplicant?.hasCoApplicant ||
+    coApplicant?.phone
+  );
+  if (hasCoApp) {
+    if (!coApplicant?.phone) {
+      errors.push("Co-applicant phone is required when co-applicant is added");
+    } else if (!/^\d{10}$/.test(String(coApplicant.phone))) {
+      errors.push("Co-applicant phone must be 10 digits");
+    }
   }
 
   return errors;
