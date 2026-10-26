@@ -4515,6 +4515,12 @@ router.post(
         hasBounce: validated.customer.hasBounce || "NO",
         bounceCount: Number(validated.customer.bounceCount ?? 0),
         loanPurpose: validated.customer.loanPurpose || "",
+        cibilScoreBand:
+          validated.customer.cibilScoreBand || app.customer?.cibilScoreBand || app.cibilScoreBand || "",
+        salaryReceiptMode:
+          validated.customer.salaryReceiptMode || app.customer?.salaryReceiptMode || app.salaryReceiptMode || "",
+        salaryInHand:
+          validated.customer.salaryInHand || product?.salaryInHand || app.customer?.salaryInHand || app.salaryInHand || "",
         partnerId: app.partnerId,
         rmId: app.rmId || rmId,
         asmId: app.asmId,

@@ -154,7 +154,19 @@ router.post(
       }
 
       if (customerUser) {
-        const blocker = await findCustomerApplyBlocker(customerUser._id);
+        // The LEAD created when the customer left step 1 is promoted below — it must not block its own submit.
+        const ownOpenFile = await Application.findOne({
+          customerId: customerUser._id,
+          loanType,
+          status: { $in: ["LEAD", "DRAFT", "DOC_INCOMPLETE"] },
+          isArchived: { $ne: true },
+        })
+          .sort({ updatedAt: -1 })
+          .select("_id")
+          .lean();
+        const blocker = await findCustomerApplyBlocker(customerUser._id, {
+          excludeAppId: ownOpenFile?._id,
+        });
         if (blocker) {
           return res.status(400).json({
             message: blocker.message,
@@ -616,6 +628,7 @@ router.get(
           app.status === "LOGIN" ? "DOC_COMPLETE" : app.status;
 
         return {
+          id: app._id,
           appNo: app.appNo || "",
           loanType: app.loanType || "",
           appliedLoanAmount: app.customer?.loanAmount || 0,

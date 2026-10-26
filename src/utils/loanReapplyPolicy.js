@@ -85,6 +85,26 @@ export async function resolveCustomerFile(customerId, { partnerId } = {}) {
   return blocker ? { blocker } : {};
 }
 
+/**
+ * True when this customer has an in-progress file (LEAD/DRAFT/DOC_INCOMPLETE) with exactly
+ * this email + phone. Leaving step 1 creates the customer account, so a later name typo-fix
+ * must be treated as the same applicant finishing their own file, not as a different person.
+ */
+export async function isContinuingOwnFile(customerId, { email, phone } = {}) {
+  const app = await Application.findOne(
+    openLoanApplicationFilter(customerId, { status: { $in: REUSABLE_FILE_STATUSES } })
+  )
+    .sort({ updatedAt: -1 })
+    .select("customer.email customer.phone")
+    .lean();
+  if (!app) return false;
+  const tenDigits = (v) => String(v ?? "").replace(/\D/g, "").slice(-10);
+  const sameEmail =
+    String(app.customer?.email || "").trim().toLowerCase() === String(email || "").trim().toLowerCase();
+  const samePhone = tenDigits(app.customer?.phone) === tenDigits(phone);
+  return Boolean(email && phone && sameEmail && samePhone);
+}
+
 function unlockAtForRejectedApp(app) {
   if (app.deletedAt) {
     return new Date(app.deletedAt).getTime();

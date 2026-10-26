@@ -32,8 +32,29 @@ export const normalizeIncomingDocType = (docType) => {
   return aliases[key] || key;
 };
 
+export const CO_APPLICANT_MANDATORY_LOAN_TYPES = [
+  "BUSINESS",
+  "HOME_LOAN_SALARIED",
+  "HOME_LOAN_SELF_EMPLOYED",
+  "LAP_SALARIED",
+  "LAP_SELF_EMPLOYED",
+];
+
+const STANDARD_LOAN_TYPES = [
+  "PERSONAL",
+  "BUSINESS",
+  "HOME_LOAN_SALARIED",
+  "HOME_LOAN_SELF_EMPLOYED",
+  "LAP_SALARIED",
+  "LAP_SELF_EMPLOYED",
+];
+
+export const isCoApplicantMandatory = (loanType) =>
+  CO_APPLICANT_MANDATORY_LOAN_TYPES.includes(String(loanType || "").trim().toUpperCase());
+
 export const getMandatoryDocRules = (loanType, customer = {}) => {
   const hasCoApplicant = Boolean(
+    isCoApplicantMandatory(loanType) ||
     customer?.hasCoApplicant === true ||
     customer?.hasCoApplicant === "true" ||
     customer?.coApplicant?.hasCoApplicant === true ||
@@ -85,6 +106,23 @@ export const getMandatoryDocRules = (loanType, customer = {}) => {
     }
 
     return rules;
+  }
+
+  // Vehicle loans and admin-created loan products open the Personal Loan form, whose
+  // income documents differ by app (vehicle docs on Partner, salary docs on Customer/Web).
+  // Require only the KYC + address + bank statement set every one of those forms collects.
+  if (!STANDARD_LOAN_TYPES.includes(String(loanType || "").trim().toUpperCase())) {
+    return [
+      "AADHAR_FRONT",
+      "AADHAR_BACK",
+      "PAN",
+      { anyOf: ["PHOTO", "SELFIE"], label: "PHOTO_OR_SELFIE" },
+      {
+        anyOf: ["ADDRESS_PROOF", "LIGHT_BILL", "UTILITY_BILL", "RENT_AGREEMENT"],
+        label: "ADDRESS_PROOF",
+      },
+      "BANK_STATEMENT_1",
+    ];
   }
 
   const rules = [

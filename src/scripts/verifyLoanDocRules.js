@@ -49,15 +49,21 @@ assert(
   "HOME_LOAN_SALARIED rules must not require OTHER_DOCS"
 );
 
-// HOME_LOAN_SALARIED without co-applicant should be complete with standard salaried docs
+// HOME_LOAN_SALARIED always requires co-applicant docs, even when the flag is false
 const missHomeNoCo = findMissingMandatoryDocs(
   "HOME_LOAN_SALARIED",
   { gender: "Male", hasCoApplicant: false },
   personalFull
 );
 assert(
-  missHomeNoCo.length === 0,
-  `HOME_LOAN_SALARIED without co-applicant should be complete; missing: ${missHomeNoCo.join(", ")}`
+  missHomeNoCo.includes("CO_APPLICANT_AADHAR_FRONT") && missHomeNoCo.includes("CO_APPLICANT_PAN"),
+  "HOME_LOAN_SALARIED must always require co-applicant documents"
+);
+
+// PERSONAL never requires co-applicant docs
+assert(
+  !getMandatoryDocRules("PERSONAL", { hasCoApplicant: true }).includes("CO_APPLICANT_AADHAR_FRONT"),
+  "PERSONAL must not require co-applicant documents"
 );
 
 // HOME_LOAN_SALARIED with co-applicant (Male or Female) MUST require CO_APPLICANT docs
@@ -109,12 +115,14 @@ const businessMinimal = [
   doc("BANK_STATEMENT_1"),
 ];
 
-// BUSINESS without co-applicant (Male or Female) is complete without co-applicant docs
-const missBizNoCo = findMissingMandatoryDocs("BUSINESS", { gender: "Female", hasCoApplicant: false }, businessMinimal);
-assert(
-  missBizNoCo.length === 0,
-  `BUSINESS without co-applicant should be complete; missing: ${missBizNoCo.join(", ")}`
-);
+// BUSINESS always requires co-applicant docs for male and female applicants
+for (const gender of ["Male", "Female"]) {
+  const missBizNoCo = findMissingMandatoryDocs("BUSINESS", { gender, hasCoApplicant: false }, businessMinimal);
+  assert(
+    missBizNoCo.includes("CO_APPLICANT_AADHAR_FRONT") && missBizNoCo.includes("CO_APPLICANT_AADHAR_BACK"),
+    `BUSINESS (${gender}) must always require co-applicant documents`
+  );
+}
 
 // HOME_LOAN_SELF_EMPLOYED with co-applicant (Male) MUST require CO_APPLICANT docs
 const missHomeSelfWithCo = findMissingMandatoryDocs(
@@ -155,6 +163,16 @@ const missLapSelfWithCoSupplied = findMissingMandatoryDocs(
 assert(
   missLapSelfWithCoSupplied.length === 0,
   `LAP_SELF_EMPLOYED with co-applicant docs supplied should be complete; missing: ${missLapSelfWithCoSupplied.join(", ")}`
+);
+
+const missBizWithCoSupplied = findMissingMandatoryDocs(
+  "BUSINESS",
+  { gender: "Male" },
+  [...businessMinimal, ...coAppDocs]
+);
+assert(
+  missBizWithCoSupplied.length === 0,
+  `BUSINESS with co-applicant docs supplied should be complete; missing: ${missBizWithCoSupplied.join(", ")}`
 );
 
 console.log("OK: loan mandatory document rules verification passed.");

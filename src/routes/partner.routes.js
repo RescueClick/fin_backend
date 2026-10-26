@@ -46,6 +46,7 @@ import {
   RM_HIERARCHY_FIELDS,
 } from "../utils/loanFileRules.js";
 import { personFinancialFrom } from "../utils/personFinancial.js";
+import { buildConditionalSections } from "../utils/rmCompleteLoanForm.js";
 import { ReferralReward } from "../models/ReferralReward.js";
 import {
   buildPartnerInvoiceHtml,
@@ -61,7 +62,7 @@ import { createNotification, createNotificationsForUsers } from "../utils/notifi
 import { DeleteAccountRequest } from "../models/DeleteAccountRequest.js";
 import { Config } from "../models/Config.js";
 import { sanitizeHeroConfig, DEFAULT_HERO_CONFIG } from "./admin.routes.js";
-import { blockerResponse, resolveCustomerFile } from "../utils/loanReapplyPolicy.js";
+import { blockerResponse, isContinuingOwnFile, resolveCustomerFile } from "../utils/loanReapplyPolicy.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import {
   getReferralWebBaseUrl,
@@ -1518,8 +1519,20 @@ router.post(
         const incomingFirstName = (customer.firstName || "").trim().toLowerCase();
         const incomingLastName = (customer.lastName || "").trim().toLowerCase();
 
-        // If both first and last name are different, it's likely a different person using the same contact info.
-        if (existingFirstName !== incomingFirstName || existingLastName !== incomingLastName) {
+        const nameChanged =
+          existingFirstName !== incomingFirstName || existingLastName !== incomingLastName;
+        const continuingOwnFile =
+          nameChanged &&
+          (await isContinuingOwnFile(customerUser._id, { email: customer.email, phone: customer.phone }));
+        if (continuingOwnFile) {
+          const namePatch = {
+            firstName: customer.firstName,
+            middleName: customer.middleName || "",
+            lastName: customer.lastName || "",
+          };
+          await User.updateOne({ _id: customerUser._id }, { $set: namePatch });
+          Object.assign(customerUser, namePatch);
+        } else if (nameChanged) {
           const field = customerUser.email.toLowerCase() === customer.email.toLowerCase() ? "email" : "phone";
           return res.status(409).json({
             message: `This ${field} is already registered to another customer: ${customerUser.firstName} ${customerUser.lastName}. Please use unique contact details for ${customer.firstName} or use the existing customer's registered name.`,
@@ -2003,7 +2016,20 @@ router.post(
         const incomingFirstName = (customer.firstName || "").trim().toLowerCase();
         const incomingLastName = (customer.lastName || "").trim().toLowerCase();
 
-        if (existingFirstName !== incomingFirstName || existingLastName !== incomingLastName) {
+        const nameChanged =
+          existingFirstName !== incomingFirstName || existingLastName !== incomingLastName;
+        const continuingOwnFile =
+          nameChanged &&
+          (await isContinuingOwnFile(customerUser._id, { email: normalizedEmail, phone: normalizedPhone }));
+        if (continuingOwnFile) {
+          const namePatch = {
+            firstName: customer.firstName,
+            middleName: customer.middleName || "",
+            lastName: customer.lastName || "",
+          };
+          await User.updateOne({ _id: customerUser._id }, { $set: namePatch });
+          Object.assign(customerUser, namePatch);
+        } else if (nameChanged) {
           const field = customerUser.email.toLowerCase() === normalizedEmail ? "email" : "phone";
           return res.status(409).json({
             message: `This ${field} is already registered to another customer: ${customerUser.firstName} ${customerUser.lastName}.`,
@@ -2770,25 +2796,43 @@ router.post(
         }).catch((e) => console.warn("Failed to sync customer User:", e.message));
       }
 
-      // Update employment / business / property info
-      if (Object.keys(employmentInfo).length > 0 || Object.keys(product).length > 0) {
-        app.employmentInfo = {
-          ...(app.employmentInfo || {}),
-          ...product,
-          ...employmentInfo,
-        };
+      const personFinancial = personFinancialFrom({ ...(app.customer || {}), ...customer, ...product });
+      app.customer = { ...(app.customer || {}), ...personFinancial };
+      if (customer.hasRunningLoan) {
+        app.hasRunningLoan = String(customer.hasRunningLoan).toUpperCase() === "YES" ? "YES" : "NO";
+        app.monthlyEmiPaying = app.hasRunningLoan === "YES" ? Number(customer.monthlyEmiPaying) || 0 : 0;
       }
-      if (Object.keys(businessInfo).length > 0) {
-        app.businessInfo = {
-          ...(app.businessInfo || {}),
-          ...businessInfo,
-        };
+      app.loanPurpose = customer.loanPurpose || app.loanPurpose;
+      app.salaryInHand = personFinancial.salaryInHand;
+      app.salaryReceiptMode = personFinancial.salaryReceiptMode;
+      app.cibilScoreBand = personFinancial.cibilScoreBand;
+      app.hasBounce = personFinancial.hasBounce;
+      app.bounceCount = personFinancial.bounceCount;
+
+      // Route product fields to the section that matches the loan type
+      const loanTypeKey = String(app.loanType || "").trim().toUpperCase();
+      const sections = buildConditionalSections(loanTypeKey, product);
+      const definedOnly = (obj) =>
+        Object.fromEntries(Object.entries(obj || {}).filter(([, v]) => v !== undefined && v !== ""));
+      const nextEmployment = { ...definedOnly(sections.employmentInfo), ...definedOnly(employmentInfo) };
+      const nextBusiness = { ...definedOnly(sections.businessInfo), ...definedOnly(businessInfo) };
+      const nextProperty = {
+        ...definedOnly(sections.propertyInfo),
+        ...definedOnly({
+          propertyType: parsedPayload.propertyType,
+          propertyValue: parsedPayload.propertyValue,
+          propertyAddress: parsedPayload.propertyAddress,
+        }),
+        ...definedOnly(propertyInfo),
+      };
+      if (Object.keys(nextEmployment).length > 0) {
+        app.employmentInfo = { ...(app.employmentInfo || {}), ...nextEmployment };
       }
-      if (Object.keys(propertyInfo).length > 0) {
-        app.propertyInfo = {
-          ...(app.propertyInfo || {}),
-          ...propertyInfo,
-        };
+      if (Object.keys(nextBusiness).length > 0) {
+        app.businessInfo = { ...(app.businessInfo || {}), ...nextBusiness };
+      }
+      if (Object.keys(nextProperty).length > 0) {
+        app.propertyInfo = { ...(app.propertyInfo || {}), ...nextProperty };
       }
       if (Object.keys(vehicleInfo).length > 0) {
         app.vehicleInfo = {
@@ -2818,8 +2862,16 @@ router.post(
 
       // Handle newly uploaded files
       if (req.files && req.files.length > 0) {
-        const uploadedDocs = req.files.map((file) => ({
-          docType: file.fieldname || "OTHER_DOCS",
+        const completeFormDocTypes = Array.isArray(req.body?.docTypes)
+          ? req.body.docTypes
+          : req.body?.docTypes
+            ? [req.body.docTypes]
+            : [];
+        const uploadedDocs = req.files.map((file, index) => ({
+          docType: normalizeIncomingDocType(
+            completeFormDocTypes[index] ||
+              (file.fieldname && file.fieldname !== "docs" ? file.fieldname : "OTHER_DOCS")
+          ),
           url: file.location || file.path,
           name: file.originalname,
           size: file.size,

@@ -2,6 +2,7 @@ import { Application, LOAN_TYPES } from "../models/Application.js";
 import { loanAmountError } from "./loanFileRules.js";
 import { normalizePhoneToTen } from "./phoneNormalize.js";
 import { personFinancialFrom } from "./personFinancial.js";
+import { isCoApplicantMandatory } from "./loanMandatoryDocRules.js";
 
 /**
  * Normalizes email address by trimming and removing whitespace.
@@ -350,14 +351,20 @@ export function validateApplicationPayload({
     }
   });
 
+  const coAppMandatory = isCoApplicantMandatory(upperLoanType);
   const hasCoApp = Boolean(
+    coAppMandatory ||
     customer.hasCoApplicant ||
     coApplicant?.hasCoApplicant ||
     coApplicant?.phone
   );
   if (hasCoApp) {
     if (!coApplicant?.phone) {
-      errors.push("Co-applicant phone is required when co-applicant is added");
+      errors.push(
+        coAppMandatory
+          ? "Co-applicant mobile number is mandatory for this loan type"
+          : "Co-applicant phone is required when co-applicant is added"
+      );
     } else if (!/^\d{10}$/.test(String(coApplicant.phone))) {
       errors.push("Co-applicant phone must be 10 digits");
     }
