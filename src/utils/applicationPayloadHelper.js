@@ -231,7 +231,27 @@ export function normalizeApplicationPayload(rawPayload = {}) {
 
   // Normalize Co-applicant
   const normalizedCoApplicant = {
-    phone: normalizePhone(coApplicantRaw?.phone || rawPayload.coApplicantPhone || customerRaw.coApplicantPhone),
+    phone: normalizePhone(
+      coApplicantRaw?.phone ||
+      coApplicantRaw?.mobile ||
+      rawPayload.coApplicantPhone ||
+      rawPayload.coApplicantMobile ||
+      customerRaw.coApplicantPhone ||
+      customerRaw.coApplicantMobile
+    ),
+    name: String(
+      coApplicantRaw?.name ||
+      coApplicantRaw?.firstName ||
+      rawPayload.coApplicantName ||
+      customerRaw.coApplicantName ||
+      ""
+    ).trim(),
+    relation: String(
+      coApplicantRaw?.relation ||
+      rawPayload.coApplicantRelation ||
+      customerRaw.coApplicantRelation ||
+      ""
+    ).trim(),
   };
 
   return {

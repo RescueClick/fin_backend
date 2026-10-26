@@ -216,6 +216,8 @@ const BankSendSchema = new mongoose.Schema(
 const CoApplicantSchema = new mongoose.Schema(
   {
     phone: { type: String },
+    name: { type: String, default: "" },
+    relation: { type: String, default: "" },
   },
   { _id: false }
 );
