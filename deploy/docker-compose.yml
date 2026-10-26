@@ -1,0 +1,39 @@
+# On the VPS: copy this folder, add .env, then:
+#   docker compose pull && docker compose up -d
+#
+# Set DOCKERHUB_USERNAME in .env to your Docker Hub namespace (same as GitHub secrets).
+# Images: ${DOCKERHUB_USERNAME}/trustline-backend:latest and trustline-frontend:latest
+
+services:
+  backend:
+    image: ${DOCKERHUB_USERNAME}/trustline-backend:latest
+    container_name: trustline-backend
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${BACKEND_PORT:-5000}:5000"
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  frontend:
+    image: ${DOCKERHUB_USERNAME}/trustline-frontend:latest
+    container_name: trustline-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-80}:80"
+    depends_on:
+      - backend
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_POLL_INTERVAL: 300
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      WATCHTOWER_LABEL_ENABLE: "true"
+    command: --interval 300
