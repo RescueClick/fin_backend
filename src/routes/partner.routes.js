@@ -1012,14 +1012,15 @@ router.post(
       }
 
       // Check if customer exists
-      let customerUser = await User.findOne({
-        $or: [
-          { email: customer.email.toLowerCase() },
-          { phone: customer.phone },
-          { appNo: customer.appNo },
-        ],
+      const customerLookup = [];
+      if (customer.email) customerLookup.push({ email: String(customer.email).trim().toLowerCase() });
+      if (customer.phone) customerLookup.push({ phone: String(customer.phone).trim() });
+      if (customer.employeeId) customerLookup.push({ employeeId: String(customer.employeeId).trim() });
+
+      let customerUser = customerLookup.length > 0 ? await User.findOne({
+        $or: customerLookup,
         role: ROLES.CUSTOMER,
-      });
+      }) : null;
 
       // If not exists, create customer
       let tempPassword;
@@ -1214,6 +1215,7 @@ router.post(
         }
         existingApp.docs = docsToSave;
         existingApp.loanType = loanType;
+        existingApp.customerId = customerUser._id;
         existingApp.customer = { ...existingApp.customer, ...customerData };
         existingApp.employmentInfo = employmentInfo;
         existingApp.businessInfo = businessInfo;

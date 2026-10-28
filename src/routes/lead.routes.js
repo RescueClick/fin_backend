@@ -304,6 +304,17 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
         _id: applicationId,
         status: "LEAD",
       });
+      // Safety: If this lead was created for a completely different customer (different email and phone),
+      // do not hijack or overwrite that customer's file.
+      if (app && app.customerId && String(app.customerId) !== String(customerUser._id)) {
+        const appEmail = (app.customer?.email || "").trim().toLowerCase();
+        const appPhone = String(app.customer?.phone || "").replace(/\D/g, "").slice(-10);
+        const reqEmail = String(email || "").trim().toLowerCase();
+        const reqPhone = String(phone || "").replace(/\D/g, "").slice(-10);
+        if (appEmail !== reqEmail && appPhone !== reqPhone) {
+          app = null;
+        }
+      }
     }
 
     const blocked = (blocker) =>
@@ -336,6 +347,7 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
     }
 
     if (app) {
+      app.customerId = customerUser._id;
       app.loanType = normalizedLoanType;
       // Update existing LEAD
       app.customer = { ...app.customer?.toObject?.(), ...customerPayload };
