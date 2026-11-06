@@ -1062,6 +1062,18 @@ router.get(
         };
       });
 
+      // Compute full summary for RM across all assigned partners before filtering
+      const summary = buildPartnerFollowUpSummary(items, totalLoans);
+      summary.moreInfoRequired = items.filter((i) => i.moreInfoRequired).length;
+      summary.pendingDocsTotal = items.reduce(
+        (s, i) => s + (i.pendingDocsCount || 0),
+        0
+      );
+      summary.openLeadsTotal = items.reduce(
+        (s, i) => s + (i.openLeadsCount || 0),
+        0
+      );
+
       if (statusFilter && statusFilter !== "N/A") {
         items = items.filter((i) => i.status === statusFilter);
       } else if (statusFilter === "N/A") {
@@ -1075,18 +1087,9 @@ router.get(
         performanceFilter === "not_filled"
       ) {
         items = items.filter((i) => !i.hasFilledForm);
+      } else if (performanceFilter === "more_info") {
+        items = items.filter((i) => i.moreInfoRequired);
       }
-
-      const summary = buildPartnerFollowUpSummary(items, totalLoans);
-      summary.moreInfoRequired = items.filter((i) => i.moreInfoRequired).length;
-      summary.pendingDocsTotal = items.reduce(
-        (s, i) => s + (i.pendingDocsCount || 0),
-        0
-      );
-      summary.openLeadsTotal = items.reduce(
-        (s, i) => s + (i.openLeadsCount || 0),
-        0
-      );
 
       res.json({
         period: period
