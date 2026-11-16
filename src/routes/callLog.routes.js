@@ -16,7 +16,7 @@ const router = Router();
 router.post(
   "/log",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.RM),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM, ROLES.RM),
   async (req, res) => {
     try {
       const {
@@ -169,7 +169,7 @@ router.post(
 router.post(
   "/assignments/create",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
   async (req, res) => {
     try {
       const {
@@ -255,7 +255,7 @@ router.post(
 router.get(
   "/assignments/admin-overview",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
   async (req, res) => {
     try {
       const { date = new Date().toISOString().slice(0, 10) } = req.query;
@@ -369,7 +369,7 @@ router.get(
 router.get(
   "/assignments/rm-sheet",
   auth,
-  requireRole(ROLES.RM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
+  requireRole(ROLES.RM, ROLES.ASM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const rmId = req.query.rmId || req.user._id;
@@ -395,7 +395,7 @@ router.get(
 router.patch(
   "/assignments/contact-status",
   auth,
-  requireRole(ROLES.RM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
+  requireRole(ROLES.RM, ROLES.ASM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const { assignmentId, contactPhone, status, notes } = req.body;
@@ -430,7 +430,7 @@ router.patch(
 router.get(
   "/admin-logs",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
   async (req, res) => {
     try {
       const {
@@ -555,7 +555,7 @@ router.get(
 router.get(
   "/rm-history",
   auth,
-  requireRole(ROLES.RM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
+  requireRole(ROLES.RM, ROLES.ASM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
       const rmId = req.user._id;

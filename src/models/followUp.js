@@ -1,20 +1,23 @@
 import mongoose from "mongoose";
 
 const followUpSchema = new mongoose.Schema({
-    // Target of follow-up (can be Partner, RM, ASM, or RSM)
+    // Target of follow-up (can be Partner, RM, ASM, RSM, or Customer/Application)
     targetId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    // Type of follow-up: PARTNER (RM→Partner), RM (ASM→RM), ASM (RSM→ASM)
+    applicationId: { type: mongoose.Schema.Types.ObjectId, ref: "Application", default: null },
+    // Type of follow-up: PARTNER, RM, RSM, ASM, CUSTOMER
     followUpType: { 
       type: String, 
-      enum: ["PARTNER", "RM", "RSM", "ASM"], 
-      default: "PARTNER" // Backward compatibility
+      enum: ["PARTNER", "RM", "RSM", "ASM", "CUSTOMER"], 
+      default: "PARTNER"
     },
     // For backward compatibility - if partnerId is set, it's a partner follow-up
-    partnerId: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // Deprecated: use targetId
-    status: { type: String, enum: ["Connected", "Ringing", "Switch Off", "Not Reachable"], default: "Not Reachable" },
-    remarks: { type: String },
-    lastCall: { type: Date },  // date & time of last follow-up
-    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // Who updated (ASM, RSM, or RM)
+    partnerId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    status: { type: String, default: "Not Reachable" },
+    remarks: { type: String, default: "" },
+    nextFollowUpDate: { type: Date, default: null },
+    lastCall: { type: Date, default: Date.now },
+    durationSeconds: { type: Number, default: 0 },
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   }, { timestamps: true });
 
   // Pre-save hook to set targetId from partnerId for backward compatibility

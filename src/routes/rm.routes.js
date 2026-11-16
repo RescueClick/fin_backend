@@ -33,6 +33,8 @@ import {
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { s3, BUCKET_NAME } from "../config/s3.js";
 import { FollowUp } from "../models/followUp.js";
+import { CallLog } from "../models/CallLog.js";
+import { RmCallingAssignment } from "../models/RmCallingAssignment.js";
 import dayjs from "dayjs";
 import {
   parseFollowUpPeriod,
@@ -1163,6 +1165,253 @@ router.post(
     } catch (err) {
       console.error("Error updating follow-up:", err);
       res.status(500).json({ message: "Error updating follow-up" });
+    }
+  }
+);
+
+// GET /rm/customers-with-followup — Dedicated Customer Follow-up Hub for RM
+router.get(
+  "/customers-with-followup",
+  auth,
+  requireRole(ROLES.RM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const rmId = req.query.rmId || req.user.sub || req.user._id;
+
+      // 1. Fetch RM's partners to get their applications
+      const partners = await User.find(
+        activeUsersFilter({ role: ROLES.PARTNER, rmId })
+      )
+        .select("_id firstName lastName name partnerCode employeeId")
+        .lean();
+
+      const partnerIds = partners.map((p) => p._id);
+      const partnerMap = new Map();
+      partners.forEach((p) => {
+        partnerMap.set(String(p._id), `${p.firstName || ""} ${p.lastName || ""}`.trim() || p.name);
+      });
+
+      // 2. Fetch applications assigned to RM or under RM's partners
+      const applications = await Application.find(
+        activeApplicationsFilter({
+          $or: [{ assignedRM: rmId }, { partnerId: { $in: partnerIds } }],
+        })
+      )
+        .select(
+          "appNo customer partnerId loanType loanAmount status leadFollowUp createdAt uploadedDocuments formProgress"
+        )
+        .sort({ createdAt: -1 })
+        .lean();
+
+      // 3. Fetch any assigned Meta calling sheet contacts for this RM
+      const callingAssignments = await RmCallingAssignment.find({
+        rmId,
+        assignmentType: "CUSTOMER",
+      }).lean();
+
+      // Collect all phones
+      const phones = new Set();
+      applications.forEach((app) => {
+        if (app.customer?.phone) phones.add(app.customer.phone);
+        if (app.customer?.alternatePhone) phones.add(app.customer.alternatePhone);
+      });
+      callingAssignments.forEach((sheet) => {
+        sheet.contacts?.forEach((c) => {
+          if (c.phone) phones.add(c.phone);
+        });
+      });
+
+      // 4. Fetch latest CallLogs for these phones by this RM
+      const callLogs = await CallLog.find({
+        rmId,
+        targetPhone: { $in: Array.from(phones) },
+      })
+        .sort({ callStartTime: -1 })
+        .lean();
+
+      const callLogMap = new Map();
+      for (const log of callLogs) {
+        if (!callLogMap.has(log.targetPhone)) {
+          callLogMap.set(log.targetPhone, log);
+        }
+      }
+
+      // 5. Fetch latest FollowUp records for customers
+      const customerFollowUps = await FollowUp.find({
+        followUpType: "CUSTOMER",
+        updatedBy: rmId,
+      })
+        .sort({ updatedAt: -1 })
+        .lean();
+
+      const followUpMap = new Map();
+      for (const fu of customerFollowUps) {
+        const key = String(fu.applicationId || fu.targetId || "");
+        if (key && !followUpMap.has(key)) {
+          followUpMap.set(key, fu);
+        }
+      }
+
+      const items = [];
+
+      for (const app of applications) {
+        const phone = app.customer?.phone || "";
+        const pName = partnerMap.get(String(app.partnerId)) || "Direct / In-House";
+        const lastCallLog = callLogMap.get(phone) || null;
+        const appFollowUp = followUpMap.get(String(app._id)) || null;
+
+        const isFilled = app.status !== "LEAD" && (app.formProgress?.stepIndex >= 6 || app.status === "SUBMITTED" || app.status === "DISBURSED");
+        const pendingDocs = (app.uploadedDocuments || []).filter((d) => d.status === "PENDING" || d.status === "REJECTED").length;
+
+        items.push({
+          id: String(app._id),
+          appNo: app.appNo || "LEAD",
+          type: "APPLICATION",
+          customerName: [app.customer?.firstName, app.customer?.lastName].filter(Boolean).join(" ") || app.customer?.name || "Customer",
+          phone,
+          email: app.customer?.email || "",
+          city: app.customer?.city || "",
+          loanType: app.loanType || "Loan",
+          loanAmount: app.loanAmount || 0,
+          partnerName: pName,
+          leadSource: pName.includes("In-House") || pName.includes("Direct") ? "Meta / In-House" : `Partner: ${pName}`,
+          status: app.status || "NEW",
+          formStatus: isFilled ? "FILLED" : "INCOMPLETE",
+          stepIndex: app.formProgress?.stepIndex || 1,
+          pendingDocsCount: pendingDocs,
+          followUpStatus: appFollowUp?.status || app.leadFollowUp?.status || (lastCallLog ? lastCallLog.callType : "NEW"),
+          remarks: appFollowUp?.remarks || app.leadFollowUp?.remarks || "",
+          nextFollowUpDate: appFollowUp?.nextFollowUpDate || null,
+          lastCallTime: lastCallLog?.callStartTime || appFollowUp?.lastCall || null,
+          lastCallDuration: lastCallLog?.durationSeconds || 0,
+          lastCallType: lastCallLog?.callType || "",
+          isVerified: lastCallLog?.isVerifiedRealCall || false,
+          createdAt: app.createdAt,
+        });
+      }
+
+      // Merge assigned Meta calling sheet contacts
+      for (const sheet of callingAssignments) {
+        for (const c of sheet.contacts || []) {
+          const alreadyInApp = items.some((i) => i.phone === c.phone);
+          if (alreadyInApp) continue;
+
+          const lastCallLog = callLogMap.get(c.phone) || null;
+
+          items.push({
+            id: String(c._id),
+            appNo: "META_LEAD",
+            type: "CALLING_SHEET_LEAD",
+            customerName: c.name || "Meta Lead",
+            phone: c.phone,
+            email: "",
+            city: c.city || "",
+            loanType: c.loanType || "Personal Loan",
+            loanAmount: 0,
+            partnerName: "Meta Ads (Direct)",
+            leadSource: sheet.sheetName || "Meta Ads Lead",
+            status: "LEAD",
+            formStatus: "NOT_STARTED",
+            stepIndex: 0,
+            pendingDocsCount: 0,
+            followUpStatus: c.status || (lastCallLog ? lastCallLog.callType : "PENDING"),
+            remarks: c.notes || "",
+            nextFollowUpDate: null,
+            lastCallTime: lastCallLog?.callStartTime || c.lastCallTime || null,
+            lastCallDuration: lastCallLog?.durationSeconds || c.lastCallDuration || 0,
+            lastCallType: lastCallLog?.callType || c.lastCallType || "",
+            isVerified: lastCallLog?.isVerifiedRealCall || c.isVerified || false,
+            createdAt: c.createdAt || sheet.createdAt,
+          });
+        }
+      }
+
+      const total = items.length;
+      const formFilled = items.filter((i) => i.formStatus === "FILLED").length;
+      const formIncomplete = items.filter((i) => i.formStatus !== "FILLED").length;
+      const docsPending = items.filter((i) => i.pendingDocsCount > 0).length;
+
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const calledToday = items.filter((i) => {
+        if (!i.lastCallTime) return false;
+        return new Date(i.lastCallTime).toISOString().slice(0, 10) === todayStr;
+      }).length;
+
+      return res.json({
+        success: true,
+        summary: {
+          total,
+          formFilled,
+          formIncomplete,
+          docsPending,
+          calledToday,
+        },
+        items,
+      });
+    } catch (err) {
+      console.error("Error fetching customer follow-ups:", err);
+      return res.status(500).json({ message: "Failed to fetch customer follow-ups" });
+    }
+  }
+);
+
+// POST /rm/update-customer-followup/:id — Update customer follow-up status, remarks, callback date
+router.post(
+  "/update-customer-followup/:id",
+  auth,
+  requireRole(ROLES.RM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status = "CONNECTED", remarks = "", nextFollowUpDate = null } = req.body;
+      const rmId = req.user.sub || req.user._id;
+
+      const app = await Application.findById(id);
+      if (app) {
+        if (!app.leadFollowUp) app.leadFollowUp = {};
+        app.leadFollowUp.status = status;
+        app.leadFollowUp.remarks = remarks;
+        app.leadFollowUp.updatedAt = new Date();
+        await app.save();
+
+        const followUp = await FollowUp.create({
+          applicationId: app._id,
+          targetId: app.customerId || null,
+          followUpType: "CUSTOMER",
+          status,
+          remarks,
+          nextFollowUpDate: nextFollowUpDate ? new Date(nextFollowUpDate) : null,
+          lastCall: new Date(),
+          updatedBy: rmId,
+        });
+
+        return res.json({
+          success: true,
+          message: "Customer follow-up updated successfully",
+          followUp,
+        });
+      }
+
+      const assignment = await RmCallingAssignment.findOne({ "contacts._id": id });
+      if (assignment) {
+        const contact = assignment.contacts.id(id);
+        if (contact) {
+          contact.status = status;
+          contact.notes = remarks;
+          contact.lastCallTime = new Date();
+          await assignment.save();
+          return res.json({
+            success: true,
+            message: "Calling sheet contact updated successfully",
+            contact,
+          });
+        }
+      }
+
+      return res.status(404).json({ message: "Customer lead not found" });
+    } catch (err) {
+      console.error("Error updating customer follow-up:", err);
+      return res.status(500).json({ message: "Failed to update customer follow-up" });
     }
   }
 );
