@@ -1484,16 +1484,22 @@ router.get("/rsm/:rsmId/analytics", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLE
 });
 
 // POST /api/asm/rsm/:rsmId/follow-up
-// ASM takes follow-up from RSM
-router.post("/rsm/:rsmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
+// Take follow-up on RSM (Super Admin, Admin, ASM)
+router.post("/rsm/:rsmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN, ROLES.ADMIN), async (req, res) => {
   try {
-    const asmId = req.user.sub;
+    const isSuperOrAdmin = [ROLES.SUPER_ADMIN, ROLES.ADMIN].includes(req.user.role);
+    const userId = req.user.sub;
     const { rsmId } = req.params;
     const { status, remarks } = req.body;
 
-    const rsm = await User.findOne({ _id: rsmId, asmId, role: ROLES.RSM });
+    const query = { _id: rsmId, role: ROLES.RSM };
+    if (!isSuperOrAdmin) {
+      query.asmId = userId;
+    }
+
+    const rsm = await User.findOne(query);
     if (!rsm) {
-      return res.status(404).json({ message: "RSM not found or not under this ASM" });
+      return res.status(404).json({ message: "RSM not found or not under this manager" });
     }
 
     if (!isValidFollowUpStatus(status)) {
@@ -1506,7 +1512,7 @@ router.post("/rsm/:rsmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROL
       status,
       remarks: remarks || "",
       lastCall: new Date(),
-      updatedBy: asmId,
+      updatedBy: userId,
     });
 
     await followUp.save();
@@ -1526,13 +1532,19 @@ router.post("/rsm/:rsmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROL
 });
 
 // GET /api/asm/rsms/follow-ups
-router.get("/rsms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
+router.get("/rsms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN, ROLES.ADMIN), async (req, res) => {
   try {
-    const asmId = req.user.sub;
+    const isSuperOrAdmin = [ROLES.SUPER_ADMIN, ROLES.ADMIN].includes(req.user.role);
+    const userId = req.user.sub;
     const period = parseFollowUpPeriod(req.query);
     const statusFilter = String(req.query.status || "").trim();
 
-    const rsms = await User.find({ asmId, role: ROLES.RSM })
+    const query = { role: ROLES.RSM };
+    if (!isSuperOrAdmin) {
+      query.asmId = userId;
+    }
+
+    const rsms = await User.find(query)
       .select("firstName lastName employeeId email phone rsmType status")
       .lean();
     const rsmIds = rsms.map((rsm) => rsm._id);
@@ -1595,30 +1607,218 @@ router.get("/rsms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUP
   }
 });
 
-// POST /api/asm/rm/:rmId/follow-up  (ASM → RM as requested)
-router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
+// POST /api/asm/asm/:asmId/follow-up
+// Take follow-up on ASM (Super Admin, Admin, RSM)
+router.post("/asm/:asmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN, ROLES.ADMIN), async (req, res) => {
   try {
-    const asmId = req.user.sub;
+    const isSuperOrAdmin = [ROLES.SUPER_ADMIN, ROLES.ADMIN].includes(req.user.role);
+    const userId = req.user.sub;
+    const { asmId } = req.params;
+    const { status, remarks } = req.body;
+
+    let asmQuery = { _id: asmId, role: ROLES.ASM };
+    if (!isSuperOrAdmin && req.user.role === ROLES.RSM) {
+      asmQuery = {
+        _id: asmId,
+        role: ROLES.ASM,
+        $or: [{ rsmId: userId }, { asmId: userId }, { parentRsmId: userId }],
+      };
+    }
+
+    const asm = await User.findOne(asmQuery);
+    if (!asm) {
+      return res.status(404).json({ message: "ASM not found or unauthorized" });
+    }
+
+    if (!isValidFollowUpStatus(status)) {
+      return res.status(400).json({ message: "Valid status is required" });
+    }
+
+    const followUp = new FollowUp({
+      targetId: asmId,
+      followUpType: "ASM",
+      status,
+      remarks: remarks || "",
+      lastCall: new Date(),
+      updatedBy: userId,
+    });
+
+    await followUp.save();
+
+    res.json({
+      message: "Follow-up recorded successfully",
+      followUp: {
+        ...followUp.toObject(),
+        lastCall: followUp.lastCall.toISOString(),
+        lastCallFormatted: formatFollowUpLastCall(followUp.lastCall),
+      },
+    });
+  } catch (error) {
+    console.error("Error recording ASM follow-up:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// GET /api/asm/asms/follow-ups
+// Get ASM follow-ups (Super Admin, Admin, RSM)
+router.get("/asms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN, ROLES.ADMIN), async (req, res) => {
+  try {
+    const isSuperOrAdmin = [ROLES.SUPER_ADMIN, ROLES.ADMIN].includes(req.user.role);
+    const isRsm = req.user.role === ROLES.RSM;
+    const userId = req.user.sub;
+    const period = parseFollowUpPeriod(req.query);
+    const statusFilter = String(req.query.status || "").trim();
+
+    let asmQuery = {
+      role: ROLES.ASM,
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    };
+
+    if (!isSuperOrAdmin) {
+      if (isRsm) {
+        asmQuery = {
+          role: ROLES.ASM,
+          $or: [
+            { rsmId: userId },
+            { asmId: userId },
+            { parentRsmId: userId },
+          ],
+        };
+      } else {
+        asmQuery = { _id: userId, role: ROLES.ASM };
+      }
+    }
+
+    const asms = await User.find(asmQuery)
+      .select("firstName lastName employeeId email phone asmType rsmType region status rsmId asmId branchName")
+      .populate({ path: "rsmId", select: "firstName lastName employeeId" })
+      .populate({ path: "asmId", select: "firstName lastName employeeId" })
+      .lean();
+
+    const asmIds = asms.map((a) => a._id);
+
+    const followMap = await latestFollowUpsByTargets({
+      targetIds: asmIds,
+      followUpType: "ASM",
+      period,
+    });
+
+    const rmCounts = await User.aggregate([
+      {
+        $match: {
+          role: ROLES.RM,
+          asmId: { $in: asmIds },
+        },
+      },
+      {
+        $group: {
+          _id: "$asmId",
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+    const rmCountMap = new Map(rmCounts.map((c) => [String(c._id), c.count]));
+
+    let items = asms.map((asm) => {
+      const followUp = followMap.get(String(asm._id));
+      const parentRsm = asm.rsmId || asm.asmId;
+      return {
+        asm: {
+          id: asm._id,
+          name: `${asm.firstName || ""} ${asm.lastName || ""}`.trim(),
+          email: asm.email,
+          phone: asm.phone,
+          employeeId: asm.employeeId,
+          asmType: asm.asmType || asm.rsmType || "ASM",
+          region: asm.region || asm.branchName || "—",
+          rsmName: parentRsm ? `${parentRsm.firstName || ""} ${parentRsm.lastName || ""}`.trim() : "—",
+          rsmEmployeeId: parentRsm?.employeeId || "—",
+          accountStatus: asm.status,
+          rmCount: rmCountMap.get(String(asm._id)) || 0,
+        },
+        followUp: followUp
+          ? {
+              status: followUp.status,
+              remarks: followUp.remarks,
+              lastCall: followUp.lastCall,
+              lastCallFormatted: formatFollowUpLastCall(followUp.lastCall),
+              updatedBy: followUp.updatedBy
+                ? {
+                    name: `${followUp.updatedBy.firstName || ""} ${followUp.updatedBy.lastName || ""}`.trim(),
+                    employeeId: followUp.updatedBy.employeeId,
+                  }
+                : null,
+            }
+          : null,
+        status: followUp?.status || "N/A",
+        remarks: followUp?.remarks || "",
+        lastCall: formatFollowUpLastCall(followUp?.lastCall),
+      };
+    });
+
+    if (statusFilter && statusFilter !== "N/A") {
+      items = items.filter((i) => i.status === statusFilter);
+    } else if (statusFilter === "N/A") {
+      items = items.filter((i) => i.status === "N/A");
+    }
+
+    res.json({
+      period: period
+        ? { start: period.start, end: period.end, label: period.label }
+        : null,
+      summary: { total: items.length },
+      items,
+      data: items,
+    });
+  } catch (error) {
+    console.error("Error fetching ASM follow-ups:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// POST /api/asm/rm/:rmId/follow-up  (ASM / RSM / Admin → RM)
+router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN, ROLES.ADMIN), async (req, res) => {
+  try {
+    const isSuperOrAdmin = [ROLES.SUPER_ADMIN, ROLES.ADMIN].includes(req.user.role);
+    const userId = req.user.sub;
     const { rmId } = req.params;
     const { status, remarks } = req.body;
 
-    const rsms = await User.find({ asmId, role: ROLES.RSM }).select("_id").lean();
-    const rsmIds = rsms.map((r) => r._id);
+    let rmQuery = { _id: rmId, role: ROLES.RM };
+    if (!isSuperOrAdmin) {
+      if (req.user.role === ROLES.RSM) {
+        const asms = await User.find({
+          role: ROLES.ASM,
+          $or: [{ rsmId: userId }, { asmId: userId }, { parentRsmId: userId }],
+        }).select("_id").lean();
+        const asmIds = asms.map((a) => a._id);
 
-    const rm = await User.findOne({
-      _id: rmId,
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: { $in: rsmIds } },
-        { businessRsmId: { $in: rsmIds } },
-        { homeLapRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } },
-        { asmId: asmId },
-      ],
-    });
+        rmQuery = {
+          _id: rmId,
+          role: ROLES.RM,
+          $or: [
+            { personalRsmId: userId },
+            { businessRsmId: userId },
+            { homeLapRsmId: userId },
+            { businessHomeRsmId: userId },
+            { rsmId: userId },
+            { parentRsmId: userId },
+            { asmId: { $in: asmIds } },
+          ],
+        };
+      } else {
+        rmQuery = {
+          _id: rmId,
+          role: ROLES.RM,
+          $or: [{ asmId: userId }],
+        };
+      }
+    }
+
+    const rm = await User.findOne(rmQuery);
 
     if (!rm) {
-      return res.status(404).json({ message: "RM not found or not under this ASM" });
+      return res.status(404).json({ message: "RM not found or not under this manager" });
     }
 
     if (!isValidFollowUpStatus(status)) {
@@ -1631,7 +1831,7 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES
       status,
       remarks: remarks || "",
       lastCall: new Date(),
-      updatedBy: asmId,
+      updatedBy: userId,
     });
 
     await followUp.save();
@@ -1645,10 +1845,10 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES
         const stats = leadStats.get(String(rmId)) || { openLeadsCount: 0 };
         leadNudge.openLeadsCount = stats.openLeadsCount || 0;
         if (leadNudge.openLeadsCount > 0) {
-          const askedByName = await loadUserDisplayName(asmId);
+          const askedByName = await loadUserDisplayName(userId);
           await notifyRmToProgressLeads(rmId, {
             askedByName,
-            askedByRole: req.user.role === ROLES.RSM ? "RSM" : "ASM",
+            askedByRole: req.user.role === ROLES.RSM ? "RSM" : req.user.role === ROLES.ASM ? "ASM" : "Admin",
             openLeadsCount: leadNudge.openLeadsCount,
             remarks:
               remarks ||
@@ -1679,27 +1879,45 @@ router.post("/rm/:rmId/follow-up", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES
 });
 
 // GET /api/asm/rms/follow-ups
-router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN), async (req, res) => {
+router.get("/rms/follow-ups", auth, requireRole(ROLES.RSM, ROLES.ASM, ROLES.SUPER_ADMIN, ROLES.ADMIN), async (req, res) => {
   try {
-    const asmId = req.user.sub;
+    const isSuperOrAdmin = [ROLES.SUPER_ADMIN, ROLES.ADMIN].includes(req.user.role);
+    const userId = req.user.sub;
     const period = parseFollowUpPeriod(req.query);
     const statusFilter = String(req.query.status || "").trim();
     const performanceFilter = String(req.query.performance || "").trim();
 
-    const rsms = await User.find({ asmId, role: ROLES.RSM }).select("_id").lean();
-    const rsmIds = rsms.map((r) => r._id);
+    let rmQuery = { role: ROLES.RM };
+    if (!isSuperOrAdmin) {
+      if (req.user.role === ROLES.RSM) {
+        const asms = await User.find({
+          role: ROLES.ASM,
+          $or: [{ rsmId: userId }, { asmId: userId }, { parentRsmId: userId }],
+        }).select("_id").lean();
+        const asmIds = asms.map((a) => a._id);
 
-    const rms = await User.find({
-      role: ROLES.RM,
-      $or: [
-        { personalRsmId: { $in: rsmIds } },
-        { businessRsmId: { $in: rsmIds } },
-        { homeLapRsmId: { $in: rsmIds } },
-        { businessHomeRsmId: { $in: rsmIds } },
-        { asmId: asmId },
-      ],
-    })
-      .select("firstName lastName employeeId email phone status personalRsmId businessRsmId homeLapRsmId businessHomeRsmId")
+        rmQuery = {
+          role: ROLES.RM,
+          $or: [
+            { personalRsmId: userId },
+            { businessRsmId: userId },
+            { homeLapRsmId: userId },
+            { businessHomeRsmId: userId },
+            { rsmId: userId },
+            { parentRsmId: userId },
+            { asmId: { $in: asmIds } },
+          ],
+        };
+      } else {
+        rmQuery = {
+          role: ROLES.RM,
+          $or: [{ asmId: userId }],
+        };
+      }
+    }
+
+    const rms = await User.find(rmQuery)
+      .select("firstName lastName employeeId email phone status personalRsmId businessRsmId homeLapRsmId businessHomeRsmId asmId")
       .lean();
     const rmIds = rms.map((rm) => rm._id);
 
