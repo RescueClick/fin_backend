@@ -265,7 +265,7 @@ router.get(
         .lean();
 
       const rms = await User.find(activeUsersFilter({ role: "rm" }))
-        .select("firstName lastName name employeeId phone")
+        .select("firstName lastName name employeeId phone rmType branchName franchiseType")
         .sort({ firstName: 1 })
         .lean();
 
@@ -287,6 +287,9 @@ router.get(
           rmName: `${rm.firstName || ""} ${rm.lastName || ""}`.trim() || rm.name,
           employeeId: rm.employeeId || "",
           phone: rm.phone || "",
+          rmType: rm.rmType || "HYBRID",
+          branchName: rm.branchName || "",
+          franchiseType: rm.franchiseType || "HEAD_OFFICE",
           partnerAssignments: [],
           customerAssignments: [],
           partnerCallsTarget: 0,

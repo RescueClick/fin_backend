@@ -1137,6 +1137,9 @@ router.post(
         businessRsmId,
         homeLapRsmId,
         businessHomeRsmId,
+        rmType = "HYBRID",
+        franchiseId = null,
+        branchName = "",
       } = req.body || {};
 
       if (!firstName || !lastName || !email || !phone) {
@@ -1260,6 +1263,9 @@ router.post(
         businessHomeRsmId: effBizId || null,
         dob,
         joinDate: joinDate ? new Date(joinDate) : new Date(),
+        rmType: rmType || "HYBRID",
+        franchiseId: franchiseId || null,
+        branchName: branchName || region || "Head Office",
       });
 
       // Send mail with credentials using professional email service
@@ -1598,6 +1604,9 @@ router.get(
 
         return {
           ...rmBase,
+          rmType: rm.rmType || "HYBRID",
+          franchiseId: rm.franchiseId || null,
+          branchName: rm.branchName || "",
           // Manager objects for frontend display
           personalAsm: personalAsmObj,
           businessAsm: businessAsmObj,
@@ -1658,6 +1667,42 @@ router.get(
     } catch (err) {
       console.error(err);
       res.status(500).json({ message: "Error fetching RMs" });
+    }
+  }
+);
+
+// Update RM Desk Specialization (CUSTOMER | PARTNER | HYBRID) and branch
+router.patch(
+  "/update-rm-specialization/:id",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { rmType = "HYBRID", branchName = "", franchiseType = "HEAD_OFFICE" } = req.body;
+
+      if (!["CUSTOMER", "PARTNER", "HYBRID"].includes(rmType)) {
+        return res.status(400).json({ message: "Invalid rmType. Must be CUSTOMER, PARTNER, or HYBRID" });
+      }
+
+      const rm = await User.findOneAndUpdate(
+        { _id: id, role: ROLES.RM },
+        { $set: { rmType, branchName, franchiseType } },
+        { new: true }
+      ).select("_id firstName lastName employeeId rmType branchName franchiseType");
+
+      if (!rm) {
+        return res.status(404).json({ message: "RM not found" });
+      }
+
+      return res.json({
+        success: true,
+        message: `RM desk updated to ${rmType}`,
+        rm,
+      });
+    } catch (err) {
+      console.error("Error updating RM specialization:", err);
+      return res.status(500).json({ message: "Failed to update RM desk specialization" });
     }
   }
 );

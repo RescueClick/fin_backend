@@ -113,6 +113,23 @@ const userSchema = new mongoose.Schema(
       enum: Object.values(RSM_TYPES),
     },
 
+    // RM Specialization: CUSTOMER (Inbound/Meta Desk), PARTNER (Channel/DSA Desk), HYBRID (Dual)
+    rmType: {
+      type: String,
+      enum: ["CUSTOMER", "PARTNER", "HYBRID"],
+      default: "HYBRID",
+    },
+
+    // Franchise & Branch Scoping
+    franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    franchiseCode: { type: String, trim: true, uppercase: true, sparse: true },
+    franchiseType: {
+      type: String,
+      enum: ["HEAD_OFFICE", "MICRO", "CITY", "MASTER"],
+      default: "HEAD_OFFICE",
+    },
+    branchName: { type: String, trim: true },
+
     // Employee identifiers & codes
     employeeId: { type: String, unique: true, sparse: true },
     rsmCode: { type: String, unique: true, sparse: true },
