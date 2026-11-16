@@ -916,7 +916,7 @@ router.delete("/bank-rms/:id", auth, requireRole(ROLES.SUPER_ADMIN), async (req,
 router.post(
   ["/create-asm", "/create-asms"],
   auth,
-  requireRole(ROLES.SUPER_ADMIN),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM),
   async (req, res, next) => {
     try {
       const {
@@ -940,7 +940,7 @@ router.post(
       }
 
       const specialtyType = asmType || rsmType;
-      const parentRsmId = rsmId || asmId;
+      const parentRsmId = req.user?.role === ROLES.RSM ? req.user._id : (rsmId || asmId);
 
       // Area Sales Manager (ASM) must have a specialty type and report to an RSM
       if (!specialtyType) {
@@ -1118,7 +1118,7 @@ router.post(
 router.post(
   "/create-rm",
   auth,
-  requireRole(ROLES.SUPER_ADMIN),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM),
   async (req, res) => {
     try {
       const {
@@ -1237,7 +1237,7 @@ router.post(
 
       // Get primary manager to determine parent senior RSM
       const primaryMgr = await User.findById(effPersonalId).select("rsmId asmId").lean();
-      const resolvedSeniorRsmId = req.body?.rsmId || primaryMgr?.rsmId || primaryMgr?.asmId || validationCheck.rsmId || validationCheck.asmId;
+      const resolvedSeniorRsmId = req.user?.role === ROLES.RSM ? req.user._id : (req.body?.rsmId || primaryMgr?.rsmId || primaryMgr?.asmId || validationCheck.rsmId || validationCheck.asmId);
       const seniorMgr = resolvedSeniorRsmId ? await User.findById(resolvedSeniorRsmId) : null;
 
       // Create RM
@@ -2334,7 +2334,7 @@ router.post(
 router.post(
   "/meta-leads/check",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
   async (req, res) => {
     try {
       const { csvText, fileName = "meta_leads.csv", saveAudit = true } = req.body || {};
@@ -2407,11 +2407,15 @@ router.post(
 router.get(
   "/meta-leads/history",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
   async (req, res) => {
     try {
       const { limit = 20 } = req.query;
-      const history = await LeadSheetAudit.find({})
+      const filter = {};
+      if (req.user?.role === ROLES.RSM || req.user?.role === ROLES.ASM) {
+        filter.uploadedBy = req.user._id;
+      }
+      const history = await LeadSheetAudit.find(filter)
         .select("fileName uploadedByName uploadedByRole stats createdAt")
         .sort({ createdAt: -1 })
         .limit(Math.min(100, parseInt(limit, 10) || 20))
@@ -2429,7 +2433,7 @@ router.get(
 router.get(
   "/meta-leads/history/:id",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
   async (req, res) => {
     try {
       const audit = await LeadSheetAudit.findById(req.params.id).lean();
@@ -2448,7 +2452,7 @@ router.get(
 router.get(
   "/meta-leads/trace-phone",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
   async (req, res) => {
     try {
       const phone = normalizePhoneToTen(req.query?.phone);
