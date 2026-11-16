@@ -1118,7 +1118,7 @@ router.post(
 router.post(
   "/create-rm",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
   async (req, res) => {
     try {
       const {
