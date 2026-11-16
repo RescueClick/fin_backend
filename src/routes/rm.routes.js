@@ -1155,6 +1155,32 @@ router.post(
 
       await followUp.save();
 
+      // Auto-update any active calling assignment sheet for this partner
+      try {
+        const partnerUser = await User.findById(partnerId).select("phone").lean();
+        if (partnerUser?.phone) {
+          const today = new Date().toISOString().slice(0, 10);
+          const assignment = await RmCallingAssignment.findOne({
+            rmId,
+            date: today,
+            "contacts.phone": partnerUser.phone,
+          });
+          if (assignment) {
+            const contact = assignment.contacts.find((c) => c.phone === partnerUser.phone);
+            if (contact) {
+              contact.status = status === "Connected" ? "CONNECTED" : "CALL_BACK";
+              contact.notes = remarks || "";
+              contact.lastCallTime = new Date();
+              const total = assignment.contacts.length;
+              const called = assignment.contacts.filter((c) => c.status !== "PENDING").length;
+              const connected = assignment.contacts.filter((c) => c.status === "CONNECTED").length;
+              assignment.stats = { total, called, connected, pending: total - called };
+              await assignment.save();
+            }
+          }
+        }
+      } catch (_) {}
+
       res.json({
         message: "Follow-up updated successfully",
         followUp: {

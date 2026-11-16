@@ -251,20 +251,30 @@ router.post(
   }
 );
 
-// GET /api/calls/assignments/admin-overview — Daily target tracking across all RMs
+// GET /api/calls/assignments/admin-overview — Daily target tracking across all RMs (or single RM)
 router.get(
   "/assignments/admin-overview",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM, ROLES.RM),
   async (req, res) => {
     try {
       const { date = new Date().toISOString().slice(0, 10) } = req.query;
 
-      const assignments = await RmCallingAssignment.find({ date })
+      const assignmentFilter = { date };
+      if (req.user.role === ROLES.RM) {
+        assignmentFilter.rmId = req.user._id;
+      }
+
+      const assignments = await RmCallingAssignment.find(assignmentFilter)
         .sort({ createdAt: -1 })
         .lean();
 
-      const rms = await User.find(activeUsersFilter({ role: "rm" }))
+      const rmFilter = { role: "rm" };
+      if (req.user.role === ROLES.RM) {
+        rmFilter._id = req.user._id;
+      }
+
+      const rms = await User.find(activeUsersFilter(rmFilter))
         .select("firstName lastName name employeeId phone rmType branchName franchiseType")
         .sort({ firstName: 1 })
         .lean();
@@ -429,11 +439,11 @@ router.patch(
   }
 );
 
-// GET /api/calls/admin-logs — Admin / RSM view of all calls with stats & filters
+// GET /api/calls/admin-logs — Admin / RSM / RM view of calls with stats & filters
 router.get(
   "/admin-logs",
   auth,
-  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM, ROLES.RM),
   async (req, res) => {
     try {
       const {
@@ -450,7 +460,9 @@ router.get(
 
       const filter = {};
 
-      if (rmId && rmId !== "all") {
+      if (req.user?.role === ROLES.RM) {
+        filter.rmId = req.user._id;
+      } else if (rmId && rmId !== "all") {
         filter.rmId = rmId;
       }
 
