@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 
 const leadSheetRowSchema = new mongoose.Schema(
   {
-    phone: { type: String, trim: true, index: true },
+    phone: { type: String, trim: true },
     name: { type: String, trim: true },
     email: { type: String, trim: true },
     city: { type: String, trim: true },
