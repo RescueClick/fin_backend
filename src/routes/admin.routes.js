@@ -76,7 +76,12 @@ import { findCustomersForPartner } from "../utils/partnerCustomerSync.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { resolveLoginBank } from "../utils/loginBank.js";
 import { publicFileReview, saveFileReview } from "../utils/fileReview.js";
-import { parseMetaLeadSheet, matchMetaLeadsToApplications } from "../utils/metaLeadSheet.js";
+import {
+  parseMetaLeadSheet,
+  matchMetaLeadsToApplications,
+  matchMetaLeadsToSystem,
+} from "../utils/metaLeadSheet.js";
+import { LeadSheetAudit } from "../models/LeadSheetAudit.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
@@ -2280,24 +2285,149 @@ router.post(
   }
 );
 
-// POST /meta-leads/check — compare an uploaded Meta leads sheet with loan applications
+// POST /meta-leads/check — compare an uploaded Meta leads sheet with partners, customers & loan applications
 router.post(
   "/meta-leads/check",
   auth,
   requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
   async (req, res) => {
     try {
-      const leads = parseMetaLeadSheet(req.body?.csvText);
-      const applications = await Application.find(activeApplicationsFilter({}))
-        .select("appNo status loanType customer.phone customer.alternatePhone")
+      const { csvText, fileName = "meta_leads.csv", saveAudit = true } = req.body || {};
+      const leads = parseMetaLeadSheet(csvText);
+      const phones = leads.map((l) => l.phone).filter(Boolean);
+
+      // Fetch active applications matching phones
+      const applications = await Application.find(
+        activeApplicationsFilter({
+          $or: [
+            { "customer.phone": { $in: phones } },
+            { "customer.alternatePhone": { $in: phones } },
+          ],
+        })
+      )
+        .select("appNo status loanType loanAmount customer.phone customer.alternatePhone")
         .lean();
-      return res.json(matchMetaLeadsToApplications(leads, applications));
+
+      // Fetch active users (partners & customers) matching phones
+      const users = await User.find(
+        activeUsersFilter({
+          $or: [
+            { phone: { $in: phones } },
+            { alternatePhone: { $in: phones } },
+          ],
+        })
+      )
+        .populate("rmId", "firstName lastName name phone employeeId")
+        .select("firstName lastName name phone alternatePhone role employeeId rmId")
+        .lean();
+
+      const result = matchMetaLeadsToSystem(leads, applications, users);
+
+      let auditId = null;
+      if (saveAudit && result.total > 0) {
+        const u = req.user || {};
+        const uploadedByName = `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.name || "Admin";
+        const audit = await LeadSheetAudit.create({
+          fileName,
+          uploadedBy: u._id,
+          uploadedByName,
+          uploadedByRole: u.role || "admin",
+          stats: {
+            total: result.total,
+            existingPartners: result.existingPartners,
+            existingCustomersLoanFilled: result.existingCustomersLoanFilled,
+            existingCustomersNoLoan: result.existingCustomersNoLoan,
+            freshLeads: result.freshLeads,
+          },
+          rows: result.rows,
+        });
+        auditId = audit._id;
+      }
+
+      return res.json({
+        ...result,
+        auditId,
+      });
     } catch (err) {
       const status = err.status || 500;
       if (status >= 500) console.error("Meta lead sheet check failed:", err);
       return res.status(status).json({
         message: err.message || "Could not check the Meta lead sheet",
       });
+    }
+  }
+);
+
+// GET /meta-leads/history — List past uploaded sheets & stats
+router.get(
+  "/meta-leads/history",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  async (req, res) => {
+    try {
+      const { limit = 20 } = req.query;
+      const history = await LeadSheetAudit.find({})
+        .select("fileName uploadedByName uploadedByRole stats createdAt")
+        .sort({ createdAt: -1 })
+        .limit(Math.min(100, parseInt(limit, 10) || 20))
+        .lean();
+
+      return res.json({ success: true, history });
+    } catch (err) {
+      console.error("Failed to fetch lead sheet history:", err);
+      return res.status(500).json({ message: "Failed to fetch lead sheet history" });
+    }
+  }
+);
+
+// GET /meta-leads/history/:id — Fetch full details & rows of a past audit
+router.get(
+  "/meta-leads/history/:id",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  async (req, res) => {
+    try {
+      const audit = await LeadSheetAudit.findById(req.params.id).lean();
+      if (!audit) {
+        return res.status(404).json({ message: "Audit record not found" });
+      }
+      return res.json({ success: true, audit });
+    } catch (err) {
+      console.error("Failed to fetch audit details:", err);
+      return res.status(500).json({ message: "Failed to fetch audit details" });
+    }
+  }
+);
+
+// GET /meta-leads/trace-phone — Trace a single phone number across all historical sheets
+router.get(
+  "/meta-leads/trace-phone",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  async (req, res) => {
+    try {
+      const phone = normalizePhoneToTen(req.query?.phone);
+      if (!phone || phone.length !== 10) {
+        return res.status(400).json({ message: "10-digit phone number is required" });
+      }
+
+      const matches = await LeadSheetAudit.find({ "rows.phone": phone })
+        .select("fileName uploadedByName createdAt stats rows.$")
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const traces = matches.map((m) => ({
+        sheetId: m._id,
+        fileName: m.fileName,
+        uploadedByName: m.uploadedByName,
+        uploadedAt: m.createdAt,
+        leadRecord: m.rows?.[0] || null,
+      }));
+
+      return res.json({ success: true, phone, count: traces.length, traces });
+    } catch (err) {
+      console.error("Failed to trace lead phone:", err);
+      return res.status(500).json({ message: "Failed to trace phone number" });
     }
   }
 );
