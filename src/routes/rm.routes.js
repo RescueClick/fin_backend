@@ -409,6 +409,11 @@ router.post(
 router.get("/get-partners", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
     const rmId = req.user.sub;
+    const rmUser = await User.findById(rmId).select("rmType").lean();
+    if (rmUser?.rmType === "CUSTOMER") {
+      return res.json([]);
+    }
+
     const rmObjectId = mongoose.Types.ObjectId.isValid(rmId)
       ? new mongoose.Types.ObjectId(rmId)
       : null;
@@ -996,6 +1001,23 @@ router.get(
       const statusFilter = String(req.query.status || "").trim();
       const performanceFilter = String(req.query.performance || "").trim(); // working | non_working | filled | not_filled
 
+      // B2C Customer Desk RMs handle only direct leads — zero channel partners
+      const rmUser = await User.findById(rmId).select("rmType").lean();
+      if (rmUser?.rmType === "CUSTOMER") {
+        return res.json({
+          period,
+          summary: {
+            total: 0,
+            working: 0,
+            nonWorking: 0,
+            partnersFilled: 0,
+            partnersNotFilled: 0,
+            openLeadsTotal: 0,
+          },
+          items: [],
+        });
+      }
+
       const partners = await User.find({
         role: ROLES.PARTNER,
         rmId,
@@ -1204,36 +1226,78 @@ router.get(
     try {
       const rmId = req.query.rmId || req.user.sub || req.user._id;
 
-      // 1. Fetch RM's partners to get their applications
-      const partners = await User.find(
-        activeUsersFilter({ role: ROLES.PARTNER, rmId })
-      )
-        .select("_id firstName lastName name partnerCode employeeId")
-        .lean();
+      // 1. Fetch RM user to check desk specialization (CUSTOMER vs PARTNER vs HYBRID)
+      const rmUser = await User.findById(rmId).select("rmType role").lean();
+      const deskType = rmUser?.rmType || "HYBRID";
 
-      const partnerIds = partners.map((p) => p._id);
+      let partnerIds = [];
       const partnerMap = new Map();
-      partners.forEach((p) => {
-        partnerMap.set(String(p._id), `${p.firstName || ""} ${p.lastName || ""}`.trim() || p.name);
-      });
 
-      // 2. Fetch applications assigned to RM or under RM's partners
+      // Channel partner applications are strictly for PARTNER and HYBRID desks
+      if (deskType !== "CUSTOMER") {
+        const partners = await User.find(
+          activeUsersFilter({ role: ROLES.PARTNER, rmId })
+        )
+          .select("_id firstName lastName name partnerCode employeeId")
+          .lean();
+
+        partnerIds = partners.map((p) => p._id);
+        partners.forEach((p) => {
+          partnerMap.set(String(p._id), `${p.firstName || ""} ${p.lastName || ""}`.trim() || p.name);
+        });
+      }
+
+      // 2. Build application filter based on desk specialization:
+      // B2C Customer Desk: ONLY applications directly assigned to this RM (strictly NO partner applications)
+      // B2B Partner Desk: ONLY applications under this RM's assigned partners (lead source PARTNER)
+      // Dual/HYBRID Desk: Both direct customer applications and partner applications
+      let appFilter;
+      if (deskType === "CUSTOMER") {
+        appFilter = {
+          rmId,
+          $or: [
+            { leadSource: { $in: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads", "DIRECT", "Meta / In-House", "WEBSITE"] } },
+            { partnerId: null },
+            { partnerId: { $exists: false } },
+          ],
+        };
+      } else if (deskType === "PARTNER") {
+        appFilter = {
+          partnerId: { $in: partnerIds },
+          leadSource: { $nin: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads"] },
+        };
+      } else {
+        appFilter = {
+          $or: [
+            {
+              rmId,
+              $or: [
+                { leadSource: { $in: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads", "DIRECT", "Meta / In-House", "WEBSITE"] } },
+                { partnerId: null },
+                { partnerId: { $exists: false } },
+              ],
+            },
+            { partnerId: { $in: partnerIds } },
+          ],
+        };
+      }
+
       const applications = await Application.find(
-        activeApplicationsFilter({
-          $or: [{ assignedRM: rmId }, { partnerId: { $in: partnerIds } }],
-        })
+        activeApplicationsFilter(appFilter)
       )
         .select(
-          "appNo customer partnerId loanType loanAmount status leadFollowUp createdAt uploadedDocuments formProgress"
+          "appNo customer partnerId rmId loanType loanAmount status leadSource leadFollowUp createdAt uploadedDocuments formProgress"
         )
         .sort({ createdAt: -1 })
         .lean();
 
-      // 3. Fetch any assigned Meta calling sheet contacts for this RM
-      const callingAssignments = await RmCallingAssignment.find({
-        rmId,
-        assignmentType: "CUSTOMER",
-      }).lean();
+      // 3. Fetch assigned Meta calling sheet contacts (Only for CUSTOMER and HYBRID desks)
+      const callingAssignments = deskType === "PARTNER"
+        ? []
+        : await RmCallingAssignment.find({
+            rmId,
+            assignmentType: "CUSTOMER",
+          }).lean();
 
       // Collect all phones
       const phones = new Set();
@@ -1282,7 +1346,8 @@ router.get(
 
       for (const app of applications) {
         const phone = app.customer?.phone || "";
-        const pName = partnerMap.get(String(app.partnerId)) || "Direct / In-House";
+        const isDirect = !app.partnerId || app.leadSource === "CUSTOMER_DIRECT" || app.leadSource === "PUBLIC_REFERRAL" || deskType === "CUSTOMER";
+        const pName = isDirect ? "Meta Ads (Direct)" : (partnerMap.get(String(app.partnerId)) || "Direct / In-House");
         const lastCallLog = callLogMap.get(phone) || null;
         const appFollowUp = followUpMap.get(String(app._id)) || null;
 
@@ -1300,7 +1365,7 @@ router.get(
           loanType: app.loanType || "Loan",
           loanAmount: app.loanAmount || 0,
           partnerName: pName,
-          leadSource: pName.includes("In-House") || pName.includes("Direct") ? "Meta / In-House" : `Partner: ${pName}`,
+          leadSource: isDirect ? (app.leadSource === "CUSTOMER_DIRECT" ? "Meta Ads (Direct)" : "Direct / In-House") : `Partner: ${pName}`,
           status: app.status || "NEW",
           formStatus: isFilled ? "FILLED" : "INCOMPLETE",
           stepIndex: app.formProgress?.stepIndex || 1,
@@ -2593,22 +2658,55 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
   try {
     const rmId = req.user.sub; // RM logged in
 
-    // Get all partners under this RM
-    const partners = await User.find({ 
-      rmId: rmId, 
-      role: ROLES.PARTNER,
-      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
-    }).select("_id").lean();
-    const partnerIds = partners.map(p => p._id);
+    // Check RM desk specialization
+    const rmUser = await User.findById(rmId).select("rmType role").lean();
+    const deskType = rmUser?.rmType || "HYBRID";
 
-    // Find all applications under this RM:
-    // Applications directly assigned to this RM OR applications from partners assigned to this RM
-    const rmScopeFilter = {
-      $or: [
-        { rmId: rmId },
-        { partnerId: { $in: partnerIds } }
-      ]
-    };
+    let rmScopeFilter;
+    if (deskType === "CUSTOMER") {
+      // B2C RM: ONLY direct/Meta applications assigned to this RM (never partner applications)
+      rmScopeFilter = {
+        rmId: rmId,
+        $or: [
+          { leadSource: { $in: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads", "DIRECT", "Meta / In-House", "WEBSITE"] } },
+          { partnerId: null },
+          { partnerId: { $exists: false } },
+        ],
+      };
+    } else if (deskType === "PARTNER") {
+      // B2B RM: ONLY applications under partners assigned to this RM
+      const partners = await User.find({ 
+        rmId: rmId, 
+        role: ROLES.PARTNER,
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
+      }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+      rmScopeFilter = {
+        partnerId: { $in: partnerIds },
+        leadSource: { $nin: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads"] },
+      };
+    } else {
+      // HYBRID: Both direct customers and partner customers
+      const partners = await User.find({ 
+        rmId: rmId, 
+        role: ROLES.PARTNER,
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
+      }).select("_id").lean();
+      const partnerIds = partners.map(p => p._id);
+      rmScopeFilter = {
+        $or: [
+          {
+            rmId: rmId,
+            $or: [
+              { leadSource: { $in: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads", "DIRECT", "Meta / In-House", "WEBSITE"] } },
+              { partnerId: null },
+              { partnerId: { $exists: false } },
+            ],
+          },
+          { partnerId: { $in: partnerIds } },
+        ],
+      };
+    }
 
     const applications = await Application.find(
       activeApplicationsFilter(rmScopeFilter)

@@ -390,7 +390,16 @@ router.get(
 
       const filter = { rmId };
       if (date) filter.date = date;
-      if (assignmentType && assignmentType !== "all") filter.assignmentType = assignmentType;
+      if (assignmentType && assignmentType !== "all") {
+        filter.assignmentType = assignmentType;
+      } else {
+        const rmUser = await User.findById(rmId).select("rmType role").lean();
+        if (rmUser?.rmType === "CUSTOMER") {
+          filter.assignmentType = "CUSTOMER";
+        } else if (rmUser?.rmType === "PARTNER") {
+          filter.assignmentType = "PARTNER";
+        }
+      }
 
       const sheets = await RmCallingAssignment.find(filter)
         .sort({ createdAt: -1 })
@@ -462,6 +471,14 @@ router.get(
 
       if (req.user?.role === ROLES.RM) {
         filter.rmId = req.user._id;
+        if (!contactType || contactType === "all") {
+          const rmUser = await User.findById(req.user._id).select("rmType").lean();
+          if (rmUser?.rmType === "CUSTOMER") {
+            filter.contactType = "customer";
+          } else if (rmUser?.rmType === "PARTNER") {
+            filter.contactType = "partner";
+          }
+        }
       } else if (rmId && rmId !== "all") {
         filter.rmId = rmId;
       }
