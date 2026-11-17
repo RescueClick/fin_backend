@@ -355,12 +355,14 @@ router.get(
   requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM, ROLES.RM),
   async (req, res) => {
     try {
-      const { date = new Date().toISOString().slice(0, 10) } = req.query;
+      const { date = new Date().toISOString().slice(0, 10), rmId } = req.query;
 
       const userId = req.user?.sub || req.user?._id;
       const assignmentFilter = { date };
       if (req.user.role === ROLES.RM) {
         assignmentFilter.rmId = userId;
+      } else if (rmId) {
+        assignmentFilter.rmId = rmId;
       }
 
       const assignments = await RmCallingAssignment.find(assignmentFilter)
@@ -373,6 +375,8 @@ router.get(
       };
       if (req.user.role === ROLES.RM) {
         rmFilter._id = userId;
+      } else if (rmId) {
+        rmFilter._id = rmId;
       } else if (req.user.role === ROLES.RSM || req.user.role === ROLES.ASM) {
         const managerId = userId;
         let managerIds = [managerId];
