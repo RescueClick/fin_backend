@@ -2839,6 +2839,46 @@ router.post("/rm-activate", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_
   }
 });
 
+// PATCH /api/rsm/update-rm-specialization/:id (or /rm/:id/desk) - RSM can change RM categories
+router.patch(
+  ["/update-rm-specialization/:id", "/rm/:id/desk"],
+  auth,
+  requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { rmType = "HYBRID", branchName = "", franchiseType = "HEAD_OFFICE" } = req.body;
+
+      if (!["CUSTOMER", "PARTNER", "HYBRID"].includes(rmType)) {
+        return res.status(400).json({ message: "Invalid rmType. Must be CUSTOMER, PARTNER, or HYBRID" });
+      }
+
+      const updateFields = { rmType };
+      if (branchName) updateFields.branchName = branchName;
+      if (franchiseType) updateFields.franchiseType = franchiseType;
+
+      const rm = await User.findOneAndUpdate(
+        { _id: id, role: ROLES.RM },
+        { $set: updateFields },
+        { new: true }
+      ).select("_id firstName lastName employeeId rmType branchName franchiseType");
+
+      if (!rm) {
+        return res.status(404).json({ message: "RM not found" });
+      }
+
+      return res.json({
+        success: true,
+        message: `RM desk updated to ${rmType}`,
+        rm,
+      });
+    } catch (err) {
+      console.error("Error updating RM specialization:", err);
+      return res.status(500).json({ message: "Failed to update RM desk specialization" });
+    }
+  }
+);
+
 // POST /api/rsm/rm/deactivate (RSM can deactivate their RMs) - with automatic reassignment
 router.post("/rm-deactivate", auth, requireRole(ROLES.ASM, ROLES.RSM, ROLES.SUPER_ADMIN), async (req, res) => {
   const session = await mongoose.startSession();
