@@ -58,6 +58,96 @@ function pick(record, names) {
   return key && record[key] !== undefined ? record[key] : "";
 }
 
+export function pickPhone(record) {
+  // 1. Direct priority keys (common across Meta, Google Contacts, and standard CSVs)
+  const priorityKeys = [
+    "phone_1_value",
+    "phone_value",
+    "phone_number",
+    "phone",
+    "mobile_number",
+    "mobile_no",
+    "mobile",
+    "contact_number",
+    "contact_no",
+    "contact",
+    "phone_no",
+    "primary_phone",
+    "cell_phone",
+    "cell_number",
+    "cell",
+    "customer_phone",
+    "partner_phone",
+    "phone_1",
+    "phone_2_value",
+  ];
+
+  for (const k of priorityKeys) {
+    if (record[k]) {
+      const norm = normalizePhoneToTen(String(record[k]).replace(/^p:/i, ""));
+      if (norm && norm.length === 10) return norm;
+    }
+  }
+
+  // 2. Scan all keys containing phone / mobile / contact / tel, explicitly skipping type / label / country / id
+  for (const [k, val] of Object.entries(record)) {
+    if (!val) continue;
+    if (
+      k.endsWith("_type") ||
+      k.endsWith("_label") ||
+      k.endsWith("_country") ||
+      k.endsWith("_format") ||
+      k.endsWith("_id")
+    ) {
+      continue;
+    }
+    if (
+      k.includes("phone") ||
+      k.includes("mobile") ||
+      k.includes("contact") ||
+      k.includes("tel") ||
+      k.includes("cell")
+    ) {
+      const norm = normalizePhoneToTen(String(val).replace(/^p:/i, ""));
+      if (norm && norm.length === 10) return norm;
+    }
+  }
+
+  // 3. Fallback: Check any value in record that contains a 10-digit number
+  for (const [k, val] of Object.entries(record)) {
+    if (!val) continue;
+    if (k.endsWith("_type") || k.endsWith("_label") || k.endsWith("_id")) continue;
+    const digits = String(val).replace(/\D/g, "");
+    if (digits.length >= 10) {
+      const norm = normalizePhoneToTen(digits);
+      if (norm && norm.length === 10) return norm;
+    }
+  }
+
+  return "";
+}
+
+export function pickName(record) {
+  // Check given + family name (Google Contacts format)
+  const given = record["given_name"] || record["first_name"] || "";
+  const additional = record["additional_name"] || record["middle_name"] || "";
+  const family = record["family_name"] || record["last_name"] || "";
+  if (given || family) {
+    return [given, additional, family].filter(Boolean).join(" ").trim();
+  }
+
+  return (
+    pick(record, [
+      "full_name",
+      "name",
+      "customer_name",
+      "client_name",
+      "partner_name",
+      "contact_name",
+    ]) || "—"
+  );
+}
+
 /** Meta often exports .csv as UTF-16. A UTF-8 read leaves a NUL between letters. */
 export function normalizeSheetText(raw) {
   let text = String(raw ?? "");
@@ -101,20 +191,8 @@ export function parseMetaLeadSheet(rawText) {
       rawMeta[rawHeaderName] = cellVal;
     });
 
-    const rawPhone = pick(record, [
-      "phone_number",
-      "phone",
-      "mobile",
-      "contact",
-      "contact_number",
-      "phone_no",
-      "mobile_no",
-      "customer_phone",
-      "partner_phone",
-    ]);
-
-    const phone = normalizePhoneToTen(String(rawPhone).replace(/^p:/i, ""));
-    const name = pick(record, ["full_name", "name", "customer_name", "first_name", "client_name"]) || "—";
+    const phone = pickPhone(record);
+    const name = pickName(record);
     if (!phone || phone.length < 10) continue;
 
     leads.push({

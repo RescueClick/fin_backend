@@ -251,6 +251,103 @@ router.post(
   }
 );
 
+// POST /api/calls/assignments/bulk-split — Split and assign leads across multiple RMs
+router.post(
+  "/assignments/bulk-split",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
+  async (req, res) => {
+    try {
+      const {
+        sheetName = "Calling Sheet",
+        assignmentType = "CUSTOMER",
+        dailyTarget = 25,
+        date = new Date().toISOString().slice(0, 10),
+        allocations = [], // Array of { rmId, contacts: [...] }
+      } = req.body;
+
+      if (!Array.isArray(allocations) || allocations.length === 0) {
+        return res.status(400).json({ message: "No RM allocations provided." });
+      }
+
+      const adminUser = req.user;
+      const assignedByName = `${adminUser.firstName || ""} ${adminUser.lastName || ""}`.trim() || adminUser.name || "Admin";
+
+      const createdAssignments = [];
+      let totalContactsAssigned = 0;
+
+      for (const alloc of allocations) {
+        const { rmId, contacts = [] } = alloc;
+        if (!rmId || !contacts.length) continue;
+
+        const rmUser = await User.findById(rmId).select("firstName lastName name employeeId").lean();
+        if (!rmUser) continue;
+
+        const rmName = `${rmUser.firstName || ""} ${rmUser.lastName || ""}`.trim() || rmUser.name || "RM";
+
+        const cleanContacts = [];
+        const seenPhones = new Set();
+        for (const item of contacts) {
+          const phone = normalizePhoneToTen(item.phone);
+          if (!phone || phone.length !== 10 || seenPhones.has(phone)) continue;
+          seenPhones.add(phone);
+
+          cleanContacts.push({
+            name: item.name || "—",
+            phone,
+            contactType: assignmentType === "PARTNER" ? "partner" : "customer",
+            partnerId: item.partnerId || null,
+            customerId: item.customerId || null,
+            city: item.city || "",
+            loanType: item.loanType || item.metaLoanType || "",
+            leadSource: item.leadSource || sheetName || "Meta Ads",
+            status: "PENDING",
+            notes: item.notes || "",
+          });
+        }
+
+        if (!cleanContacts.length) continue;
+
+        const assignment = await RmCallingAssignment.create({
+          rmId: rmUser._id,
+          rmName,
+          assignedBy: adminUser._id,
+          assignedByName,
+          assignmentType: assignmentType === "PARTNER" ? "PARTNER" : "CUSTOMER",
+          sheetName: `${sheetName} (${rmName})`,
+          date,
+          dailyTarget: parseInt(dailyTarget, 10) || 25,
+          contacts: cleanContacts,
+          stats: {
+            total: cleanContacts.length,
+            called: 0,
+            connected: 0,
+            pending: cleanContacts.length,
+            totalTalkTimeSeconds: 0,
+          },
+        });
+
+        createdAssignments.push({
+          rmId: rmUser._id,
+          rmName,
+          contactsCount: cleanContacts.length,
+          assignmentId: assignment._id,
+        });
+        totalContactsAssigned += cleanContacts.length;
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: `Successfully allocated ${totalContactsAssigned} leads across ${createdAssignments.length} RM(s)`,
+        assignments: createdAssignments,
+      });
+    } catch (err) {
+      console.error("Failed to create bulk split calling assignment:", err);
+      return res.status(500).json({ message: err.message || "Failed to split calling assignment" });
+    }
+  }
+);
+
 // GET /api/calls/assignments/admin-overview — Daily target tracking across all RMs (or single RM)
 router.get(
   "/assignments/admin-overview",
