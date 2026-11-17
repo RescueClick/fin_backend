@@ -4076,6 +4076,9 @@ router.get("/profile", auth, requireRole(ROLES.RM), async (req, res) => {
       region: rm.region,
       status: rm.status,
       rmCode: rm.rmCode,
+      rmType: rm.rmType || "HYBRID",
+      loanSpecialization: rm.loanSpecialization || (rm.rmType === "CUSTOMER" ? "PL_LAP" : "ALL"),
+      allowedLoanTypes: rm.allowedLoanTypes || [],
       JoiningDate: rm.createdAt,
 
       referralLink,
