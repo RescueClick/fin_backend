@@ -7,7 +7,10 @@ export function auth(req, res, next) {
     if (!token || token === "null" || token === "undefined") return res.status(401).json({ message: "Missing token" });
     const decoded = verifyAccessToken(token);
     if (!decoded?.sub) return res.status(401).json({ message: "Invalid token" });
-    req.user = decoded; // { sub, role }
+    req.user = {
+      ...decoded,
+      _id: decoded.sub,
+    }; // { sub, _id, role }
     next();
   } catch (error) {
     if (error.name === "TokenExpiredError") {

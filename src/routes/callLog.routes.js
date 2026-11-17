@@ -357,9 +357,10 @@ router.get(
     try {
       const { date = new Date().toISOString().slice(0, 10) } = req.query;
 
+      const userId = req.user?.sub || req.user?._id;
       const assignmentFilter = { date };
       if (req.user.role === ROLES.RM) {
-        assignmentFilter.rmId = req.user._id;
+        assignmentFilter.rmId = userId;
       }
 
       const assignments = await RmCallingAssignment.find(assignmentFilter)
@@ -371,24 +372,39 @@ router.get(
         status: { $ne: "SUSPENDED" },
       };
       if (req.user.role === ROLES.RM) {
-        rmFilter._id = req.user._id;
+        rmFilter._id = userId;
       } else if (req.user.role === ROLES.RSM || req.user.role === ROLES.ASM) {
-        const managerId = req.user._id;
+        const managerId = userId;
+        let managerIds = [managerId];
+
+        if (req.user.role === ROLES.RSM) {
+          // If RSM, also resolve all specialized ASMs that report under this RSM
+          const childAsmIds = await User.find(
+            activeUsersFilter({
+              role: { $in: [ROLES.ASM, "ASM", "asm"] },
+              $or: [{ rsmId: managerId }, { asmId: managerId }],
+            })
+          ).distinct("_id");
+          if (childAsmIds && childAsmIds.length > 0) {
+            managerIds = managerIds.concat(childAsmIds);
+          }
+        }
+
         const scopedRms = await User.find(
           activeUsersFilter({
             role: { $in: [ROLES.RM, "RM", "rm"] },
             status: { $ne: "SUSPENDED" },
             $or: [
-              { personalAsmId: managerId },
-              { personalRsmId: managerId },
-              { businessAsmId: managerId },
-              { businessRsmId: managerId },
-              { homeLapAsmId: managerId },
-              { homeLapRsmId: managerId },
-              { businessHomeRsmId: managerId },
-              { businessHomeAsmId: managerId },
-              { asmId: managerId },
-              { rsmId: managerId },
+              { rsmId: { $in: managerIds } },
+              { asmId: { $in: managerIds } },
+              { personalAsmId: { $in: managerIds } },
+              { personalRsmId: { $in: managerIds } },
+              { businessAsmId: { $in: managerIds } },
+              { businessRsmId: { $in: managerIds } },
+              { homeLapAsmId: { $in: managerIds } },
+              { homeLapRsmId: { $in: managerIds } },
+              { businessHomeRsmId: { $in: managerIds } },
+              { businessHomeAsmId: { $in: managerIds } },
             ],
           })
         ).distinct("_id");
@@ -512,7 +528,7 @@ router.get(
   requireRole(ROLES.RM, ROLES.ASM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const rmId = req.query.rmId || req.user._id;
+      const rmId = req.query.rmId || req.user?.sub || req.user?._id;
       const { date = new Date().toISOString().slice(0, 10), assignmentType } = req.query;
 
       const filter = { rmId };
@@ -597,9 +613,10 @@ router.get(
       const filter = {};
 
       if (req.user?.role === ROLES.RM) {
-        filter.rmId = req.user._id;
+        const curRmId = req.user?.sub || req.user?._id;
+        filter.rmId = curRmId;
         if (!contactType || contactType === "all") {
-          const rmUser = await User.findById(req.user._id).select("rmType").lean();
+          const rmUser = await User.findById(curRmId).select("rmType").lean();
           if (rmUser?.rmType === "CUSTOMER") {
             filter.contactType = "customer";
           } else if (rmUser?.rmType === "PARTNER") {
@@ -717,7 +734,7 @@ router.get(
   requireRole(ROLES.RM, ROLES.ASM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const rmId = req.user._id;
+      const rmId = req.user?.sub || req.user?._id;
       const { limit = 30 } = req.query;
 
       const logs = await CallLog.find({ rmId })
