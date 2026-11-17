@@ -401,7 +401,7 @@ router.get(
       }
 
       const rms = await User.find(activeUsersFilter(rmFilter))
-        .select("firstName lastName name employeeId phone rmType branchName franchiseType")
+        .select("firstName lastName name employeeId phone rmType loanSpecialization branchName franchiseType")
         .sort({ firstName: 1 })
         .lean();
 
@@ -424,6 +424,7 @@ router.get(
           employeeId: rm.employeeId || "",
           phone: rm.phone || "",
           rmType: rm.rmType || "HYBRID",
+          loanSpecialization: rm.loanSpecialization || (rm.rmType === "CUSTOMER" ? "PL_LAP" : "ALL"),
           branchName: rm.branchName || "",
           franchiseType: rm.franchiseType || "HEAD_OFFICE",
           partnerAssignments: [],

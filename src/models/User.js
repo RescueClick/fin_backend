@@ -120,6 +120,17 @@ const userSchema = new mongoose.Schema(
       default: "HYBRID",
     },
 
+    // Customer Desk RM Loan Power (e.g. PL_LAP = Personal Loan + LAP/Home Loan)
+    loanSpecialization: {
+      type: String,
+      enum: ["PL_LAP", "ALL", "PERSONAL", "HOME_LAP", "BUSINESS"],
+      default: "ALL",
+    },
+    allowedLoanTypes: {
+      type: [String],
+      default: ["PERSONAL", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"],
+    },
+
     // Franchise & Branch Scoping
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     franchiseCode: { type: String, trim: true, uppercase: true, sparse: true },

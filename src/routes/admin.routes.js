@@ -1138,6 +1138,8 @@ router.post(
         homeLapRsmId,
         businessHomeRsmId,
         rmType = "HYBRID",
+        loanSpecialization = "ALL",
+        allowedLoanTypes = [],
         franchiseId = null,
         branchName = "",
       } = req.body || {};
@@ -1174,7 +1176,8 @@ router.post(
             }).select("_id").lean();
             if (defaultHl) effHomeLapId = defaultHl._id;
           }
-          if (!effBizId) {
+          // Only auto-lookup business ASM if not a PL_LAP Customer RM
+          if (!effBizId && !(rmType === "CUSTOMER" && loanSpecialization === "PL_LAP")) {
             const defaultBiz = await User.findOne({
               role: ROLES.ASM,
               status: "ACTIVE",
@@ -1195,10 +1198,19 @@ router.post(
         }
       }
 
-      if (!effPersonalId || (!effBizId && !effHomeLapId)) {
-        return res.status(400).json({
-          message: "Personal and Business/Home loan manager assignments are required",
-        });
+      const isCustomerPlLap = rmType === "CUSTOMER" && loanSpecialization === "PL_LAP";
+      if (isCustomerPlLap) {
+        if (!effPersonalId || !effHomeLapId) {
+          return res.status(400).json({
+            message: "Personal Loan ASM and Home & LAP Loan ASM are required for Customer Desk RM with PL + LAP power",
+          });
+        }
+      } else {
+        if (!effPersonalId || (!effBizId && !effHomeLapId)) {
+          return res.status(400).json({
+            message: "Personal and Business/Home loan manager assignments are required",
+          });
+        }
       }
 
       // Check if email or phone already exists
@@ -1264,6 +1276,13 @@ router.post(
         dob,
         joinDate: joinDate ? new Date(joinDate) : new Date(),
         rmType: rmType || "HYBRID",
+        loanSpecialization: loanSpecialization || (rmType === "CUSTOMER" ? "PL_LAP" : "ALL"),
+        allowedLoanTypes:
+          Array.isArray(allowedLoanTypes) && allowedLoanTypes.length > 0
+            ? allowedLoanTypes
+            : loanSpecialization === "PL_LAP" || (rmType === "CUSTOMER" && !loanSpecialization)
+            ? ["PERSONAL", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"]
+            : ["PERSONAL", "BUSINESS", "HOME_LOAN_SALARIED", "HOME_LOAN_SELF_EMPLOYED", "LAP_SALARIED", "LAP_SELF_EMPLOYED"],
         franchiseId: franchiseId || null,
         branchName: branchName || region || "Head Office",
       });
