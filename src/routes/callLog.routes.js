@@ -272,6 +272,29 @@ router.get(
       const rmFilter = { role: "rm" };
       if (req.user.role === ROLES.RM) {
         rmFilter._id = req.user._id;
+      } else if (req.user.role === ROLES.RSM || req.user.role === ROLES.ASM) {
+        const managerId = req.user._id;
+        const scopedRms = await User.find(
+          activeUsersFilter({
+            role: "rm",
+            $or: [
+              { personalAsmId: managerId },
+              { personalRsmId: managerId },
+              { businessAsmId: managerId },
+              { businessRsmId: managerId },
+              { homeLapAsmId: managerId },
+              { homeLapRsmId: managerId },
+              { businessHomeRsmId: managerId },
+              { businessHomeAsmId: managerId },
+              { asmId: managerId },
+              { rsmId: managerId },
+            ],
+          })
+        ).distinct("_id");
+
+        if (scopedRms && scopedRms.length > 0) {
+          rmFilter._id = { $in: scopedRms };
+        }
       }
 
       const rms = await User.find(activeUsersFilter(rmFilter))

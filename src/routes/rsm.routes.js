@@ -3,7 +3,7 @@ import argon2 from "argon2";
 import mongoose from "mongoose";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
-import { ROLES, RSM_TYPES } from "../config/roles.js";
+import { ROLES, RSM_TYPES, ASM_TYPES } from "../config/roles.js";
 import { User } from "../models/User.js";
 import { Application, APP_STATUSES } from "../models/Application.js";
 import { BankMaster } from "../models/BankMaster.js";
@@ -27,7 +27,7 @@ import { emitApplicationStatusChanged } from "../utils/socketEmitter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
 import { assignLoginBank, resolveLoginBank } from "../utils/loginBank.js";
 import { publicFileReview, saveFileReview } from "../utils/fileReview.js";
-import { makeRmCode } from "../utils/codes.js";
+import { makeRmCode, makeAsmCode } from "../utils/codes.js";
 import { Target } from "../models/Target.js";
 import fs from "fs";
 import path from "path";
@@ -570,6 +570,144 @@ router.post(
     } catch (err) {
       console.error("Error creating RM:", err);
       res.status(500).json({ message: "Server error", error: err.message });
+    }
+  }
+);
+
+// POST /api/rsm/create-asm
+// RSM creates an ASM under their reporting line
+router.post(
+  "/create-asm",
+  auth,
+  requireRole(ROLES.RSM, ROLES.SUPER_ADMIN, ROLES.ADMIN),
+  async (req, res) => {
+    try {
+      const {
+        firstName,
+        lastName,
+        phone,
+        email,
+        dob,
+        joinDate,
+        region,
+        password,
+        asmType,
+        rsmType,
+      } = req.body || {};
+
+      if (!firstName || !lastName || !email || !phone) {
+        return res.status(400).json({ message: "firstName, lastName, email, phone are required" });
+      }
+
+      const specialtyType = asmType || rsmType;
+      if (!specialtyType) {
+        return res.status(400).json({
+          message: "ASM specialty type (asmType) is required (e.g. PERSONAL, BUSINESS, HOME_LAP)",
+        });
+      }
+
+      const parentRsmId = req.user.role === ROLES.RSM ? req.user.sub : (req.body.rsmId || req.user.sub);
+      const parentRsm = await User.findById(parentRsmId).select("firstName lastName region").lean();
+
+      const normalizedEmail = String(email).toLowerCase();
+      const normalizedPhone = String(phone).trim();
+
+      const exists = await User.findOne({
+        $or: [{ email: normalizedEmail }, { phone: normalizedPhone }],
+      })
+        .select("email phone")
+        .lean();
+
+      if (exists) {
+        const emailTaken = String(exists.email || "").toLowerCase() === normalizedEmail;
+        const phoneTaken = String(exists.phone || "") === normalizedPhone;
+        const field = emailTaken && phoneTaken ? "email,phone" : emailTaken ? "email" : "phone";
+        const message =
+          emailTaken && phoneTaken
+            ? "Email and phone number already in use"
+            : emailTaken
+              ? "Email already in use"
+              : "Phone number already in use";
+        return res.status(409).json({ message, field });
+      }
+
+      const rawPassword = password || `Asm@${Math.random().toString(36).slice(2, 10)}`;
+      const empId = await generateEmployeeId(ROLES.ASM);
+
+      const asm = await User.create({
+        firstName,
+        lastName,
+        phone: normalizedPhone,
+        email: normalizedEmail,
+        passwordHash: await argon2.hash(rawPassword),
+        role: ROLES.ASM,
+        employeeId: empId,
+        asmCode: makeAsmCode(),
+        rsmCode: makeAsmCode(),
+        dob,
+        joinDate: joinDate ? new Date(joinDate) : new Date(),
+        region: (parentRsm && parentRsm.region) || region || "N/A",
+        asmType: specialtyType,
+        rsmType: specialtyType,
+        rsmId: parentRsmId,
+        asmId: parentRsmId,
+        status: "ACTIVE",
+      });
+
+      // Auto-assign this new specialized ASM to RMs under this RSM who lack this specialty
+      if (parentRsmId) {
+        if (specialtyType === "HOME_LAP") {
+          await User.updateMany(
+            {
+              role: ROLES.RM,
+              $or: [{ rsmId: parentRsmId }, { asmId: parentRsmId }],
+              $or: [{ homeLapAsmId: null }, { homeLapAsmId: { $exists: false } }],
+            },
+            { $set: { homeLapAsmId: asm._id, homeLapRsmId: asm._id } }
+          );
+        } else if (specialtyType === "PERSONAL") {
+          await User.updateMany(
+            {
+              role: ROLES.RM,
+              $or: [{ rsmId: parentRsmId }, { asmId: parentRsmId }],
+              $or: [{ personalAsmId: null }, { personalAsmId: { $exists: false } }],
+            },
+            { $set: { personalAsmId: asm._id, personalRsmId: asm._id } }
+          );
+        } else if (specialtyType === "BUSINESS") {
+          await User.updateMany(
+            {
+              role: ROLES.RM,
+              $or: [{ rsmId: parentRsmId }, { asmId: parentRsmId }],
+              $or: [{ businessAsmId: null }, { businessAsmId: { $exists: false } }],
+            },
+            { $set: { businessAsmId: asm._id, businessRsmId: asm._id } }
+          );
+        }
+      }
+
+      // Send welcome mail
+      try {
+        await sendUserAccountEmail(asm, "ASM", password ? null : rawPassword, {
+          firstName: parentRsm?.firstName || "RSM",
+          lastName: parentRsm?.lastName || "",
+        });
+      } catch (mailErr) {
+        console.error("Failed to send ASM welcome email:", mailErr.message);
+      }
+
+      return res.status(201).json({
+        message: "ASM created successfully",
+        id: asm._id,
+        employeeId: asm.employeeId,
+        asmCode: asm.asmCode,
+        rsmId: asm.rsmId,
+        asmType: asm.asmType,
+        tempPassword: password ? undefined : rawPassword,
+      });
+    } catch (err) {
+      console.error("Error creating ASM:", err);
+      return res.status(500).json({ message: err.message || "Failed to create ASM" });
     }
   }
 );
