@@ -1253,7 +1253,7 @@ router.post(
         password || `Rm@${Math.random().toString(36).slice(2, 10)}`;
 
       // Get primary manager to determine parent senior RSM
-      const primaryMgr = await User.findById(effPersonalId).select("rsmId asmId").lean();
+      const primaryMgr = await User.findById(effPersonalId).select("firstName lastName region rsmId asmId").lean();
       const resolvedSeniorRsmId = req.user?.role === ROLES.RSM ? req.user._id : (req.body?.rsmId || primaryMgr?.rsmId || primaryMgr?.asmId || validationCheck.rsmId || validationCheck.asmId);
       const seniorMgr = resolvedSeniorRsmId ? await User.findById(resolvedSeniorRsmId) : null;
 
@@ -1306,18 +1306,22 @@ router.post(
       }
 
       // Auto-rebalance hierarchy for current period if targets already exist
-      const now = new Date();
-      const month = now.getMonth() + 1;
-      const year = now.getFullYear();
-      const context = await deriveCurrentTargetContext(month, year);
-      if (Number(context.totalCompanyTarget) > 0) {
-        await rebalanceHierarchyTargetsReplace({
-          month,
-          year,
-          totalCompanyTarget: context.totalCompanyTarget,
-          partnerFileCountTarget: context.partnerFileCountTarget,
-          assignedBy: context.assignedBy || req.user.sub,
-        });
+      try {
+        const now = new Date();
+        const month = now.getMonth() + 1;
+        const year = now.getFullYear();
+        const context = await deriveCurrentTargetContext(month, year);
+        if (Number(context.totalCompanyTarget) > 0) {
+          await rebalanceHierarchyTargetsReplace({
+            month,
+            year,
+            totalCompanyTarget: context.totalCompanyTarget,
+            partnerFileCountTarget: context.partnerFileCountTarget,
+            assignedBy: context.assignedBy || req.user.sub,
+          });
+        }
+      } catch (targetErr) {
+        console.error("Warning: target auto-rebalance skipped during RM creation:", targetErr.message);
       }
 
       return res.status(201).json({
@@ -1330,11 +1334,13 @@ router.post(
         homeLapRsmId: rm.homeLapRsmId,
         businessHomeRsmId: rm.businessHomeRsmId,
         asmId: rm.asmId,
-        assignedAsm: asm ? {
-          id: asm._id,
-          name: `${asm.firstName} ${asm.lastName}`,
-          region: asm.region,
-        } : null,
+        assignedAsm: primaryMgr
+          ? {
+              id: primaryMgr._id,
+              name: `${primaryMgr.firstName || ""} ${primaryMgr.lastName || ""}`.trim() || "ASM",
+              region: primaryMgr.region,
+            }
+          : null,
         dob: rm.dob,
         region: rm.region,
         tempPassword: password ? undefined : rawPassword,
