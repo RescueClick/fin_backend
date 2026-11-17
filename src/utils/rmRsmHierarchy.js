@@ -159,11 +159,18 @@ export async function assertValidRmAsmAssignments({
   const hId = homeLapAsmId || homeLapRsmId;
   const bhId = businessHomeAsmId || businessHomeRsmId;
 
+  // Only consider businessHomeAsmId if it is actually distinct from bId and hId (not an alias copy)
+  const isDistinctBhId = Boolean(
+    bhId &&
+    (!bId || String(bhId) !== String(bId)) &&
+    (!hId || String(bhId) !== String(hId))
+  );
+
   const ids = [
     { key: "personalAsmId", id: pId, expectedType: ASM_TYPES.PERSONAL, label: "Personal Loan ASM" },
     { key: "businessAsmId", id: bId, expectedType: ASM_TYPES.BUSINESS, label: "Business Loan ASM" },
     { key: "homeLapAsmId", id: hId, expectedType: ASM_TYPES.HOME_LAP, label: "Home & LAP Loan ASM" },
-    ...(bhId ? [{ key: "businessHomeAsmId", id: bhId, expectedType: ASM_TYPES.BUSINESS_HOME, label: "Business/Home Loan ASM" }] : []),
+    ...(isDistinctBhId ? [{ key: "businessHomeAsmId", id: bhId, expectedType: ASM_TYPES.BUSINESS_HOME, label: "Business/Home Loan ASM" }] : []),
   ].filter((item) => Boolean(item.id));
 
   // Check uniqueness among provided manager IDs

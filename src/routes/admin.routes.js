@@ -1238,7 +1238,12 @@ router.post(
         personalRsmId: effPersonalId,
         businessRsmId: effBizId,
         homeLapRsmId: effHomeLapId,
-        businessHomeRsmId: businessHomeRsmId || null,
+        businessHomeRsmId:
+          businessHomeRsmId &&
+          String(businessHomeRsmId) !== String(effBizId) &&
+          String(businessHomeRsmId) !== String(effHomeLapId)
+            ? businessHomeRsmId
+            : null,
       });
       if (!validationCheck.ok) {
         return res.status(400).json({ message: validationCheck.message });
