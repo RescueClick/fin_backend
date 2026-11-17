@@ -560,33 +560,62 @@ router.get(
   }
 );
 
-// PATCH /api/calls/assignments/contact-status — Update contact status/notes
+// PATCH /api/calls/assignments/contact-status — Update contact status, direction, notes & duration
 router.patch(
   "/assignments/contact-status",
   auth,
   requireRole(ROLES.RM, ROLES.ASM, ROLES.RSM, ROLES.ADMIN, ROLES.SUPER_ADMIN),
   async (req, res) => {
     try {
-      const { assignmentId, contactPhone, status, notes } = req.body;
+      const { assignmentId, contactPhone, status, notes, callType = "OUTGOING", durationSeconds = 0 } = req.body;
       const assignment = await RmCallingAssignment.findById(assignmentId);
       if (!assignment) return res.status(404).json({ message: "Assignment not found" });
 
       const contact = assignment.contacts.find((c) => c.phone === contactPhone);
       if (!contact) return res.status(404).json({ message: "Contact not found in sheet" });
 
+      const dur = Math.max(0, parseInt(durationSeconds, 10) || 0);
+      const isConnected = status === "CONNECTED";
+      const finalDuration = dur > 0 ? dur : (isConnected ? 60 : 0);
+
       if (status) contact.status = status;
       if (notes !== undefined) contact.notes = notes;
+      contact.lastCallType = ["INCOMING", "OUTGOING", "MISSED"].includes(callType) ? callType : "OUTGOING";
+      contact.lastCallDuration = finalDuration;
+      contact.lastCallTime = new Date();
+      contact.callCount = (contact.callCount || 0) + 1;
+      contact.isVerified = isConnected;
 
       const total = assignment.contacts.length;
       const called = assignment.contacts.filter((c) => c.status !== "PENDING").length;
       const connected = assignment.contacts.filter((c) => c.status === "CONNECTED").length;
       const pending = total - called;
+      const totalTalkTime = assignment.contacts.reduce((acc, c) => acc + (c.lastCallDuration || 0), 0);
 
       assignment.stats.called = called;
       assignment.stats.connected = connected;
       assignment.stats.pending = pending;
+      assignment.stats.totalTalkTimeSeconds = totalTalkTime;
 
       await assignment.save();
+
+      // Automatically log CallLog entry for live audit & target tracking
+      if (status && status !== "PENDING") {
+        await CallLog.create({
+          rmId: req.user._id,
+          rmName: `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() || req.user.name || "RM",
+          targetPhone: contactPhone,
+          targetName: contact.name || "Customer",
+          contactType: contact.contactType || "customer",
+          callType: contact.lastCallType,
+          callStartTime: new Date(),
+          durationSeconds: finalDuration,
+          isVerifiedRealCall: isConnected,
+          notes: notes || "",
+          source: "web_crm",
+        }).catch((e) => console.warn("Auto CallLog sync error:", e?.message));
+      }
+
       return res.json({ success: true, message: "Contact status updated", contact });
     } catch (err) {
       console.error("Failed to update contact status:", err);
