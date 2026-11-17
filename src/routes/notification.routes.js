@@ -362,7 +362,7 @@ router.get("/sidebar-counts", auth, async (req, res) => {
     else if (role === "asm") {
       // ASM specific counts
       // Find all RSMs under this ASM
-      const rsms = await User.find({ asmId: userIdObjectId, role: "rsm" }).select("_id");
+      const rsms = await User.find({ asmId: userIdObjectId, role: { $in: ["RSM", "rsm"] } }).select("_id");
       const rsmIds = rsms.map(r => r._id);
       
       // Find all RMs under these RSMs
@@ -373,12 +373,12 @@ router.get("/sidebar-counts", auth, async (req, res) => {
           { homeLapRsmId: { $in: rsmIds } },
           { businessHomeRsmId: { $in: rsmIds } }
         ],
-        role: "rm"
+        role: { $in: ["RM", "rm"] }
       }).select("_id");
       const rmIds = rms.map(r => r._id);
       
       // Find all Partners under these RMs
-      const partners = await User.find({ rmId: { $in: rmIds }, role: "partner" }).select("_id");
+      const partners = await User.find({ rmId: { $in: rmIds }, role: { $in: ["PARTNER", "partner"] } }).select("_id");
       const partnerIds = partners.map(p => p._id);
       
       // 1. Payouts: PENDING payouts for those Partners

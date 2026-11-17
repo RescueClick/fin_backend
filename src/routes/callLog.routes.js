@@ -366,14 +366,18 @@ router.get(
         .sort({ createdAt: -1 })
         .lean();
 
-      const rmFilter = { role: "rm" };
+      const rmFilter = {
+        role: { $in: [ROLES.RM, "RM", "rm"] },
+        status: { $ne: "SUSPENDED" },
+      };
       if (req.user.role === ROLES.RM) {
         rmFilter._id = req.user._id;
       } else if (req.user.role === ROLES.RSM || req.user.role === ROLES.ASM) {
         const managerId = req.user._id;
         const scopedRms = await User.find(
           activeUsersFilter({
-            role: "rm",
+            role: { $in: [ROLES.RM, "RM", "rm"] },
+            status: { $ne: "SUSPENDED" },
             $or: [
               { personalAsmId: managerId },
               { personalRsmId: managerId },
@@ -391,6 +395,8 @@ router.get(
 
         if (scopedRms && scopedRms.length > 0) {
           rmFilter._id = { $in: scopedRms };
+        } else {
+          rmFilter._id = { $in: [] };
         }
       }
 
