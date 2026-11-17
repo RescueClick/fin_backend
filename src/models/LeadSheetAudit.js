@@ -41,7 +41,7 @@ const leadSheetRowSchema = new mongoose.Schema(
 const leadSheetAuditSchema = new mongoose.Schema(
   {
     fileName: { type: String, default: "meta_leads.csv", trim: true },
-    uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     uploadedByName: { type: String, default: "Admin", trim: true },
     uploadedByRole: { type: String, default: "admin", trim: true },
     stats: {

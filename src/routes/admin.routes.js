@@ -2370,13 +2370,25 @@ router.post(
 
       let auditId = null;
       if (saveAudit && result.total > 0) {
-        const u = req.user || {};
-        const uploadedByName = `${u.firstName || ""} ${u.lastName || ""}`.trim() || u.name || "Admin";
+        const userId = req.user?.sub || req.user?._id || null;
+        let uploadedByName = "Admin";
+        let uploadedByRole = req.user?.role || "admin";
+
+        if (userId) {
+          try {
+            const userDoc = await User.findById(userId).select("firstName lastName name role").lean();
+            if (userDoc) {
+              uploadedByName = `${userDoc.firstName || ""} ${userDoc.lastName || ""}`.trim() || userDoc.name || "Admin";
+              uploadedByRole = userDoc.role || uploadedByRole;
+            }
+          } catch {}
+        }
+
         const audit = await LeadSheetAudit.create({
           fileName,
-          uploadedBy: u._id,
+          uploadedBy: userId,
           uploadedByName,
-          uploadedByRole: u.role || "admin",
+          uploadedByRole,
           stats: {
             total: result.total,
             existingPartners: result.existingPartners,
@@ -2412,8 +2424,9 @@ router.get(
     try {
       const { limit = 20 } = req.query;
       const filter = {};
-      if (req.user?.role === ROLES.RSM || req.user?.role === ROLES.ASM) {
-        filter.uploadedBy = req.user._id;
+      const currentUserId = req.user?.sub || req.user?._id;
+      if ((req.user?.role === ROLES.RSM || req.user?.role === ROLES.ASM) && currentUserId) {
+        filter.uploadedBy = currentUserId;
       }
       const history = await LeadSheetAudit.find(filter)
         .select("fileName uploadedByName uploadedByRole stats createdAt")
