@@ -358,11 +358,28 @@ router.get(
       const { date = new Date().toISOString().slice(0, 10), rmId } = req.query;
 
       const userId = req.user?.sub || req.user?._id;
-      const assignmentFilter = { date };
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const isToday = date === todayStr;
+
+      const assignmentFilter = {};
       if (req.user.role === ROLES.RM) {
         assignmentFilter.rmId = userId;
       } else if (rmId) {
         assignmentFilter.rmId = rmId;
+      }
+
+      if (req.query.scope === "all") {
+        // No date restriction: return all sheets
+      } else if (isToday || req.query.includePending === "true") {
+        // On today's dashboard, include today's sheets PLUS active previous sheets that still have pending contacts
+        assignmentFilter.$or = [
+          { date },
+          { "contacts.status": "PENDING" },
+          { "stats.pending": { $gt: 0 } },
+        ];
+      } else {
+        // Specific historical date: strictly filter by that date
+        assignmentFilter.date = date;
       }
 
       const assignments = await RmCallingAssignment.find(assignmentFilter)
