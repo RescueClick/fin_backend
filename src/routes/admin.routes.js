@@ -2492,7 +2492,7 @@ router.get(
   }
 );
 
-// DELETE /meta-leads/history/:id — Delete a past uploaded sheet audit record (and optionally associated calling assignments)
+// DELETE /meta-leads/history/:id — Delete an uploaded lead sheet audit record (and optionally associated calling assignments)
 router.delete(
   "/meta-leads/history/:id",
   auth,
@@ -2513,7 +2513,7 @@ router.delete(
         audit.uploadedBy &&
         String(audit.uploadedBy) !== String(currentUserId)
       ) {
-        return res.status(403).json({ message: "You can only delete sheets uploaded by yourself." });
+        return res.status(403).json({ message: "You can only delete your own uploaded sheets" });
       }
 
       const fileName = audit.fileName;
@@ -2528,13 +2528,13 @@ router.delete(
 
       return res.json({
         success: true,
-        message: `Deleted uploaded sheet record: ${fileName}`,
+        message: `Sheet "${fileName}" deleted successfully`,
         deletedAuditId: id,
         deletedAssignmentsCount,
       });
     } catch (err) {
       console.error("Failed to delete lead sheet audit:", err);
-      return res.status(500).json({ message: err.message || "Failed to delete lead sheet record" });
+      return res.status(500).json({ message: err.message || "Failed to delete lead sheet audit" });
     }
   }
 );
