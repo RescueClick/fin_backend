@@ -2492,7 +2492,7 @@ router.get(
   }
 );
 
-// DELETE /meta-leads/history/:id — Delete an uploaded lead sheet audit record (and optionally associated calling assignments)
+// DELETE /meta-leads/history/:id — Delete an uploaded lead sheet audit record from ALL RMs everywhere
 router.delete(
   "/meta-leads/history/:id",
   auth,
@@ -2500,35 +2500,34 @@ router.delete(
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { deleteAssignments } = req.query;
 
       const audit = await LeadSheetAudit.findById(id);
       if (!audit) {
         return res.status(404).json({ message: "Upload history record not found" });
       }
 
-      const currentUserId = req.user?.sub || req.user?._id;
-      if (
-        (req.user?.role === ROLES.RSM || req.user?.role === ROLES.ASM) &&
-        audit.uploadedBy &&
-        String(audit.uploadedBy) !== String(currentUserId)
-      ) {
-        return res.status(403).json({ message: "You can only delete your own uploaded sheets" });
-      }
-
       const fileName = audit.fileName;
       await LeadSheetAudit.findByIdAndDelete(id);
 
-      let deletedAssignmentsCount = 0;
-      if (deleteAssignments === "true" || deleteAssignments === true) {
-        const regex = new RegExp(`^${fileName.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&")}`, "i");
-        const delRes = await RmCallingAssignment.deleteMany({ sheetName: regex });
-        deletedAssignmentsCount = delRes.deletedCount || 0;
+      // ALWAYS delete associated assignments across ALL RMs when RSM or Admin deletes
+      const regex = new RegExp(`^${fileName.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&")}`, "i");
+      const delRes = await RmCallingAssignment.deleteMany({ sheetName: regex });
+      const deletedAssignmentsCount = delRes.deletedCount || 0;
+
+      // Also clean up any matching phone numbers from any lingering calling assignments
+      if (Array.isArray(audit.rows) && audit.rows.length > 0) {
+        const phones = audit.rows.map((r) => r.phone).filter(Boolean);
+        if (phones.length > 0) {
+          await RmCallingAssignment.updateMany(
+            { "contacts.phone": { $in: phones } },
+            { $pull: { contacts: { phone: { $in: phones } } } }
+          ).catch(() => {});
+        }
       }
 
       return res.json({
         success: true,
-        message: `Sheet "${fileName}" deleted successfully`,
+        message: `Sheet "${fileName}" deleted permanently from all RMs and history successfully`,
         deletedAuditId: id,
         deletedAssignmentsCount,
       });

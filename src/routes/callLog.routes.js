@@ -6,6 +6,7 @@ import { CallLog } from "../models/CallLog.js";
 import { User } from "../models/User.js";
 import { Application } from "../models/Application.js";
 import { RmCallingAssignment } from "../models/RmCallingAssignment.js";
+import { LeadSheetAudit } from "../models/LeadSheetAudit.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
@@ -579,7 +580,7 @@ router.get(
   }
 );
 
-// DELETE /api/calls/assignments/:id — Delete an assigned calling sheet
+// DELETE /api/calls/assignments/:id — Delete an assigned calling sheet from ALL RMs everywhere
 router.delete(
   "/assignments/:id",
   auth,
@@ -587,26 +588,39 @@ router.delete(
   async (req, res) => {
     try {
       const { id } = req.params;
+      const { fromAll = "true" } = req.query;
+
       const assignment = await RmCallingAssignment.findById(id);
       if (!assignment) {
         return res.status(404).json({ message: "Calling assignment not found" });
       }
 
-      const currentUserId = req.user?.sub || req.user?._id;
-      if (
-        (req.user?.role === ROLES.RSM || req.user?.role === ROLES.ASM) &&
-        assignment.assignedBy &&
-        String(assignment.assignedBy) !== String(currentUserId)
-      ) {
-        return res.status(403).json({ message: "You can only delete sheets assigned by you" });
-      }
+      const sheetName = assignment.sheetName;
+      const sheetDate = assignment.date;
 
-      await RmCallingAssignment.findByIdAndDelete(id);
+      let deletedCount = 1;
+      if (fromAll === "true" || fromAll === true) {
+        // Delete this sheet from ALL RMs who received this sheet
+        const delRes = await RmCallingAssignment.deleteMany({
+          sheetName,
+          date: sheetDate,
+        });
+        deletedCount = delRes.deletedCount || 1;
+
+        // Also remove associated LeadSheetAudit record if exists
+        const escaped = sheetName.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
+        await LeadSheetAudit.deleteMany({
+          fileName: new RegExp(`^${escaped}`, "i"),
+        }).catch(() => {});
+      } else {
+        await RmCallingAssignment.findByIdAndDelete(id);
+      }
 
       return res.json({
         success: true,
-        message: `Calling assignment "${assignment.sheetName}" deleted successfully`,
+        message: `Calling sheet "${sheetName}" deleted permanently from all ${deletedCount} RM assignment(s)`,
         deletedId: id,
+        deletedCount,
       });
     } catch (err) {
       console.error("Failed to delete calling assignment:", err);
@@ -615,7 +629,7 @@ router.delete(
   }
 );
 
-// DELETE /api/calls/assignments/:id/contact/:phone — Remove a single contact from an assignment
+// DELETE /api/calls/assignments/:id/contact/:phone — Remove a contact lead from ALL assignments everywhere
 router.delete(
   "/assignments/:id/contact/:phone",
   auth,
@@ -623,25 +637,51 @@ router.delete(
   async (req, res) => {
     try {
       const { id, phone } = req.params;
+      const { fromAll = "true" } = req.query;
+
       const assignment = await RmCallingAssignment.findById(id);
       if (!assignment) {
         return res.status(404).json({ message: "Calling assignment not found" });
       }
 
-      const currentUserId = req.user?.sub || req.user?._id;
-      if (
-        (req.user?.role === ROLES.RSM || req.user?.role === ROLES.ASM) &&
-        assignment.assignedBy &&
-        String(assignment.assignedBy) !== String(currentUserId)
-      ) {
-        return res.status(403).json({ message: "You can only edit sheets assigned by you" });
+      let removedAssignmentsCount = 1;
+      if (fromAll === "true" || fromAll === true) {
+        // Remove contact phone from ALL assignments across ALL RMs
+        const affectedAssignments = await RmCallingAssignment.find({ "contacts.phone": phone });
+        removedAssignmentsCount = affectedAssignments.length;
+        for (const a of affectedAssignments) {
+          a.contacts = a.contacts.filter((c) => c.phone !== phone);
+          const total = a.contacts.length;
+          const called = a.contacts.filter((c) => c.status && c.status !== "PENDING").length;
+          const connected = a.contacts.filter((c) => c.status === "CONNECTED").length;
+          a.stats = a.stats || {};
+          a.stats.total = total;
+          a.stats.called = called;
+          a.stats.connected = connected;
+          a.stats.pending = Math.max(0, total - called);
+          a.stats.totalTalkTimeSeconds = a.contacts.reduce((acc, c) => acc + (c.lastCallDuration || 0), 0);
+          await a.save();
+        }
+      } else {
+        assignment.contacts = assignment.contacts.filter((c) => c.phone !== phone);
+        const total = assignment.contacts.length;
+        const called = assignment.contacts.filter((c) => c.status && c.status !== "PENDING").length;
+        const connected = assignment.contacts.filter((c) => c.status === "CONNECTED").length;
+        assignment.stats = assignment.stats || {};
+        assignment.stats.total = total;
+        assignment.stats.called = called;
+        assignment.stats.connected = connected;
+        assignment.stats.pending = Math.max(0, total - called);
+        assignment.stats.totalTalkTimeSeconds = assignment.contacts.reduce((acc, c) => acc + (c.lastCallDuration || 0), 0);
+        await assignment.save();
       }
 
-      assignment.contacts = assignment.contacts.filter((c) => c.phone !== phone);
-      assignment.totalLeads = assignment.contacts.length;
-      assignment.completedCalls = assignment.contacts.filter((c) => c.status && c.status !== "PENDING").length;
-      await assignment.save();
-      return res.json({ success: true, message: "Contact lead removed from assignment", assignment });
+      return res.json({
+        success: true,
+        message: `Contact ${phone} removed permanently from all ${removedAssignmentsCount} RM sheet(s)`,
+        phone,
+        removedAssignmentsCount,
+      });
     } catch (err) {
       console.error("Failed to remove contact from assignment:", err);
       return res.status(500).json({ message: err.message || "Failed to remove contact from assignment" });
