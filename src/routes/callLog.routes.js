@@ -358,9 +358,6 @@ router.get(
       const { date = new Date().toISOString().slice(0, 10), rmId } = req.query;
 
       const userId = req.user?.sub || req.user?._id;
-      const todayStr = new Date().toISOString().slice(0, 10);
-      const isToday = date === todayStr;
-
       const assignmentFilter = {};
       if (req.user.role === ROLES.RM) {
         assignmentFilter.rmId = userId;
@@ -369,16 +366,9 @@ router.get(
       }
 
       if (req.query.scope === "all") {
-        // No date restriction: return all sheets
-      } else if (isToday || req.query.includePending === "true") {
-        // On today's dashboard, include today's sheets PLUS active previous sheets that still have pending contacts
-        assignmentFilter.$or = [
-          { date },
-          { "contacts.status": "PENDING" },
-          { "stats.pending": { $gt: 0 } },
-        ];
+        // Return all assignments
       } else {
-        // Specific historical date: strictly filter by that date
+        // Strictly filter day-wise: show ONLY the selected date
         assignmentFilter.date = date;
       }
 
@@ -542,7 +532,7 @@ router.get(
   }
 );
 
-// GET /api/calls/assignments/rm-sheet — Fetch RM's calling sheet (today's + active past sheets with remaining pending leads)
+// GET /api/calls/assignments/rm-sheet — Fetch RM's calling sheet day-wise
 router.get(
   "/assignments/rm-sheet",
   auth,
@@ -553,7 +543,6 @@ router.get(
       const {
         date,
         assignmentType,
-        includePending = "true",
         scope,
       } = req.query;
 
@@ -562,17 +551,9 @@ router.get(
       if (scope === "all" || date === "all") {
         // Return all assignments regardless of date
       } else {
+        // Strictly filter day-wise: show ONLY the requested date (defaults to today)
         const targetDate = date || new Date().toISOString().slice(0, 10);
-        if (includePending === "true") {
-          // Include sheets assigned for targetDate OR previous sheets with remaining pending contacts
-          filter.$or = [
-            { date: targetDate },
-            { "contacts.status": "PENDING" },
-            { "stats.pending": { $gt: 0 } },
-          ];
-        } else {
-          filter.date = targetDate;
-        }
+        filter.date = targetDate;
       }
 
       if (assignmentType && assignmentType !== "all") {
