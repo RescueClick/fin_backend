@@ -82,6 +82,7 @@ import {
   matchMetaLeadsToSystem,
 } from "../utils/metaLeadSheet.js";
 import { LeadSheetAudit } from "../models/LeadSheetAudit.js";
+import { RmCallingAssignment } from "../models/RmCallingAssignment.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { getDisbursedAt, isDateInRange } from "../utils/asmHierarchy.js";
 import { getActiveIncentiveSlabs, calculatePartnerMilestone, INCENTIVE_PLAN_RULE } from "../utils/incentiveSlabCalculator.js";
@@ -2487,6 +2488,53 @@ router.get(
     } catch (err) {
       console.error("Failed to fetch audit details:", err);
       return res.status(500).json({ message: "Failed to fetch audit details" });
+    }
+  }
+);
+
+// DELETE /meta-leads/history/:id — Delete a past uploaded sheet audit record (and optionally associated calling assignments)
+router.delete(
+  "/meta-leads/history/:id",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { deleteAssignments } = req.query;
+
+      const audit = await LeadSheetAudit.findById(id);
+      if (!audit) {
+        return res.status(404).json({ message: "Upload history record not found" });
+      }
+
+      const currentUserId = req.user?.sub || req.user?._id;
+      if (
+        (req.user?.role === ROLES.RSM || req.user?.role === ROLES.ASM) &&
+        audit.uploadedBy &&
+        String(audit.uploadedBy) !== String(currentUserId)
+      ) {
+        return res.status(403).json({ message: "You can only delete sheets uploaded by yourself." });
+      }
+
+      const fileName = audit.fileName;
+      await LeadSheetAudit.findByIdAndDelete(id);
+
+      let deletedAssignmentsCount = 0;
+      if (deleteAssignments === "true" || deleteAssignments === true) {
+        const regex = new RegExp(`^${fileName.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&")}`, "i");
+        const delRes = await RmCallingAssignment.deleteMany({ sheetName: regex });
+        deletedAssignmentsCount = delRes.deletedCount || 0;
+      }
+
+      return res.json({
+        success: true,
+        message: `Deleted uploaded sheet record: ${fileName}`,
+        deletedAuditId: id,
+        deletedAssignmentsCount,
+      });
+    } catch (err) {
+      console.error("Failed to delete lead sheet audit:", err);
+      return res.status(500).json({ message: err.message || "Failed to delete lead sheet record" });
     }
   }
 );

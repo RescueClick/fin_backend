@@ -783,4 +783,49 @@ router.get(
   }
 );
 
+// DELETE /api/calls/assignments/:id — Delete a calling sheet assignment
+router.delete(
+  "/assignments/:id",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const assignment = await RmCallingAssignment.findById(id);
+      if (!assignment) {
+        return res.status(404).json({ message: "Calling assignment not found" });
+      }
+      await RmCallingAssignment.findByIdAndDelete(id);
+      return res.json({ success: true, message: "Calling sheet assignment deleted successfully" });
+    } catch (err) {
+      console.error("Failed to delete calling assignment:", err);
+      return res.status(500).json({ message: err.message || "Failed to delete calling assignment" });
+    }
+  }
+);
+
+// DELETE /api/calls/assignments/:id/contact/:phone — Remove a single contact from an assignment
+router.delete(
+  "/assignments/:id/contact/:phone",
+  auth,
+  requireRole(ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.RSM, ROLES.ASM),
+  async (req, res) => {
+    try {
+      const { id, phone } = req.params;
+      const assignment = await RmCallingAssignment.findById(id);
+      if (!assignment) {
+        return res.status(404).json({ message: "Calling assignment not found" });
+      }
+      assignment.contacts = assignment.contacts.filter((c) => c.phone !== phone);
+      assignment.totalLeads = assignment.contacts.length;
+      assignment.completedCalls = assignment.contacts.filter((c) => c.status && c.status !== "PENDING").length;
+      await assignment.save();
+      return res.json({ success: true, message: "Contact lead removed from assignment", assignment });
+    } catch (err) {
+      console.error("Failed to remove contact from assignment:", err);
+      return res.status(500).json({ message: err.message || "Failed to remove contact from assignment" });
+    }
+  }
+);
+
 export default router;
