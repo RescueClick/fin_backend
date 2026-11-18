@@ -525,7 +525,7 @@ router.get(
   }
 );
 
-// GET /api/calls/assignments/rm-sheet — Fetch RM's calling sheet for today
+// GET /api/calls/assignments/rm-sheet — Fetch RM's calling sheet (today's + active past sheets with remaining pending leads)
 router.get(
   "/assignments/rm-sheet",
   auth,
@@ -533,10 +533,31 @@ router.get(
   async (req, res) => {
     try {
       const rmId = req.query.rmId || req.user?.sub || req.user?._id;
-      const { date = new Date().toISOString().slice(0, 10), assignmentType } = req.query;
+      const {
+        date,
+        assignmentType,
+        includePending = "true",
+        scope,
+      } = req.query;
 
       const filter = { rmId };
-      if (date) filter.date = date;
+
+      if (scope === "all" || date === "all") {
+        // Return all assignments regardless of date
+      } else {
+        const targetDate = date || new Date().toISOString().slice(0, 10);
+        if (includePending === "true") {
+          // Include sheets assigned for targetDate OR previous sheets with remaining pending contacts
+          filter.$or = [
+            { date: targetDate },
+            { "contacts.status": "PENDING" },
+            { "stats.pending": { $gt: 0 } },
+          ];
+        } else {
+          filter.date = targetDate;
+        }
+      }
+
       if (assignmentType && assignmentType !== "all") {
         filter.assignmentType = assignmentType;
       } else {
@@ -549,7 +570,7 @@ router.get(
       }
 
       const sheets = await RmCallingAssignment.find(filter)
-        .sort({ createdAt: -1 })
+        .sort({ date: -1, createdAt: -1 })
         .lean();
 
       return res.json({ success: true, sheets });
