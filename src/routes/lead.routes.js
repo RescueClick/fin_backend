@@ -193,6 +193,7 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
       assignedPartner = await User.findOne({
         _id: req.user.sub,
         role: ROLES.PARTNER,
+        status: "ACTIVE",
         $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
       });
     } else if (partnerReferralCode && typeof partnerReferralCode === "string" && partnerReferralCode.trim()) {
@@ -207,9 +208,37 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
           { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
         ],
       });
+    } else if (req.user?.role === ROLES.CUSTOMER) {
+      // Logged-in customer inherits their existing partner and RM
+      const existingCustomerDoc = await User.findById(req.user.sub).select("partnerId rmId").lean();
+      if (existingCustomerDoc?.partnerId) {
+        assignedPartner = await User.findOne({
+          _id: existingCustomerDoc.partnerId,
+          role: ROLES.PARTNER,
+          status: "ACTIVE",
+          $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        });
+      }
     }
 
-    // No code, or the code does not match an active partner: company default (admin setting), not the first partner in the database.
+    // Check if customer already exists by phone/email and has an existing partner mapping
+    if (!assignedPartner) {
+      const existingCustomerByContact = await User.findOne({
+        $or: [{ email }, { phone }],
+        role: ROLES.CUSTOMER,
+      }).select("partnerId rmId").lean();
+
+      if (existingCustomerByContact?.partnerId) {
+        assignedPartner = await User.findOne({
+          _id: existingCustomerByContact.partnerId,
+          role: ROLES.PARTNER,
+          status: "ACTIVE",
+          $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        });
+      }
+    }
+
+    // No code, or the code does not match an active partner: company default (admin setting)
     if (!assignedPartner) {
       assignedPartner = await resolveDefaultCompanyPartner();
     }
@@ -226,10 +255,35 @@ router.post("/capture-step1", optionalAuth, async (req, res) => {
     let hierarchy = { rmId: assignedRmId, asmId: null, rsmId: null };
 
     if (assignedRmId) {
-      const rmDoc = await User.findById(assignedRmId).select(RM_HIERARCHY_FIELDS).lean();
-      if (rmDoc) hierarchy = hierarchyFromRm(rmDoc, normalizedLoanType);
+      const rmDoc = await User.findOne({
+        _id: assignedRmId,
+        role: ROLES.RM,
+        status: "ACTIVE",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      }).select(RM_HIERARCHY_FIELDS).lean();
+
+      if (rmDoc) {
+        hierarchy = hierarchyFromRm(rmDoc, normalizedLoanType);
+      } else {
+        // Partner's assigned RM is inactive, deleted, or not RM role -> fall back to active RM
+        const fallbackRm = await User.findOne({
+          role: ROLES.RM,
+          status: "ACTIVE",
+          $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        })
+          .select(RM_HIERARCHY_FIELDS)
+          .lean();
+        if (fallbackRm) {
+          assignedRmId = fallbackRm._id;
+          hierarchy = hierarchyFromRm(fallbackRm, normalizedLoanType);
+        }
+      }
     } else {
-      const fallbackRm = await User.findOne({ role: ROLES.RM, status: "ACTIVE" })
+      const fallbackRm = await User.findOne({
+        role: ROLES.RM,
+        status: "ACTIVE",
+        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+      })
         .select(RM_HIERARCHY_FIELDS)
         .lean();
       if (fallbackRm) {

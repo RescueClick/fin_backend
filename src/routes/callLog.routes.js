@@ -572,6 +572,98 @@ router.get(
         .sort({ date: -1, createdAt: -1 })
         .lean();
 
+      // Also dynamically surface incoming Online Form Leads & Applications assigned to this RM
+      try {
+        const partners = await User.find({
+          rmId,
+          role: ROLES.PARTNER,
+          $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        }).select("_id firstName lastName partnerCode").lean();
+        const partnerIds = partners.map((p) => p._id);
+        const partnerMap = new Map();
+        partners.forEach((p) =>
+          partnerMap.set(String(p._id), `${p.firstName || ""} ${p.lastName || ""}`.trim() || p.partnerCode)
+        );
+
+        const appScope = {
+          $or: [{ rmId }, { partnerId: { $in: partnerIds } }],
+        };
+
+        if (scope === "all" || date === "all") {
+          // all leads
+        } else {
+          const targetDate = date || new Date().toISOString().slice(0, 10);
+          const startOfDay = new Date(`${targetDate}T00:00:00.000Z`);
+          const endOfDay = new Date(`${targetDate}T23:59:59.999Z`);
+          appScope.$or = [
+            {
+              $or: [{ rmId }, { partnerId: { $in: partnerIds } }],
+              createdAt: { $gte: startOfDay, $lte: endOfDay },
+            },
+            {
+              $or: [{ rmId }, { partnerId: { $in: partnerIds } }],
+              status: { $in: ["LEAD", "DRAFT", "DOC_INCOMPLETE", "SUBMITTED"] },
+            },
+          ];
+        }
+
+        const assignedApps = await Application.find(activeApplicationsFilter(appScope))
+          .sort({ createdAt: -1 })
+          .limit(100)
+          .lean();
+
+        if (assignedApps.length > 0) {
+          const targetDate = date || new Date().toISOString().slice(0, 10);
+          const appContacts = assignedApps
+            .map((app) => {
+              const custName =
+                [app.customer?.firstName, app.customer?.lastName].filter(Boolean).join(" ") ||
+                app.customer?.name ||
+                "Lead";
+              const pName = app.partnerId
+                ? partnerMap.get(String(app.partnerId)) || "Partner"
+                : "Direct Form";
+              return {
+                _id: String(app._id),
+                name: custName,
+                phone: app.customer?.phone || app.customer?.mobile || "",
+                loanType: app.loanType || "Loan",
+                amount: app.requestedAmount || app.loanAmount || 0,
+                city: app.customer?.city || "",
+                leadSource: `Lead: ${app.appNo || "New"} (${pName})`,
+                partnerName: pName,
+                callStatus: app.leadFollowUp?.status || "PENDING",
+                status: app.leadFollowUp?.status || "PENDING",
+                notes: app.leadFollowUp?.remarks || "",
+                callCount: 0,
+                createdAt: app.createdAt,
+                applicationId: app._id,
+                appNo: app.appNo || "LEAD",
+              };
+            })
+            .filter((c) => c.phone);
+
+          if (appContacts.length > 0) {
+            sheets.unshift({
+              _id: `apps_sheet_${rmId}_${targetDate}`,
+              sheetName: "Online Leads & Forms",
+              date: targetDate,
+              assignmentType: filter.assignmentType || "CUSTOMER",
+              contacts: appContacts,
+              stats: {
+                total: appContacts.length,
+                called: appContacts.filter((c) => c.status !== "PENDING").length,
+                connected: appContacts.filter((c) => c.status === "CONNECTED").length,
+                pending: appContacts.filter((c) => c.status === "PENDING").length,
+                totalTalkTimeSeconds: 0,
+              },
+            });
+          }
+        }
+      } catch (appErr) {
+        console.warn("Dynamic applications sheet error:", appErr?.message);
+      }
+
       return res.json({ success: true, sheets });
     } catch (err) {
       console.error("Failed to fetch RM calling sheet:", err);
@@ -697,15 +789,60 @@ router.patch(
   async (req, res) => {
     try {
       const { assignmentId, contactPhone, status, notes, callType = "OUTGOING", durationSeconds = 0 } = req.body;
-      const assignment = await RmCallingAssignment.findById(assignmentId);
-      if (!assignment) return res.status(404).json({ message: "Assignment not found" });
-
-      const contact = assignment.contacts.find((c) => c.phone === contactPhone);
-      if (!contact) return res.status(404).json({ message: "Contact not found in sheet" });
-
       const dur = Math.max(0, parseInt(durationSeconds, 10) || 0);
       const isConnected = status === "CONNECTED";
       const finalDuration = dur > 0 ? dur : (isConnected ? 60 : 0);
+
+      let assignment = null;
+      if (assignmentId && mongoose.Types.ObjectId.isValid(assignmentId)) {
+        assignment = await RmCallingAssignment.findById(assignmentId);
+      }
+
+      if (!assignment) {
+        // Check if there is an Application with this phone
+        const app = await Application.findOne(
+          activeApplicationsFilter({
+            "customer.phone": contactPhone,
+          })
+        );
+        if (app) {
+          app.leadFollowUp = {
+            status: status || "CONNECTED",
+            remarks: notes || "",
+            lastContactedAt: new Date(),
+            updatedBy: req.user._id,
+          };
+          await app.save();
+
+          await CallLog.create({
+            rmId: req.user._id,
+            rmName: `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() || req.user.name || "RM",
+            targetPhone: contactPhone,
+            targetName:
+              [app.customer?.firstName, app.customer?.lastName].filter(Boolean).join(" ") ||
+              app.customer?.name ||
+              "Customer",
+            contactType: "customer",
+            callType: ["INCOMING", "OUTGOING", "MISSED"].includes(callType) ? callType : "OUTGOING",
+            callStartTime: new Date(),
+            durationSeconds: finalDuration,
+            isVerifiedRealCall: isConnected,
+            notes: notes || "",
+            source: "rm_mobile_app",
+            applicationId: app._id,
+          }).catch((e) => console.warn("Auto CallLog sync error:", e?.message));
+
+          return res.json({
+            success: true,
+            message: "Application lead follow-up updated",
+            contact: { phone: contactPhone, status, notes },
+          });
+        }
+        return res.status(404).json({ message: "Assignment not found" });
+      }
+
+      const contact = assignment.contacts.find((c) => c.phone === contactPhone);
+      if (!contact) return res.status(404).json({ message: "Contact not found in sheet" });
 
       if (status) contact.status = status;
       if (notes !== undefined) contact.notes = notes;

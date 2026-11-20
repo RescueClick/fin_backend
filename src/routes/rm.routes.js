@@ -1248,35 +1248,15 @@ router.get(
       }
 
       // 2. Build application filter based on desk specialization:
-      // B2C Customer Desk: ONLY applications directly assigned to this RM (strictly NO partner applications)
-      // B2B Partner Desk: ONLY applications under this RM's assigned partners (lead source PARTNER)
-      // Dual/HYBRID Desk: Both direct customer applications and partner applications
       let appFilter;
       if (deskType === "CUSTOMER") {
         appFilter = {
           rmId,
-          $or: [
-            { leadSource: { $in: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads", "DIRECT", "Meta / In-House", "WEBSITE"] } },
-            { partnerId: null },
-            { partnerId: { $exists: false } },
-          ],
-        };
-      } else if (deskType === "PARTNER") {
-        appFilter = {
-          partnerId: { $in: partnerIds },
-          leadSource: { $nin: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads"] },
         };
       } else {
         appFilter = {
           $or: [
-            {
-              rmId,
-              $or: [
-                { leadSource: { $in: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads", "DIRECT", "Meta / In-House", "WEBSITE"] } },
-                { partnerId: null },
-                { partnerId: { $exists: false } },
-              ],
-            },
+            { rmId },
             { partnerId: { $in: partnerIds } },
           ],
         };
@@ -1346,8 +1326,9 @@ router.get(
 
       for (const app of applications) {
         const phone = app.customer?.phone || "";
-        const isDirect = !app.partnerId || app.leadSource === "CUSTOMER_DIRECT" || app.leadSource === "PUBLIC_REFERRAL" || deskType === "CUSTOMER";
-        const pName = isDirect ? "Meta Ads (Direct)" : (partnerMap.get(String(app.partnerId)) || "Direct / In-House");
+        const partnerNameFromMap = app.partnerId ? partnerMap.get(String(app.partnerId)) : null;
+        const isDirect = !app.partnerId || (!partnerNameFromMap && app.leadSource === "CUSTOMER_DIRECT");
+        const pName = partnerNameFromMap || (isDirect ? "Direct Lead" : "Direct / In-House");
         const lastCallLog = callLogMap.get(phone) || null;
         const appFollowUp = followUpMap.get(String(app._id)) || null;
 
@@ -1365,7 +1346,7 @@ router.get(
           loanType: app.loanType || "Loan",
           loanAmount: app.loanAmount || 0,
           partnerName: pName,
-          leadSource: isDirect ? (app.leadSource === "CUSTOMER_DIRECT" ? "Meta Ads (Direct)" : "Direct / In-House") : `Partner: ${pName}`,
+          leadSource: partnerNameFromMap ? `Partner: ${pName}` : (app.leadSource || "Direct Lead"),
           status: app.status || "NEW",
           formStatus: isFilled ? "FILLED" : "INCOMPLETE",
           stepIndex: app.formProgress?.stepIndex || 1,
@@ -2664,29 +2645,10 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
 
     let rmScopeFilter;
     if (deskType === "CUSTOMER") {
-      // B2C RM: ONLY direct/Meta applications assigned to this RM (never partner applications)
       rmScopeFilter = {
         rmId: rmId,
-        $or: [
-          { leadSource: { $in: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads", "DIRECT", "Meta / In-House", "WEBSITE"] } },
-          { partnerId: null },
-          { partnerId: { $exists: false } },
-        ],
-      };
-    } else if (deskType === "PARTNER") {
-      // B2B RM: ONLY applications under partners assigned to this RM
-      const partners = await User.find({ 
-        rmId: rmId, 
-        role: ROLES.PARTNER,
-        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }]
-      }).select("_id").lean();
-      const partnerIds = partners.map(p => p._id);
-      rmScopeFilter = {
-        partnerId: { $in: partnerIds },
-        leadSource: { $nin: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads"] },
       };
     } else {
-      // HYBRID: Both direct customers and partner customers
       const partners = await User.find({ 
         rmId: rmId, 
         role: ROLES.PARTNER,
@@ -2695,14 +2657,7 @@ router.get("/customers", auth, requireRole(ROLES.RM), async (req, res) => {
       const partnerIds = partners.map(p => p._id);
       rmScopeFilter = {
         $or: [
-          {
-            rmId: rmId,
-            $or: [
-              { leadSource: { $in: ["CUSTOMER_DIRECT", "PUBLIC_REFERRAL", "Meta Ads", "DIRECT", "Meta / In-House", "WEBSITE"] } },
-              { partnerId: null },
-              { partnerId: { $exists: false } },
-            ],
-          },
+          { rmId: rmId },
           { partnerId: { $in: partnerIds } },
         ],
       };
