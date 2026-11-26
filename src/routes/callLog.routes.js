@@ -1,4 +1,5 @@
 import { Router } from "express";
+import mongoose from "mongoose";
 import { auth } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { ROLES } from "../config/roles.js";
@@ -102,41 +103,46 @@ router.post(
         source,
       });
 
-      // Auto-update assigned calling sheet for this RM if contact exists in sheet
+      // Auto-update all assigned calling sheets for this RM where this phone exists
       try {
-        const activeAssignment = await RmCallingAssignment.findOne({
+        const rmAssignments = await RmCallingAssignment.find({
           rmId: rmUser._id,
           "contacts.phone": cleanPhone,
         });
 
-        if (activeAssignment) {
+        for (const activeAssignment of rmAssignments) {
           let contactUpdated = false;
 
           for (const c of activeAssignment.contacts) {
             if (c.phone === cleanPhone) {
               c.callCount = (c.callCount || 0) + 1;
-              c.lastCallTime = new Date();
+              c.lastCallTime = callStartTime ? new Date(callStartTime) : new Date();
               c.lastCallDuration = duration;
               c.lastCallType = callType;
               c.isVerified = isVerifiedRealCall;
 
               if (isVerifiedRealCall) {
-                c.status = "CONNECTED";
+                if (!c.status || c.status === "PENDING" || c.status === "UNANSWERED" || c.status === "RINGING") {
+                  c.status = "CONNECTED";
+                }
               } else if (callType === "MISSED") {
-                c.status = "CALL_BACK";
-              } else if (c.status === "PENDING") {
+                if (!c.status || c.status === "PENDING") {
+                  c.status = "CALL_BACK";
+                }
+              } else if (!c.status || c.status === "PENDING") {
                 c.status = "UNANSWERED";
               }
 
               contactUpdated = true;
-              break;
             }
           }
 
           if (contactUpdated) {
             const total = activeAssignment.contacts.length;
-            const called = activeAssignment.contacts.filter((c) => c.status !== "PENDING").length;
-            const connected = activeAssignment.contacts.filter((c) => c.status === "CONNECTED").length;
+            const called = activeAssignment.contacts.filter((c) => c.status && c.status !== "PENDING").length;
+            const connected = activeAssignment.contacts.filter((c) =>
+              ["CONNECTED", "INTERESTED", "DOCUMENTS_PENDING"].includes(c.status)
+            ).length;
             const pending = total - called;
             const totalTalkTime = activeAssignment.contacts.reduce((acc, c) => acc + (c.lastCallDuration || 0), 0);
 
@@ -798,9 +804,18 @@ router.patch(
   async (req, res) => {
     try {
       const { assignmentId, contactPhone, status, notes, callType = "OUTGOING", durationSeconds = 0 } = req.body;
+      const cleanPhone = normalizePhoneToTen(contactPhone) || String(contactPhone || "").trim();
+      const rmId = req.user?.sub || req.user?._id;
       const dur = Math.max(0, parseInt(durationSeconds, 10) || 0);
-      const isConnected = status === "CONNECTED";
+      const isConnected = ["CONNECTED", "INTERESTED", "DOCUMENTS_PENDING"].includes(status);
       const finalDuration = dur > 0 ? dur : (isConnected ? 60 : 0);
+
+      let rmName = `${req.user?.firstName || ""} ${req.user?.lastName || ""}`.trim() || req.user?.name || "";
+      if (!rmName && rmId) {
+        const rmDoc = await User.findById(rmId).select("firstName lastName name").lean();
+        if (rmDoc) rmName = `${rmDoc.firstName || ""} ${rmDoc.lastName || ""}`.trim() || rmDoc.name || "RM";
+      }
+      if (!rmName) rmName = "RM";
 
       let assignment = null;
       if (assignmentId && mongoose.Types.ObjectId.isValid(assignmentId)) {
@@ -811,7 +826,7 @@ router.patch(
         // Check if there is an Application with this phone
         const app = await Application.findOne(
           activeApplicationsFilter({
-            "customer.phone": contactPhone,
+            "customer.phone": cleanPhone,
           })
         );
         if (app) {
@@ -819,14 +834,14 @@ router.patch(
             status: status || "CONNECTED",
             remarks: notes || "",
             lastContactedAt: new Date(),
-            updatedBy: req.user._id,
+            updatedBy: rmId,
           };
           await app.save();
 
           await CallLog.create({
-            rmId: req.user._id,
-            rmName: `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() || req.user.name || "RM",
-            targetPhone: contactPhone,
+            rmId,
+            rmName,
+            targetPhone: cleanPhone,
             targetName:
               [app.customer?.firstName, app.customer?.lastName].filter(Boolean).join(" ") ||
               app.customer?.name ||
@@ -835,22 +850,22 @@ router.patch(
             callType: ["INCOMING", "OUTGOING", "MISSED"].includes(callType) ? callType : "OUTGOING",
             callStartTime: new Date(),
             durationSeconds: finalDuration,
-            isVerifiedRealCall: isConnected,
+            isVerifiedRealCall: isConnected || finalDuration > 0,
             notes: notes || "",
-            source: "rm_mobile_app",
+            source: "web_crm",
             applicationId: app._id,
           }).catch((e) => console.warn("Auto CallLog sync error:", e?.message));
 
           return res.json({
             success: true,
             message: "Application lead follow-up updated",
-            contact: { phone: contactPhone, status, notes },
+            contact: { phone: cleanPhone, status, notes },
           });
         }
         return res.status(404).json({ message: "Assignment not found" });
       }
 
-      const contact = assignment.contacts.find((c) => c.phone === contactPhone);
+      const contact = assignment.contacts.find((c) => normalizePhoneToTen(c.phone) === cleanPhone || c.phone === contactPhone);
       if (!contact) return res.status(404).json({ message: "Contact not found in sheet" });
 
       if (status) contact.status = status;
@@ -859,14 +874,18 @@ router.patch(
       contact.lastCallDuration = finalDuration;
       contact.lastCallTime = new Date();
       contact.callCount = (contact.callCount || 0) + 1;
-      contact.isVerified = isConnected;
+      contact.isVerified = isConnected || finalDuration > 0;
 
       const total = assignment.contacts.length;
-      const called = assignment.contacts.filter((c) => c.status !== "PENDING").length;
-      const connected = assignment.contacts.filter((c) => c.status === "CONNECTED").length;
+      const called = assignment.contacts.filter((c) => c.status && c.status !== "PENDING").length;
+      const connected = assignment.contacts.filter((c) =>
+        ["CONNECTED", "INTERESTED", "DOCUMENTS_PENDING"].includes(c.status)
+      ).length;
       const pending = total - called;
       const totalTalkTime = assignment.contacts.reduce((acc, c) => acc + (c.lastCallDuration || 0), 0);
 
+      assignment.stats = assignment.stats || {};
+      assignment.stats.total = total;
       assignment.stats.called = called;
       assignment.stats.connected = connected;
       assignment.stats.pending = pending;
@@ -874,18 +893,45 @@ router.patch(
 
       await assignment.save();
 
+      // Sync same status to any other calling sheets or application with this phone for this RM
+      await RmCallingAssignment.updateMany(
+        { _id: { $ne: assignment._id }, rmId: assignment.rmId, "contacts.phone": cleanPhone },
+        {
+          $set: {
+            "contacts.$.status": contact.status,
+            "contacts.$.notes": contact.notes,
+            "contacts.$.lastCallTime": contact.lastCallTime,
+            "contacts.$.lastCallDuration": contact.lastCallDuration,
+            "contacts.$.lastCallType": contact.lastCallType,
+            "contacts.$.isVerified": contact.isVerified,
+          },
+        }
+      ).catch(() => {});
+
+      await Application.updateMany(
+        activeApplicationsFilter({ "customer.phone": cleanPhone, rmId: assignment.rmId }),
+        {
+          $set: {
+            "leadFollowUp.status": contact.status,
+            "leadFollowUp.remarks": contact.notes,
+            "leadFollowUp.lastContactedAt": contact.lastCallTime,
+            "leadFollowUp.updatedBy": rmId,
+          },
+        }
+      ).catch(() => {});
+
       // Automatically log CallLog entry for live audit & target tracking
       if (status && status !== "PENDING") {
         await CallLog.create({
-          rmId: req.user._id,
-          rmName: `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() || req.user.name || "RM",
-          targetPhone: contactPhone,
+          rmId: rmId || assignment.rmId,
+          rmName,
+          targetPhone: cleanPhone,
           targetName: contact.name || "Customer",
           contactType: contact.contactType || "customer",
           callType: contact.lastCallType,
           callStartTime: new Date(),
           durationSeconds: finalDuration,
-          isVerifiedRealCall: isConnected,
+          isVerifiedRealCall: isConnected || finalDuration > 0,
           notes: notes || "",
           source: "web_crm",
         }).catch((e) => console.warn("Auto CallLog sync error:", e?.message));
@@ -894,7 +940,7 @@ router.patch(
       return res.json({ success: true, message: "Contact status updated", contact });
     } catch (err) {
       console.error("Failed to update contact status:", err);
-      return res.status(500).json({ message: "Failed to update contact status" });
+      return res.status(500).json({ message: err.message || "Failed to update contact status" });
     }
   }
 );

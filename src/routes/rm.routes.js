@@ -36,6 +36,7 @@ import { FollowUp } from "../models/followUp.js";
 import { CallLog } from "../models/CallLog.js";
 import { RmCallingAssignment } from "../models/RmCallingAssignment.js";
 import { inferLoanTypeFromText } from "../utils/metaLeadSheet.js";
+import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import dayjs from "dayjs";
 import {
   parseFollowUpPeriod,
@@ -1280,30 +1281,54 @@ router.get(
             assignmentType: "CUSTOMER",
           }).lean();
 
-      // Collect all phones
+      // Collect all phones & variants (+91, 91, 0, 10-digit)
       const phones = new Set();
+      const phoneVariants = new Set();
+      const addPhone = (raw) => {
+        const clean = normalizePhoneToTen(raw);
+        if (clean && clean.length === 10) {
+          phones.add(clean);
+          phoneVariants.add(clean);
+          phoneVariants.add(`+91${clean}`);
+          phoneVariants.add(`91${clean}`);
+          phoneVariants.add(`0${clean}`);
+        } else if (raw) {
+          phoneVariants.add(String(raw).trim());
+        }
+      };
+
       applications.forEach((app) => {
-        if (app.customer?.phone) phones.add(app.customer.phone);
-        if (app.customer?.alternatePhone) phones.add(app.customer.alternatePhone);
+        if (app.customer?.phone) addPhone(app.customer.phone);
+        if (app.customer?.alternatePhone) addPhone(app.customer.alternatePhone);
       });
       callingAssignments.forEach((sheet) => {
         sheet.contacts?.forEach((c) => {
-          if (c.phone) phones.add(c.phone);
+          if (c.phone) addPhone(c.phone);
         });
       });
 
-      // 4. Fetch latest CallLogs for these phones by this RM
+      // 4. Fetch latest CallLogs for these phones by this RM (prefer verified / non-zero duration when timestamps match)
       const callLogs = await CallLog.find({
         rmId,
-        targetPhone: { $in: Array.from(phones) },
+        targetPhone: { $in: Array.from(phoneVariants) },
       })
         .sort({ callStartTime: -1 })
         .lean();
 
       const callLogMap = new Map();
       for (const log of callLogs) {
-        if (!callLogMap.has(log.targetPhone)) {
-          callLogMap.set(log.targetPhone, log);
+        const clean = normalizePhoneToTen(log.targetPhone) || String(log.targetPhone || "").trim();
+        if (!clean) continue;
+        const existing = callLogMap.get(clean);
+        if (!existing) {
+          callLogMap.set(clean, log);
+        } else if (
+          (!existing.isVerifiedRealCall && existing.durationSeconds === 0) &&
+          (log.isVerifiedRealCall || log.durationSeconds > 0) &&
+          new Date(existing.callStartTime).toDateString() === new Date(log.callStartTime).toDateString()
+        ) {
+          // Prefer a real verified call over a 0s web_manual placeholder from the same day
+          callLogMap.set(clean, log);
         }
       }
 
@@ -1384,8 +1409,28 @@ router.get(
           // Skip sheet contacts whose loan form is already completely filled/submitted
           if (appMatch?.isFilled) continue;
 
-          const lastCallLog = callLogMap.get(c.phone) || null;
-          const contactStatus = c.status || (lastCallLog ? lastCallLog.callType : "PENDING");
+          const cleanContactPhone = normalizePhoneToTen(c.phone) || c.phone;
+          const lastCallLog = callLogMap.get(cleanContactPhone) || null;
+          const derivedFromCall = lastCallLog
+            ? (lastCallLog.isVerifiedRealCall || lastCallLog.durationSeconds > 0
+                ? "CONNECTED"
+                : lastCallLog.callType === "MISSED"
+                ? "CALL_BACK"
+                : "UNANSWERED")
+            : "PENDING";
+          const contactStatus =
+            c.status && c.status !== "PENDING"
+              ? c.status
+              : appMatch?.followUpStatus && appMatch.followUpStatus !== "NEW"
+              ? appMatch.followUpStatus
+              : derivedFromCall;
+
+          const latestTime = lastCallLog?.callStartTime && (!c.lastCallTime || new Date(lastCallLog.callStartTime) >= new Date(c.lastCallTime))
+            ? lastCallLog.callStartTime
+            : (c.lastCallTime || lastCallLog?.callStartTime || null);
+          const latestDur = (lastCallLog?.durationSeconds > 0 ? lastCallLog.durationSeconds : c.lastCallDuration) || lastCallLog?.durationSeconds || 0;
+          const latestType = lastCallLog?.callType || c.lastCallType || "";
+          const latestVerified = Boolean(lastCallLog?.isVerifiedRealCall || c.isVerified);
 
           sheetItems.push({
             id: String(c._id),
@@ -1393,7 +1438,7 @@ router.get(
             appNo: appMatch?.appNo || "SHEET_LEAD",
             type: "CALLING_SHEET_LEAD",
             customerName: c.name || "Sheet Lead",
-            phone: c.phone,
+            phone: cleanContactPhone,
             email: "",
             city: c.city || "",
             loanType: c.loanType || inferredType || appMatch?.loanType || "General Lead",
@@ -1410,11 +1455,11 @@ router.get(
             pendingDocsCount: appMatch?.pendingDocsCount || 0,
             followUpStatus: contactStatus,
             remarks: c.notes || appMatch?.remarks || "",
-            nextFollowUpDate: appMatch?.nextFollowUpDate || null,
-            lastCallTime: lastCallLog?.callStartTime || c.lastCallTime || null,
-            lastCallDuration: lastCallLog?.durationSeconds || c.lastCallDuration || 0,
-            lastCallType: lastCallLog?.callType || c.lastCallType || "",
-            isVerified: lastCallLog?.isVerifiedRealCall || c.isVerified || false,
+            nextFollowUpDate: c.nextFollowUpDate || appMatch?.nextFollowUpDate || null,
+            lastCallTime: latestTime,
+            lastCallDuration: latestDur,
+            lastCallType: latestType,
+            isVerified: latestVerified,
             createdAt: c.createdAt || sheet.createdAt,
           });
         }
@@ -1468,16 +1513,35 @@ router.post(
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { status = "CONNECTED", remarks = "", nextFollowUpDate = null } = req.body;
+      const { status = "CONNECTED", remarks = "", nextFollowUpDate = null, durationSeconds = 0, callType = "OUTGOING" } = req.body;
       const rmId = req.user.sub || req.user._id;
+      const dur = Math.max(0, parseInt(durationSeconds, 10) || 0);
+      const isConnected = ["CONNECTED", "INTERESTED", "DOCUMENTS_PENDING"].includes(status);
 
       const app = await Application.findById(id);
       if (app) {
         if (!app.leadFollowUp) app.leadFollowUp = {};
         app.leadFollowUp.status = status;
         app.leadFollowUp.remarks = remarks;
-        app.leadFollowUp.updatedAt = new Date();
+        app.leadFollowUp.lastContactedAt = new Date();
+        app.leadFollowUp.updatedBy = rmId;
         await app.save();
+
+        const cleanAppPhone = normalizePhoneToTen(app.customer?.phone);
+        if (cleanAppPhone) {
+          await RmCallingAssignment.updateMany(
+            { rmId, "contacts.phone": cleanAppPhone },
+            {
+              $set: {
+                "contacts.$.status": status,
+                "contacts.$.notes": remarks,
+                "contacts.$.lastCallTime": new Date(),
+                ...(dur > 0 ? { "contacts.$.lastCallDuration": dur, "contacts.$.isVerified": true } : {}),
+                ...(nextFollowUpDate ? { "contacts.$.nextFollowUpDate": new Date(nextFollowUpDate) } : {}),
+              },
+            }
+          ).catch(() => {});
+        }
 
         const followUp = await FollowUp.create({
           applicationId: app._id,
@@ -1501,10 +1565,81 @@ router.post(
       if (assignment) {
         const contact = assignment.contacts.id(id);
         if (contact) {
+          const cleanPhone = normalizePhoneToTen(contact.phone) || contact.phone;
           contact.status = status;
           contact.notes = remarks;
           contact.lastCallTime = new Date();
+          contact.callCount = (contact.callCount || 0) + 1;
+          if (dur > 0) {
+            contact.lastCallDuration = dur;
+            contact.isVerified = true;
+          } else if (isConnected && !contact.lastCallDuration) {
+            contact.lastCallDuration = 60;
+          }
+          if (callType) contact.lastCallType = callType;
+          if (nextFollowUpDate) contact.nextFollowUpDate = new Date(nextFollowUpDate);
+
+          const total = assignment.contacts.length;
+          const called = assignment.contacts.filter((c) => c.status && c.status !== "PENDING").length;
+          const connected = assignment.contacts.filter((c) =>
+            ["CONNECTED", "INTERESTED", "DOCUMENTS_PENDING"].includes(c.status)
+          ).length;
+          assignment.stats = assignment.stats || {};
+          assignment.stats.total = total;
+          assignment.stats.called = called;
+          assignment.stats.connected = connected;
+          assignment.stats.pending = Math.max(0, total - called);
+          assignment.stats.totalTalkTimeSeconds = assignment.contacts.reduce(
+            (acc, c) => acc + (c.lastCallDuration || 0),
+            0
+          );
+
           await assignment.save();
+
+          // Sync across other calling sheets & matching Applications so every screen stays identical
+          await RmCallingAssignment.updateMany(
+            { _id: { $ne: assignment._id }, rmId: assignment.rmId, "contacts.phone": cleanPhone },
+            {
+              $set: {
+                "contacts.$.status": contact.status,
+                "contacts.$.notes": contact.notes,
+                "contacts.$.lastCallTime": contact.lastCallTime,
+                "contacts.$.lastCallDuration": contact.lastCallDuration,
+                "contacts.$.isVerified": contact.isVerified,
+              },
+            }
+          ).catch(() => {});
+
+          await Application.updateMany(
+            activeApplicationsFilter({ "customer.phone": cleanPhone, rmId: assignment.rmId }),
+            {
+              $set: {
+                "leadFollowUp.status": contact.status,
+                "leadFollowUp.remarks": contact.notes,
+                "leadFollowUp.lastContactedAt": contact.lastCallTime,
+                "leadFollowUp.updatedBy": rmId,
+              },
+            }
+          ).catch(() => {});
+
+          if (dur > 0 || status !== "PENDING") {
+            const rmDoc = await User.findById(rmId).select("firstName lastName name").lean();
+            const rmName = rmDoc ? `${rmDoc.firstName || ""} ${rmDoc.lastName || ""}`.trim() || rmDoc.name : "RM";
+            await CallLog.create({
+              rmId,
+              rmName,
+              targetPhone: cleanPhone,
+              targetName: contact.name || "Customer",
+              contactType: contact.contactType || "customer",
+              callType: ["INCOMING", "OUTGOING", "MISSED"].includes(callType) ? callType : "OUTGOING",
+              callStartTime: new Date(),
+              durationSeconds: contact.lastCallDuration || 0,
+              isVerifiedRealCall: Boolean(contact.isVerified),
+              notes: remarks || "",
+              source: "web_crm",
+            }).catch(() => {});
+          }
+
           return res.json({
             success: true,
             message: "Calling sheet contact updated successfully",
