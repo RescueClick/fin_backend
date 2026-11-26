@@ -158,7 +158,48 @@ export function normalizeSheetText(raw) {
   return text.replace(/^\uFEFF/, "").trim();
 }
 
-export function parseMetaLeadSheet(rawText) {
+export function inferLoanTypeFromText(text) {
+  const s = String(text || "").toLowerCase();
+  if (!s) return "";
+  if (s.includes("personal") || /\bpl\b/.test(s)) return "Personal Loan";
+  if (s.includes("business") || /\bbl\b/.test(s) || s.includes("msme") || s.includes("udyam")) return "Business Loan";
+  if (s.includes("lap") || s.includes("mortgage") || s.includes("property")) return "LAP / Mortgage";
+  if (s.includes("home") || /\bhl\b/.test(s) || s.includes("housing")) return "Home Loan";
+  if (s.includes("education")) return "Education Loan";
+  if (s.includes("car") || s.includes("auto") || s.includes("vehicle")) return "Vehicle Loan";
+  if (s.includes("gold")) return "Gold Loan";
+  return "";
+}
+
+export function formatMetaText(val) {
+  return String(val || "").replace(/_/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export function parseSheetNumber(val) {
+  if (val === null || val === undefined || val === "") return 0;
+  if (typeof val === "number" && Number.isFinite(val)) return Math.max(0, Math.round(val));
+  const raw = formatMetaText(val).toLowerCase();
+  if (!raw) return 0;
+  // Handle "5 lakh", "5 lac", "3.5l"
+  const lakhMatch = raw.match(/([\d.]+)\s*(?:lakh|lac|l)\b/i);
+  if (lakhMatch) {
+    const n = parseFloat(lakhMatch[1]);
+    return Number.isFinite(n) ? Math.round(n * 100000) : 0;
+  }
+  // Handle "50k"
+  const kMatch = raw.match(/([\d.]+)\s*k\b/i);
+  if (kMatch) {
+    const n = parseFloat(kMatch[1]);
+    return Number.isFinite(n) ? Math.round(n * 1000) : 0;
+  }
+  const cleaned = raw.replace(/rs\.?/gi, "").replace(/[₹,\s]/g, "");
+  const numMatch = cleaned.match(/\d+(?:\.\d+)?/);
+  if (!numMatch) return 0;
+  const n = parseFloat(numMatch[0]);
+  return Number.isFinite(n) ? Math.round(n) : 0;
+}
+
+export function parseMetaLeadSheet(rawText, fileName = "") {
   const text = normalizeSheetText(rawText);
   if (!text) {
     const error = new Error("The sheet is empty.");
@@ -195,13 +236,66 @@ export function parseMetaLeadSheet(rawText) {
     const name = pickName(record);
     if (!phone || phone.length < 10) continue;
 
+    const rawLoanType = pick(record, [
+      "required_loan_type",
+      "loan_type",
+      "type_of_loan",
+      "loan_category",
+      "loan_product",
+      "product",
+      "purpose_of_loan",
+      "loan_requirement",
+      "which_loan_do_you_need",
+    ]);
+    const campaignFallback =
+      record["campaign_name"] || record["adset_name"] || record["form_name"] || fileName || "";
+    const metaLoanType = rawLoanType || inferLoanTypeFromText(campaignFallback) || "";
+
+    const rawLoanAmount = pick(record, [
+      "required_loan_amount",
+      "loan_amount",
+      "required_amount",
+      "how_much_personal_loan_do_you_need",
+      "how_much_business_loan_do_you_need",
+      "how_much_home_loan_do_you_need",
+      "how_much_loan_do_you_need",
+      "how_much_loan",
+      "loan_do_you_need",
+      "amount",
+      "loan_required",
+      "loan_requirement_amount",
+      "budget",
+    ]);
+    const loanAmount = parseSheetNumber(rawLoanAmount);
+    const metaLoanAmount = formatMetaText(rawLoanAmount) || (loanAmount ? String(loanAmount) : "");
+
+    const rawSalary = pick(record, [
+      "real_salary",
+      "monthly_salary",
+      "what_is_your_monthly_income",
+      "what_is_your_monthly_salary",
+      "net_salary",
+      "in_hand_salary",
+      "take_home_salary",
+      "monthly_income",
+      "net_monthly_income",
+      "monthly_take_home",
+      "salary",
+      "income",
+    ]);
+    const salary = parseSheetNumber(rawSalary);
+    const metaSalary = formatMetaText(rawSalary) || (salary ? String(salary) : "");
+
     leads.push({
       name,
       phone,
       email: pick(record, ["email", "email_address", "mail"]),
       city: pick(record, ["city", "city_town", "location", "district"]),
-      metaLoanType: pick(record, ["required_loan_type", "loan_type", "type_of_loan"]),
-      metaLoanAmount: pick(record, ["required_loan_amount", "loan_amount", "amount"]),
+      metaLoanType,
+      metaLoanAmount,
+      loanAmount,
+      metaSalary,
+      salary,
       createdTime: pick(record, ["created_time", "created_at", "created", "date"]),
       rawMeta,
     });
@@ -305,6 +399,9 @@ export function matchMetaLeadsToSystem(leads, applications = [], users = []) {
       city: lead.city || "",
       metaLoanType: lead.metaLoanType || "",
       metaLoanAmount: lead.metaLoanAmount || "",
+      loanAmount: Number(lead.loanAmount || 0) || 0,
+      metaSalary: lead.metaSalary || "",
+      salary: Number(lead.salary || 0) || 0,
       createdTime: lead.createdTime || "",
       systemStatus,
       filled,

@@ -2369,7 +2369,7 @@ router.post(
   async (req, res) => {
     try {
       const { csvText, fileName = "meta_leads.csv", saveAudit = true } = req.body || {};
-      const leads = parseMetaLeadSheet(csvText);
+      const leads = parseMetaLeadSheet(csvText, fileName);
       const phones = leads.map((l) => l.phone).filter(Boolean);
 
       // Fetch active applications matching phones

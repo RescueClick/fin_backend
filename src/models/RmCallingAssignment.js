@@ -14,6 +14,10 @@ const callingContactSchema = new mongoose.Schema(
     applicationId: { type: mongoose.Schema.Types.ObjectId, ref: "Application", default: null },
     city: { type: String, default: "", trim: true },
     loanType: { type: String, default: "", trim: true },
+    loanAmount: { type: Number, default: 0 },
+    loanAmountText: { type: String, default: "", trim: true },
+    salary: { type: Number, default: 0 },
+    salaryText: { type: String, default: "", trim: true },
     leadSource: { type: String, default: "Meta Ads", trim: true },
     status: {
       type: String,

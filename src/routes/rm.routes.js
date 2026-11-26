@@ -35,6 +35,7 @@ import { s3, BUCKET_NAME } from "../config/s3.js";
 import { FollowUp } from "../models/followUp.js";
 import { CallLog } from "../models/CallLog.js";
 import { RmCallingAssignment } from "../models/RmCallingAssignment.js";
+import { inferLoanTypeFromText } from "../utils/metaLeadSheet.js";
 import dayjs from "dayjs";
 import {
   parseFollowUpPeriod,
@@ -1322,7 +1323,8 @@ router.get(
         }
       }
 
-      const items = [];
+      const applicationItems = [];
+      const appByPhone = new Map();
 
       for (const app of applications) {
         const phone = app.customer?.phone || "";
@@ -1335,7 +1337,7 @@ router.get(
         const isFilled = app.status !== "LEAD" && (app.formProgress?.stepIndex >= 6 || app.status === "SUBMITTED" || app.status === "DISBURSED");
         const pendingDocs = (app.uploadedDocuments || []).filter((d) => d.status === "PENDING" || d.status === "REJECTED").length;
 
-        items.push({
+        const appItem = {
           id: String(app._id),
           appNo: app.appNo || "LEAD",
           type: "APPLICATION",
@@ -1345,10 +1347,12 @@ router.get(
           city: app.customer?.city || "",
           loanType: app.loanType || "Loan",
           loanAmount: app.loanAmount || 0,
+          salary: app.customer?.monthlySalary || app.customer?.salary || 0,
           partnerName: pName,
           leadSource: partnerNameFromMap ? `Partner: ${pName}` : (app.leadSource || "Direct Lead"),
           status: app.status || "NEW",
           formStatus: isFilled ? "FILLED" : "INCOMPLETE",
+          isFilled,
           stepIndex: app.formProgress?.stepIndex || 1,
           pendingDocsCount: pendingDocs,
           followUpStatus: appFollowUp?.status || app.leadFollowUp?.status || (lastCallLog ? lastCallLog.callType : "NEW"),
@@ -1359,36 +1363,54 @@ router.get(
           lastCallType: lastCallLog?.callType || "",
           isVerified: lastCallLog?.isVerifiedRealCall || false,
           createdAt: app.createdAt,
-        });
+        };
+
+        applicationItems.push(appItem);
+        if (phone && !appByPhone.has(phone)) {
+          appByPhone.set(phone, appItem);
+        }
       }
 
-      // Merge assigned Meta calling sheet contacts
+      // Build Calling Sheet leads separately (do not bury them under 100+ existing loan files)
+      const sheetItems = [];
+      const seenSheetPhones = new Set();
       for (const sheet of callingAssignments) {
+        const inferredType = inferLoanTypeFromText(sheet.sheetName);
         for (const c of sheet.contacts || []) {
-          const alreadyInApp = items.some((i) => i.phone === c.phone);
-          if (alreadyInApp) continue;
+          if (!c.phone || seenSheetPhones.has(c.phone)) continue;
+          seenSheetPhones.add(c.phone);
+
+          const appMatch = appByPhone.get(c.phone) || null;
+          // Skip sheet contacts whose loan form is already completely filled/submitted
+          if (appMatch?.isFilled) continue;
 
           const lastCallLog = callLogMap.get(c.phone) || null;
+          const contactStatus = c.status || (lastCallLog ? lastCallLog.callType : "PENDING");
 
-          items.push({
+          sheetItems.push({
             id: String(c._id),
-            appNo: "META_LEAD",
+            assignmentId: String(sheet._id),
+            appNo: appMatch?.appNo || "SHEET_LEAD",
             type: "CALLING_SHEET_LEAD",
-            customerName: c.name || "Meta Lead",
+            customerName: c.name || "Sheet Lead",
             phone: c.phone,
             email: "",
             city: c.city || "",
-            loanType: c.loanType || "Personal Loan",
-            loanAmount: 0,
-            partnerName: "Meta Ads (Direct)",
-            leadSource: sheet.sheetName || "Meta Ads Lead",
-            status: "LEAD",
-            formStatus: "NOT_STARTED",
-            stepIndex: 0,
-            pendingDocsCount: 0,
-            followUpStatus: c.status || (lastCallLog ? lastCallLog.callType : "PENDING"),
-            remarks: c.notes || "",
-            nextFollowUpDate: null,
+            loanType: c.loanType || inferredType || appMatch?.loanType || "General Lead",
+            loanAmount: Number(c.loanAmount || appMatch?.loanAmount || 0) || 0,
+            loanAmountText: c.loanAmountText || "",
+            salary: Number(c.salary || appMatch?.salary || 0) || 0,
+            salaryText: c.salaryText || "",
+            partnerName: "Calling Sheet",
+            leadSource: sheet.sheetName || c.leadSource || "Calling Sheet",
+            sheetName: sheet.sheetName || "Calling Sheet",
+            status: appMatch?.status || "LEAD",
+            formStatus: appMatch ? appMatch.formStatus : "NOT_STARTED",
+            stepIndex: appMatch?.stepIndex || 0,
+            pendingDocsCount: appMatch?.pendingDocsCount || 0,
+            followUpStatus: contactStatus,
+            remarks: c.notes || appMatch?.remarks || "",
+            nextFollowUpDate: appMatch?.nextFollowUpDate || null,
             lastCallTime: lastCallLog?.callStartTime || c.lastCallTime || null,
             lastCallDuration: lastCallLog?.durationSeconds || c.lastCallDuration || 0,
             lastCallType: lastCallLog?.callType || c.lastCallType || "",
@@ -1398,27 +1420,38 @@ router.get(
         }
       }
 
-      const total = items.length;
-      const formFilled = items.filter((i) => i.formStatus === "FILLED").length;
-      const formIncomplete = items.filter((i) => i.formStatus !== "FILLED").length;
-      const docsPending = items.filter((i) => i.pendingDocsCount > 0).length;
-
       const todayStr = new Date().toISOString().slice(0, 10);
-      const calledToday = items.filter((i) => {
-        if (!i.lastCallTime) return false;
-        return new Date(i.lastCallTime).toISOString().slice(0, 10) === todayStr;
-      }).length;
+      const isToday = (dt) => dt && new Date(dt).toISOString().slice(0, 10) === todayStr;
+
+      const sheetTotal = sheetItems.length;
+      const sheetPending = sheetItems.filter((i) => i.followUpStatus === "PENDING" || i.followUpStatus === "NEW").length;
+      const sheetConnected = sheetItems.filter((i) => i.followUpStatus === "CONNECTED").length;
+      const sheetCallback = sheetItems.filter((i) => i.followUpStatus === "CALL_BACK" || i.followUpStatus === "CALL_BACK_SCHEDULED").length;
+      const sheetCalledToday = sheetItems.filter((i) => isToday(i.lastCallTime)).length;
+
+      const formFilled = applicationItems.filter((i) => i.formStatus === "FILLED").length;
+      const formIncomplete = applicationItems.filter((i) => i.formStatus !== "FILLED").length;
+      const docsPending = applicationItems.filter((i) => i.pendingDocsCount > 0).length;
+      const calledToday = [...sheetItems, ...applicationItems].filter((i) => isToday(i.lastCallTime)).length;
 
       return res.json({
         success: true,
         summary: {
-          total,
+          total: sheetTotal,
+          sheetTotal,
+          sheetPending,
+          sheetConnected,
+          sheetCallback,
+          sheetCalledToday,
+          appsTotal: applicationItems.length,
           formFilled,
           formIncomplete,
           docsPending,
           calledToday,
         },
-        items,
+        sheetItems,
+        applicationItems,
+        items: sheetItems,
       });
     } catch (err) {
       console.error("Error fetching customer follow-ups:", err);

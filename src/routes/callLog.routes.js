@@ -10,6 +10,7 @@ import { LeadSheetAudit } from "../models/LeadSheetAudit.js";
 import { normalizePhoneToTen } from "../utils/phoneNormalize.js";
 import { activeUsersFilter } from "../utils/activeUsersFilter.js";
 import { activeApplicationsFilter } from "../utils/activeApplicationsFilter.js";
+import { inferLoanTypeFromText, parseSheetNumber } from "../utils/metaLeadSheet.js";
 
 const router = Router();
 
@@ -207,7 +208,11 @@ router.post(
           partnerId: item.partnerId || null,
           customerId: item.customerId || null,
           city: item.city || "",
-          loanType: item.loanType || item.metaLoanType || "",
+          loanType: item.loanType || item.metaLoanType || inferLoanTypeFromText(sheetName) || "",
+          loanAmount: parseSheetNumber(item.loanAmount || item.metaLoanAmount || 0),
+          loanAmountText: String(item.metaLoanAmount || "").trim(),
+          salary: parseSheetNumber(item.salary || item.metaSalary || 0),
+          salaryText: String(item.metaSalary || "").trim(),
           leadSource: item.leadSource || "Meta Ads",
           status: "PENDING",
           notes: item.notes || "",
@@ -300,7 +305,11 @@ router.post(
             partnerId: item.partnerId || null,
             customerId: item.customerId || null,
             city: item.city || "",
-            loanType: item.loanType || item.metaLoanType || "",
+            loanType: item.loanType || item.metaLoanType || inferLoanTypeFromText(sheetName) || "",
+            loanAmount: parseSheetNumber(item.loanAmount || item.metaLoanAmount || 0),
+            loanAmountText: String(item.metaLoanAmount || "").trim(),
+            salary: parseSheetNumber(item.salary || item.metaSalary || 0),
+            salaryText: String(item.metaSalary || "").trim(),
             leadSource: item.leadSource || sheetName || "Meta Ads",
             status: "PENDING",
             notes: item.notes || "",
