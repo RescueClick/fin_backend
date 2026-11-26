@@ -587,6 +587,68 @@ router.get(
         .sort({ date: -1, createdAt: -1 })
         .lean();
 
+      // Merge latest verified CallLog records so Calling Sheet modal always reflects real phone calls
+      try {
+        const sheetPhones = new Set();
+        for (const s of sheets) {
+          for (const c of s.contacts || []) {
+            const clean = normalizePhoneToTen(c.phone);
+            if (clean && clean.length === 10) {
+              sheetPhones.add(clean);
+              sheetPhones.add(`+91${clean}`);
+              sheetPhones.add(`91${clean}`);
+              sheetPhones.add(`0${clean}`);
+            } else if (c.phone) {
+              sheetPhones.add(c.phone);
+            }
+          }
+        }
+        if (sheetPhones.size > 0) {
+          const logs = await CallLog.find({
+            rmId,
+            targetPhone: { $in: Array.from(sheetPhones) },
+          })
+            .sort({ callStartTime: -1 })
+            .lean();
+          const logMap = new Map();
+          for (const log of logs) {
+            const clean = normalizePhoneToTen(log.targetPhone) || log.targetPhone;
+            if (!clean) continue;
+            const existing = logMap.get(clean);
+            if (!existing) {
+              logMap.set(clean, log);
+            } else if (
+              (!existing.isVerifiedRealCall && existing.durationSeconds === 0) &&
+              (log.isVerifiedRealCall || log.durationSeconds > 0) &&
+              new Date(existing.callStartTime).toDateString() === new Date(log.callStartTime).toDateString()
+            ) {
+              logMap.set(clean, log);
+            }
+          }
+          for (const s of sheets) {
+            for (const c of s.contacts || []) {
+              const clean = normalizePhoneToTen(c.phone) || c.phone;
+              const log = logMap.get(clean);
+              if (log) {
+                if (!c.lastCallTime || new Date(log.callStartTime) >= new Date(c.lastCallTime)) {
+                  c.lastCallTime = log.callStartTime;
+                }
+                if (log.durationSeconds > 0 && (!c.lastCallDuration || log.durationSeconds > c.lastCallDuration)) {
+                  c.lastCallDuration = log.durationSeconds;
+                }
+                if (!c.lastCallType) c.lastCallType = log.callType;
+                if (log.isVerifiedRealCall) c.isVerified = true;
+                if ((!c.status || c.status === "PENDING") && (log.isVerifiedRealCall || log.durationSeconds > 0)) {
+                  c.status = "CONNECTED";
+                }
+              }
+            }
+          }
+        }
+      } catch (mergeErr) {
+        console.warn("Could not merge CallLogs into rm-sheet:", mergeErr?.message);
+      }
+
       // Also dynamically surface incoming Online Form Leads & Applications assigned to this RM
       try {
         const partners = await User.find({
